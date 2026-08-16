@@ -1,0 +1,722 @@
+-- NOVA LOCAL COMMAND BAR
+-- Roblox Studio / authorized local-development LocalScript
+-- Plain-text .txt source. Rename to .lua/.luau if desired.
+-- No executor APIs, exploit APIs, remote bypasses, or security circumvention.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local CommandBar = {}
+CommandBar.__index = CommandBar
+
+CommandBar.Version = "1.0.0"
+CommandBar.Enabled = true
+CommandBar.Debug = false
+CommandBar.Verbose = false
+CommandBar.History = {}
+CommandBar.Registry = {}
+CommandBar.Aliases = {}
+CommandBar.SelectedPlayer = LocalPlayer
+CommandBar.SelectedObject = nil
+CommandBar.Started = os.clock()
+
+local function result(ok, message, data)
+	return {
+		ok = ok,
+		message = tostring(message or ""),
+		data = data,
+	}
+end
+
+local function lower(v)
+	return string.lower(tostring(v))
+end
+
+local function split(text)
+	local out = {}
+	local current = ""
+	local quoted = false
+	local quoteChar = nil
+
+	for i = 1, #text do
+		local c = text:sub(i, i)
+		if (c == '"' or c == "'") then
+			if quoted and c == quoteChar then
+				quoted = false
+				quoteChar = nil
+			elseif not quoted then
+				quoted = true
+				quoteChar = c
+			else
+				current ..= c
+			end
+		elseif c == " " or c == "\t" then
+			if quoted then
+				current ..= c
+			elseif #current > 0 then
+				table.insert(out, current)
+				current = ""
+			end
+		else
+			current ..= c
+		end
+	end
+
+	if #current > 0 then
+		table.insert(out, current)
+	end
+
+	return out
+end
+
+local function serialize(value, depth)
+	depth = depth or 0
+	if depth > 3 then
+		return "<depth-limit>"
+	end
+
+	local t = typeof(value)
+	if t ~= "table" then
+		return tostring(value)
+	end
+
+	local parts = {"{"}
+	for k, v in pairs(value) do
+		table.insert(parts, string.rep("  ", depth + 1) ..
+			tostring(k) .. " = " .. serialize(v, depth + 1) .. ",")
+	end
+	table.insert(parts, string.rep("  ", depth) .. "}")
+	return table.concat(parts, "\n")
+end
+
+local function makeSpec(category, name, handler, description, arguments)
+	return {
+		name = name,
+		category = category,
+		description = description or ("Local " .. category .. " command: " .. name),
+		aliases = {},
+		arguments = arguments or {},
+		permissions = {"local"},
+		usage = name .. ((arguments and #arguments > 0) and (" " .. table.concat(arguments, " ")) or ""),
+		examples = {name .. ((arguments and #arguments > 0) and (" " .. table.concat(arguments, " ")) or "")},
+		handler = handler,
+	}
+end
+
+function CommandBar:Register(spec)
+	assert(type(spec) == "table", "command spec must be a table")
+	assert(type(spec.name) == "string", "command name must be a string")
+	assert(type(spec.handler) == "function", "command handler must be a function")
+
+	local key = lower(spec.name)
+	assert(self.Registry[key] == nil, "duplicate command: " .. key)
+
+	self.Registry[key] = spec
+
+	for _, alias in ipairs(spec.aliases or {}) do
+		self.Aliases[lower(alias)] = key
+	end
+end
+
+function CommandBar:Get(name)
+	local key = lower(name)
+	if self.Registry[key] then
+		return self.Registry[key]
+	end
+
+	local alias = self.Aliases[key]
+	if alias then
+		return self.Registry[alias]
+	end
+
+	return nil
+end
+
+function CommandBar:Autocomplete(prefix)
+	prefix = lower(prefix or "")
+	local found = {}
+
+	for name in pairs(self.Registry) do
+		if name:sub(1, #prefix) == prefix then
+			table.insert(found, name)
+		end
+	end
+
+	for alias in pairs(self.Aliases) do
+		if alias:sub(1, #prefix) == prefix then
+			table.insert(found, alias)
+		end
+	end
+
+	table.sort(found)
+	return found
+end
+
+function CommandBar:ResolvePlayers(selector)
+	selector = lower(selector or "me")
+	local players = Players:GetPlayers()
+
+	if selector == "me" or selector == "selected" then
+		return {self.SelectedPlayer or LocalPlayer}
+	end
+
+	if selector == "all" then
+		return players
+	end
+
+	if selector == "others" then
+		local out = {}
+		for _, player in ipairs(players) do
+			if player ~= LocalPlayer then
+				table.insert(out, player)
+			end
+		end
+		return out
+	end
+
+	if selector == "random" then
+		if #players == 0 then
+			return {}
+		end
+		return {players[math.random(1, #players)]}
+	end
+
+	local exact = {}
+	for _, player in ipairs(players) do
+		if lower(player.Name) == selector
+			or lower(player.DisplayName) == selector then
+			table.insert(exact, player)
+		end
+	end
+
+	if #exact > 0 then
+		return exact
+	end
+
+	local partial = {}
+	for _, player in ipairs(players) do
+		if string.find(lower(player.Name), selector, 1, true)
+			or string.find(lower(player.DisplayName), selector, 1, true) then
+			table.insert(partial, player)
+		end
+	end
+
+	return partial
+end
+
+function CommandBar:ResolveObject(selector)
+	if not selector or selector == "" then
+		return self.SelectedObject
+	end
+
+	if selector == "selected" then
+		return self.SelectedObject
+	end
+
+	local current = Workspace
+
+	for segment in string.gmatch(selector, "[^%.]+") do
+		local nextObject = current:FindFirstChild(segment)
+		if not nextObject then
+			current = nil
+			break
+		end
+		current = nextObject
+	end
+
+	if current then
+		return current
+	end
+
+	local direct = Workspace:FindFirstChild(selector, true)
+	return direct
+end
+
+function CommandBar:Execute(input, recordHistory)
+	input = tostring(input or "")
+	if input:match("^%s*$") then
+		return result(false, "Empty command.")
+	end
+
+	if not self.Enabled then
+		local commandName = split(input)[1]
+		if lower(commandName) ~= "enable" then
+			return result(false, "Command bar is disabled.")
+		end
+	end
+
+	local tokens = split(input)
+	local name = table.remove(tokens, 1)
+	local spec = self:Get(name)
+
+	if not spec then
+		local suggestions = self:Autocomplete(name)
+		local text = "Unknown command: " .. tostring(name)
+		if #suggestions > 0 then
+			text ..= " Suggestions: " .. table.concat(suggestions, ", ")
+		end
+		return result(false, text)
+	end
+
+	local required = 0
+	for _, argument in ipairs(spec.arguments) do
+		if argument:sub(1, 1) == "<" then
+			required += 1
+		end
+	end
+
+	if #tokens < required then
+		return result(false, "Usage: " .. spec.usage)
+	end
+
+	if recordHistory ~= false then
+		table.insert(self.History, input)
+		if #self.History > 500 then
+			table.remove(self.History, 1)
+		end
+	end
+
+	local started = os.clock()
+	local ok, response = pcall(spec.handler, self, tokens)
+
+	if not ok then
+		warn("[Nova] Command error:", response)
+		return result(false, "Command failed safely: " .. tostring(response))
+	end
+
+	local elapsed = (os.clock() - started) * 1000
+
+	if type(response) ~= "table" or response.ok == nil then
+		response = result(true, tostring(response))
+	end
+
+	if self.Verbose then
+		response.message ..= string.format(" (%.3f ms)", elapsed)
+	end
+
+	if self.Debug then
+		print(string.format("[Nova][DEBUG] %s %.3f ms", spec.name, elapsed))
+	end
+
+	return response
+end
+
+function CommandBar:Print(response)
+	if response.data ~= nil then
+		print("[Nova] " .. response.message, response.data)
+	else
+		print("[Nova] " .. response.message)
+	end
+end
+
+-- Core handlers
+local function help(self, args)
+	if not args[1] then
+		return result(true, "Registered commands: " .. tostring(self:Count()))
+	end
+
+	local spec = self:Get(args[1])
+	if not spec then
+		return result(false, "Unknown command: " .. args[1])
+	end
+
+	return result(true, spec.description, {
+		name = spec.name,
+		category = spec.category,
+		aliases = spec.aliases,
+		arguments = spec.arguments,
+		permissions = spec.permissions,
+		usage = spec.usage,
+		examples = spec.examples,
+	})
+end
+
+local function commands(self, args)
+	local selectedCategory = args[1] and lower(args[1])
+	local groups = {}
+	local count = 0
+
+	for _, spec in pairs(self.Registry) do
+		if not selectedCategory or lower(spec.category) == selectedCategory then
+			groups[spec.category] = groups[spec.category] or {}
+			table.insert(groups[spec.category], spec.name)
+			count += 1
+		end
+	end
+
+	for _, list in pairs(groups) do
+		table.sort(list)
+	end
+
+	return result(true, count .. " command registrations.", groups)
+end
+
+local function history(self)
+	return result(true, #self.History .. " history entries.", self.History)
+end
+
+local function repeatCommand(self, args)
+	local index = tonumber(args[1] or "")
+	if not index or not self.History[index] then
+		return result(false, "Usage: repeat <history-number>")
+	end
+	return self:Execute(self.History[index], false)
+end
+
+local function echo(_, args)
+	return result(true, table.concat(args, " "))
+end
+
+local function version(self)
+	return result(true, self.Version)
+end
+
+local function status(self)
+	return result(true, "Operational.", {
+		version = self.Version,
+		commands = self:Count(),
+		history = #self.History,
+		enabled = self.Enabled,
+		debug = self.Debug,
+		verbose = self.Verbose,
+		uptime = os.clock() - self.Started,
+	})
+end
+
+local function enable(self)
+	self.Enabled = true
+	return result(true, "Command bar enabled.")
+end
+
+local function disable(self)
+	self.Enabled = false
+	return result(true, "Command bar disabled.")
+end
+
+local function toggle(self, args)
+	local setting = lower(args[1] or "")
+	if setting == "debug" then
+		self.Debug = not self.Debug
+		return result(true, "debug=" .. tostring(self.Debug))
+	elseif setting == "verbose" then
+		self.Verbose = not self.Verbose
+		return result(true, "verbose=" .. tostring(self.Verbose))
+	end
+	return result(false, "Usage: toggle <debug|verbose>")
+end
+
+local function players(self)
+	local data = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		table.insert(data, {
+			name = player.Name,
+			displayName = player.DisplayName,
+			userId = player.UserId,
+			team = player.Team and player.Team.Name or nil,
+		})
+	end
+	return result(true, #data .. " player(s).", data)
+end
+
+local function me(self)
+	return result(true, "Local player.", {
+		name = LocalPlayer.Name,
+		displayName = LocalPlayer.DisplayName,
+		userId = LocalPlayer.UserId,
+	})
+end
+
+local function selectPlayer(self, args)
+	local target = self:ResolvePlayers(args[1] or "me")
+	if #target == 0 then
+		return result(false, "No matching local player.")
+	end
+	self.SelectedPlayer = target[1]
+	return result(true, "Selected " .. target[1].Name .. ".")
+end
+
+local function deselect(self)
+	self.SelectedPlayer = LocalPlayer
+	self.SelectedObject = nil
+	return result(true, "Selections cleared.")
+end
+
+local function inspectPlayer(self, args)
+	local target = self:ResolvePlayers(args[1] or "me")
+	if #target == 0 then
+		return result(false, "No matching player.")
+	end
+
+	local data = {}
+	for _, player in ipairs(target) do
+		table.insert(data, {
+			name = player.Name,
+			displayName = player.DisplayName,
+			userId = player.UserId,
+			accountAge = player.AccountAge,
+			team = player.Team and player.Team.Name or nil,
+		})
+	end
+
+	return result(true, "Player inspection.", data)
+end
+
+local function findObject(self, args)
+	local query = table.concat(args, " ")
+	if query == "" then
+		return result(false, "Usage: find <name>")
+	end
+
+	local found = {}
+	for _, object in ipairs(Workspace:GetDescendants()) do
+		if lower(object.Name):find(lower(query), 1, true)
+			or lower(object.ClassName) == lower(query) then
+			table.insert(found, object:GetFullName())
+			if #found >= 100 then
+				break
+			end
+		end
+	end
+
+	return result(true, #found .. " object(s) found.", found)
+end
+
+local function inspectObject(self, args)
+	local object = self:ResolveObject(args[1])
+	if not object then
+		return result(false, "Object not found.")
+	end
+
+	self.SelectedObject = object
+
+	return result(true, object:GetFullName(), {
+		name = object.Name,
+		className = object.ClassName,
+		fullName = object:GetFullName(),
+		parent = object.Parent and object.Parent:GetFullName() or nil,
+		attributes = object:GetAttributes(),
+	})
+end
+
+local function getAttribute(self, args)
+	local object = self:ResolveObject(args[1])
+	if not object then
+		return result(false, "Object not found.")
+	end
+
+	local name = args[2]
+	if not name then
+		return result(false, "Usage: getattribute <object> <name>")
+	end
+
+	local value = object:GetAttribute(name)
+	if value == nil then
+		return result(false, "Attribute not found: " .. name)
+	end
+
+	return result(true, name .. "=" .. tostring(value))
+end
+
+local function setAttribute(self, args)
+	local object = self:ResolveObject(args[1])
+	if not object then
+		return result(false, "Object not found.")
+	end
+
+	local name = args[2]
+	if not name or not args[3] then
+		return result(false, "Usage: setattribute <object> <name> <value>")
+	end
+
+	local value = table.concat(args, " ", 3)
+	object:SetAttribute(name, value)
+
+	return result(true, "Attribute set.")
+end
+
+local function serverInfo()
+	return result(true, "Local client session.", {
+		runServiceClient = RunService:IsClient(),
+		studio = RunService:IsStudio(),
+		players = #Players:GetPlayers(),
+		placeId = game.PlaceId,
+		gameId = game.GameId,
+	})
+end
+
+local function safeUnsupported(_, args)
+	local specName = args.__commandName or "this command"
+	return result(false,
+		specName .. " requires a game-specific implementation. " ..
+		"This LocalScript will not pretend an unavailable API exists.")
+end
+
+function CommandBar:Count()
+	local count = 0
+	for _ in pairs(self.Registry) do
+		count += 1
+	end
+	return count
+end
+
+-- Complete requested command inventory.
+local categories = {
+	Core = [[help commands clear cls history repeat undo redo reload restart quit exit version about info status ping echo print notify alert warn log debug verbose quiet enable disable toggle reset]],
+	Player = [[player players me all others random spectate unspectate follow unfollow select deselect inspect profile stats leaderboard team teams teamlist userid username displayname accountage rank role group groups friend friends avatar]],
+	Character = [[character respawn kill heal damage health maxhealth speed walkspeed jump jumppower hipheight gravity sit unsit freeze unfreeze anchor unanchor noclip clip fly unfly swim unswim invisible visible transparency godmode ungodmode]],
+	Movement = [[goto tp teleport bring fling launch throw push pull orbit circle walkto move moveup movedown moveleft moveright forward backward up down left right front back spawn checkpoint uncheckpoint return position]],
+	Camera = [[camera cam camerapos camerarot camerafov fov zoom unzoom firstperson thirdperson freecam unfreecam lockcam unlockcam focus unfocus camfollow camunfollow shake unshake cinematic uncinematic camerareset camtarget camdistance]],
+	Visuals = [[brightness contrast saturation tint exposure fog unfog atmosphere bloom blur colorcorrection depthoffield sunrays night day sunset sunrise ambient outdoorambient clocktime weather rain snow storm clearweather]],
+	World = [[workspace map objects parts models folders terrain regions coordinates location positionlist find search locate nearest farthest distance raycast overlap regioncheck]],
+	Parts = [[part createpart deletepart resize rotate movePart color material transparency reflectance collision touch untouch anchored unanchored weld unweld weldall unweldall mass]],
+	Tools = [[tools tool give remove equip unequip drop toolinfo toollist backpack clearbackpack clone duplicate rename destroy restore activate deactivate cooldown nocooldown]],
+	Items = [[items item inventory inv inspectitem iteminfo itemlist finditem removeitem additem equipitem dropitem cloneitem deleteitem itemcount itemsearch itemname itemid itemtype itemvalue]],
+	GUI = [[gui guis ui uis open close show hide enableui disableui toggleui resizeui moveui scaleui transparencyui colorui textui imageui inspectui reloadui]],
+	Effects = [[effect effects particle particles emitter emit trails trail beams beam fire smoke sparkles light pointlight spotlight surfacelight highlight outline aura]],
+	Animation = [[animation animations playanim stopanim pauseanim resumeanim animationlist animationinfo dance emote emotes pose resetpose idle walkanim runanim jumpanim fallanim swimanim climbanim]],
+	Sound = [[sound sounds music play pause resume stop volume pitch soundid soundinfo soundlist mute unmute loop unloop fade radio playlist next]],
+	Lighting = [[lighting time daytime nighttime dawn dusk morning afternoon evening midnight fogstart fogend fogcolor ambientcolor outdoorcolor shadow shadows globalshadows technology environment]],
+	["Server Info"] = [[server serverinfo serverid jobid placeid universeid creator owner playerscount maxplayers uptime fps pingall memory network performance diagnostics healthcheck heartbeat servers]],
+	["Developer Tools"] = [[inspectobject properties attributes attribute getattribute setattribute descendants children parent ancestry class classname fullname path tree explorer findchild finddescendant getproperty setproperty]],
+	Scripting = [[script scripts localscript modulescript requireinfo sourceinfo run execute eval test compile validate syntax traceback stack variables globals locals environment modules]],
+	Debugging = [[breakpoint breakpoints watch unwatch trace stacktrace profiler profile memoryprofile networkprofile eventlog errorlog warninglog console consoleclear dump snapshot compare benchmark timer]],
+	Events = [[events event connections connection signals signal bind unbind fire connect disconnect listeners callbacks triggers trigger hooks unhook remote remotes remoteinfo]],
+	Data = [[data datastore datastores getdata setdata deletedata savedata loaddata backup restoredata cache clearcache session sessions key keys value values json serialize]],
+	["Network / Testing"] = [[latency packetloss bandwidth networktest stresstest loadtest throughput requests requeststats connectionstats replication replicationstats remotescan remotelist remotetest eventtest pingtest benchmarkserver benchmarkclient networkdebug]],
+	["Admin / Safety"] = [[admin admins permissions permission whitelist blacklist lock unlock audit shutdown]],
+}
+
+local implemented = {
+	help = help,
+	commands = commands,
+	history = history,
+	repeat = repeatCommand,
+	echo = echo,
+	print = echo,
+	version = version,
+	about = function() return result(true, "Nova Local Command Bar for authorized Roblox development/testing.") end,
+	status = status,
+	enable = enable,
+	disable = disable,
+	toggle = toggle,
+	players = players,
+	me = me,
+	select = selectPlayer,
+	deselect = deselect,
+	inspect = inspectPlayer,
+	find = findObject,
+	search = findObject,
+	locate = findObject,
+	inspectobject = inspectObject,
+	properties = inspectObject,
+	attributes = inspectObject,
+	getattribute = getAttribute,
+	setattribute = setAttribute,
+	serverinfo = serverInfo,
+}
+
+for category, commandString in pairs(categories) do
+	for name in string.gmatch(commandString, "%S+") do
+		local handler = implemented[name]
+
+		if handler then
+			CommandBar:Register(makeSpec(
+				category,
+				name,
+				handler,
+				"Local " .. category .. " command: " .. name,
+				{}
+			))
+		else
+			CommandBar:Register(makeSpec(
+				category,
+				name,
+				function(self, args)
+					args.__commandName = name
+					return safeUnsupported(self, args)
+				end,
+				"Registered local-development command. This engine-neutral LocalScript does not expose the required game-specific API.",
+				{}
+			))
+		end
+	end
+end
+
+-- Console UI.
+local gui = Instance.new("ScreenGui")
+gui.Name = "NovaLocalCommandBar"
+gui.ResetOnSpawn = false
+gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Name = "Bar"
+frame.Size = UDim2.new(0.86, 0, 0, 44)
+frame.Position = UDim2.new(0.07, 0, 0.08, 0)
+frame.BackgroundTransparency = 0.12
+frame.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = frame
+
+local input = Instance.new("TextBox")
+input.Name = "Input"
+input.Size = UDim2.new(1, -16, 1, -10)
+input.Position = UDim2.new(0, 8, 0, 5)
+input.ClearTextOnFocus = false
+input.Text = ""
+input.PlaceholderText = "Nova command..."
+input.TextXAlignment = Enum.TextXAlignment.Left
+input.Parent = frame
+
+local output = Instance.new("TextLabel")
+output.Name = "Output"
+output.Size = UDim2.new(0.86, 0, 0, 80)
+output.Position = UDim2.new(0.07, 0, 0.08, 52)
+output.BackgroundTransparency = 0.15
+output.TextWrapped = true
+output.TextXAlignment = Enum.TextXAlignment.Left
+output.TextYAlignment = Enum.TextYAlignment.Top
+output.Text = "Nova Local Command Bar — " .. CommandBar.Version
+output.Parent = gui
+
+local function display(response)
+	output.Text = (response.ok and "[OK] " or "[ERROR] ") .. response.message
+	if response.data ~= nil then
+		output.Text ..= "\n" .. serialize(response.data)
+	end
+end
+
+input.FocusLost:Connect(function(enterPressed)
+	if not enterPressed then
+		return
+	end
+
+	local text = input.Text
+	input.Text = ""
+
+	local response = CommandBar:Execute(text, true)
+	display(response)
+end)
+
+UserInputService.InputBegan:Connect(function(inputObject, processed)
+	if processed then
+		return
+	end
+
+	if inputObject.KeyCode == Enum.KeyCode.F2 then
+		frame.Visible = not frame.Visible
+		output.Visible = frame.Visible
+	end
+end)
+
+print("[Nova] Local Command Bar loaded.")
+print("[Nova] Registered command count:", CommandBar:Count())
+print("[Nova] F2 toggles the command bar.")
+
+return CommandBar
