@@ -364,4 +364,4 @@ local function SendChatMessage(msg)
         game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer(msg, "All")
     end
 end
-SendChatMessage("i love LIL0DARKIE6 ")
+SendChatMessage("i hate everyone ")
