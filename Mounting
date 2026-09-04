@@ -1,0 +1,442 @@
+-- TopMount v8 — maximum
+-- executor script
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local LocalPlayer      = Players.LocalPlayer
+
+local character        = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local hrp              = character:WaitForChild("HumanoidRootPart")
+local humanoid         = character:WaitForChild("Humanoid")
+
+local ABOVE            = 1
+local HIT_OFFSET       = -1        -- default overlap inside target
+local AUTO_RETARGET    = true      -- re-lock nearest if target dies
+local KILL_AURA        = false     -- auto m1 while mounted
+local AURA_RATE        = 0.08      -- seconds between m1 hits
+local lockConn         = nil
+local auraConn         = nil
+local targetPlayer     = nil
+local mounted          = false
+local lastAura         = 0
+
+-- ─── hitbox ──────────────────────────────────────
+local HITBOX_SIZE    = Vector3.new(8, 8, 8)
+local hitboxExpanded = false
+local origSizes      = {}
+
+local function expandHitbox(char)
+    if hitboxExpanded then return end
+    hitboxExpanded = true
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            origSizes[part] = part.Size
+            pcall(function() part.Size = part.Size + HITBOX_SIZE end)
+        end
+    end
+end
+
+local function restoreHitbox(char)
+    if not hitboxExpanded then return end
+    hitboxExpanded = false
+    for part, sz in pairs(origSizes) do
+        if part and part.Parent then
+            pcall(function() part.Size = sz end)
+        end
+    end
+    origSizes = {}
+end
+
+-- ─── noclip ──────────────────────────────────────
+local noclipConn = nil
+local noclipOn   = false
+
+local function enableNoclip()
+    if noclipOn then return end
+    noclipOn = true
+    noclipConn = RunService.Stepped:Connect(function()
+        if not character then return end
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end)
+end
+
+local function disableNoclip()
+    noclipOn = false
+    if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
+    if character then
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                pcall(function() part.CanCollide = true end)
+            end
+        end
+    end
+end
+
+-- ─── nearest ─────────────────────────────────────
+local function nearest(exclude)
+    local best, bestDist = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p ~= exclude and p.Character then
+            local r = p.Character:FindFirstChild("HumanoidRootPart")
+            local h = p.Character:FindFirstChild("Humanoid")
+            if r and h and h.Health > 0 then
+                local d = (r.Position - hrp.Position).Magnitude
+                if d < bestDist then bestDist = d; best = p end
+            end
+        end
+    end
+    return best
+end
+
+-- ─── kill aura ───────────────────────────────────
+local function startAura()
+    if auraConn then return end
+    auraConn = RunService.Heartbeat:Connect(function()
+        if not KILL_AURA or not mounted then return end
+        local now = tick()
+        if now - lastAura < AURA_RATE then return end
+        lastAura = now
+        -- fire left click
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+        task.delay(0.05, function()
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+        end)
+    end)
+end
+
+local function stopAura()
+    if auraConn then auraConn:Disconnect(); auraConn = nil end
+end
+
+-- ─── GUI ─────────────────────────────────────────
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name           = "TopMountGUI"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent         = LocalPlayer:WaitForChild("PlayerGui")
+
+local Panel = Instance.new("Frame")
+Panel.Size             = UDim2.new(0, 230, 0, 390)
+Panel.Position         = UDim2.new(0.5, -115, 0, 30)
+Panel.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
+Panel.BorderSizePixel  = 0
+Panel.ZIndex           = 9
+Panel.Parent           = ScreenGui
+Instance.new("UICorner", Panel).CornerRadius = UDim.new(0, 14)
+
+-- drag
+local drag, dragTouch, dragStart, dragPos = false, nil, Vector2.zero, Panel.Position
+Panel.InputBegan:Connect(function(i)
+    if i.UserInputType ~= Enum.UserInputType.MouseButton1
+    and i.UserInputType ~= Enum.UserInputType.Touch then return end
+    drag = true; dragTouch = i
+    dragStart = Vector2.new(i.Position.X, i.Position.Y)
+    dragPos = Panel.Position
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if not drag or i ~= dragTouch then return end
+    local dx = i.Position.X - dragStart.X
+    local dy = i.Position.Y - dragStart.Y
+    Panel.Position = UDim2.new(dragPos.X.Scale, dragPos.X.Offset + dx, dragPos.Y.Scale, dragPos.Y.Offset + dy)
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i == dragTouch then drag = false; dragTouch = nil end
+end)
+
+-- title
+local Title = Instance.new("TextLabel")
+Title.Size             = UDim2.new(1, 0, 0, 36)
+Title.Text             = "TopMount v8"
+Title.TextColor3       = Color3.fromRGB(255, 255, 255)
+Title.BackgroundColor3 = Color3.fromRGB(0, 60, 180)
+Title.Font             = Enum.Font.GothamBold
+Title.TextSize         = 16
+Title.BorderSizePixel  = 0
+Title.ZIndex           = 11
+Title.Parent           = Panel
+Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 14)
+
+local function makeBtn(txt, yOff, r, g, b)
+    local B = Instance.new("TextButton")
+    B.Size             = UDim2.new(0.88, 0, 0, 40)
+    B.Position         = UDim2.new(0.06, 0, 0, yOff)
+    B.BackgroundColor3 = Color3.fromRGB(r, g, b)
+    B.TextColor3       = Color3.fromRGB(255, 255, 255)
+    B.Text             = txt
+    B.Font             = Enum.Font.GothamBold
+    B.TextSize         = 14
+    B.AutoButtonColor  = false
+    B.BorderSizePixel  = 0
+    B.ZIndex           = 11
+    B.Parent           = Panel
+    Instance.new("UICorner", B).CornerRadius = UDim.new(0, 10)
+    return B
+end
+
+local function makeLabel(txt, yOff)
+    local L = Instance.new("TextLabel")
+    L.Size                   = UDim2.new(0.88, 0, 0, 14)
+    L.Position               = UDim2.new(0.06, 0, 0, yOff)
+    L.Text                   = txt
+    L.TextColor3             = Color3.fromRGB(140, 140, 180)
+    L.BackgroundTransparency = 1
+    L.Font                   = Enum.Font.Gotham
+    L.TextSize               = 11
+    L.TextXAlignment         = Enum.TextXAlignment.Left
+    L.ZIndex                 = 11
+    L.Parent                 = Panel
+    return L
+end
+
+local function makeStepRow(label, yOff, defaultVal, minV, maxV, onChange)
+    makeLabel(label, yOff)
+    local Dec = Instance.new("TextButton")
+    Dec.Size             = UDim2.new(0.22, 0, 0, 30)
+    Dec.Position         = UDim2.new(0.06, 0, 0, yOff + 16)
+    Dec.BackgroundColor3 = Color3.fromRGB(140, 40, 0)
+    Dec.TextColor3       = Color3.fromRGB(255, 255, 255)
+    Dec.Text             = "-"
+    Dec.Font             = Enum.Font.GothamBold
+    Dec.TextSize         = 18
+    Dec.AutoButtonColor  = false
+    Dec.BorderSizePixel  = 0
+    Dec.ZIndex           = 11
+    Dec.Parent           = Panel
+    Instance.new("UICorner", Dec).CornerRadius = UDim.new(0, 8)
+
+    local Disp = Instance.new("TextLabel")
+    Disp.Size             = UDim2.new(0.40, 0, 0, 30)
+    Disp.Position         = UDim2.new(0.30, 0, 0, yOff + 16)
+    Disp.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
+    Disp.TextColor3       = Color3.fromRGB(255, 255, 255)
+    Disp.Text             = tostring(defaultVal) .. " st"
+    Disp.Font             = Enum.Font.GothamBold
+    Disp.TextSize         = 13
+    Disp.BorderSizePixel  = 0
+    Disp.ZIndex           = 11
+    Disp.Parent           = Panel
+    Instance.new("UICorner", Disp).CornerRadius = UDim.new(0, 8)
+
+    local Inc = Instance.new("TextButton")
+    Inc.Size             = UDim2.new(0.22, 0, 0, 30)
+    Inc.Position         = UDim2.new(0.72, 0, 0, yOff + 16)
+    Inc.BackgroundColor3 = Color3.fromRGB(0, 120, 50)
+    Inc.TextColor3       = Color3.fromRGB(255, 255, 255)
+    Inc.Text             = "+"
+    Inc.Font             = Enum.Font.GothamBold
+    Inc.TextSize         = 18
+    Inc.AutoButtonColor  = false
+    Inc.BorderSizePixel  = 0
+    Inc.ZIndex           = 11
+    Inc.Parent           = Panel
+    Instance.new("UICorner", Inc).CornerRadius = UDim.new(0, 8)
+
+    local val = defaultVal
+    Dec.MouseButton1Click:Connect(function()
+        val = math.max(minV, val - 1)
+        Disp.Text = tostring(val) .. " st"
+        onChange(val)
+    end)
+    Inc.MouseButton1Click:Connect(function()
+        val = math.min(maxV, val + 1)
+        Disp.Text = tostring(val) .. " st"
+        onChange(val)
+    end)
+end
+
+local ToggleBtn  = makeBtn("Mount: OFF",          44,  180, 0,   0)
+local HitboxBtn  = makeBtn("Hitbox Expand: OFF",  90,  0,   100, 180)
+local NoclipBtn  = makeBtn("Noclip: OFF",         136, 60,  0,   140)
+local AuraBtn    = makeBtn("Kill Aura: OFF",      182, 100, 60,  0)
+local RetargetBtn= makeBtn("Auto-Retarget: ON",   228, 0,   120, 60)
+
+makeStepRow("Studs Above Head",          276, ABOVE,      -10, 50,  function(v) ABOVE = v end)
+makeStepRow("Hit Overlap (into target)", 322, HIT_OFFSET, -5,  5,   function(v) HIT_OFFSET = v end)
+
+local TargetLabel = makeLabel("Target: none", 370)
+
+-- ─── setBtn ──────────────────────────────────────
+local function setBtn(on)
+    mounted                    = on
+    ToggleBtn.Text             = on and "Mount: ON" or "Mount: OFF"
+    ToggleBtn.BackgroundColor3 = on
+        and Color3.fromRGB(40, 180, 60)
+        or  Color3.fromRGB(180, 0, 0)
+    TargetLabel.Text = on and targetPlayer
+        and ("Target: " .. targetPlayer.Name)
+        or  "Target: none"
+end
+
+-- ─── stop ────────────────────────────────────────
+local function stop()
+    if lockConn then lockConn:Disconnect(); lockConn = nil end
+    targetPlayer = nil
+    pcall(function()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,  true)
+        humanoid:ChangeState(Enum.HumanoidStateType.GravityScale)
+    end)
+    setBtn(false)
+end
+getgenv().stopMount = stop
+
+-- ─── CFrame builder ──────────────────────────────
+local function buildFaceDownCFrame(pos, yaw)
+    return CFrame.new(pos)
+        * CFrame.Angles(0, yaw, 0)
+        * CFrame.Angles(-math.pi / 2, 0, 0)
+end
+
+-- ─── mount ───────────────────────────────────────
+local function mount(p)
+    if lockConn then lockConn:Disconnect(); lockConn = nil end
+    targetPlayer = p
+
+    pcall(function()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,  false)
+        humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+    end)
+
+    setBtn(true)
+
+    lockConn = RunService.Heartbeat:Connect(function()
+        local tp = targetPlayer
+        if not tp or not tp.Character then
+            -- auto-retarget if enabled
+            if AUTO_RETARGET then
+                local next = nearest()
+                if next then mount(next) end
+            else
+                stop()
+            end
+            return
+        end
+
+        local th = tp.Character:FindFirstChild("Humanoid")
+        if th and th.Health <= 0 then
+            if AUTO_RETARGET then
+                local next = nearest(tp)
+                if next then
+                    task.delay(0.3, function() mount(next) end)
+                else
+                    stop()
+                end
+            else
+                stop()
+            end
+            return
+        end
+
+        local tRoot = tp.Character:FindFirstChild("HumanoidRootPart")
+        local tHead = tp.Character:FindFirstChild("Head")
+        if not tRoot then stop(); return end
+
+        local headTopY = tHead
+            and (tHead.Position.Y + tHead.Size.Y * 0.5)
+            or  (tRoot.Position.Y + 3)
+
+        local pos = Vector3.new(
+            tRoot.Position.X,
+            headTopY + ABOVE + HIT_OFFSET,
+            tRoot.Position.Z
+        )
+
+        local _, yaw, _ = tRoot.CFrame:ToEulerAnglesYXZ()
+
+        pcall(function()
+            hrp.Velocity    = Vector3.zero
+            hrp.RotVelocity = Vector3.zero
+        end)
+
+        hrp.CFrame = buildFaceDownCFrame(pos, yaw)
+
+        pcall(function()
+            hrp.Velocity    = Vector3.zero
+            hrp.RotVelocity = Vector3.zero
+        end)
+    end)
+end
+
+-- ─── button wiring ───────────────────────────────
+ToggleBtn.MouseButton1Click:Connect(function()
+    if mounted then
+        stop()
+    else
+        local target = nearest()
+        if target then
+            mount(target)
+        else
+            TargetLabel.Text = "No players found"
+        end
+    end
+end)
+
+HitboxBtn.MouseButton1Click:Connect(function()
+    if hitboxExpanded then
+        restoreHitbox(character)
+        HitboxBtn.Text             = "Hitbox Expand: OFF"
+        HitboxBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 180)
+    else
+        expandHitbox(character)
+        HitboxBtn.Text             = "Hitbox Expand: ON"
+        HitboxBtn.BackgroundColor3 = Color3.fromRGB(50, 205, 50)
+    end
+end)
+
+NoclipBtn.MouseButton1Click:Connect(function()
+    if noclipOn then
+        disableNoclip()
+        NoclipBtn.Text             = "Noclip: OFF"
+        NoclipBtn.BackgroundColor3 = Color3.fromRGB(60, 0, 140)
+    else
+        enableNoclip()
+        NoclipBtn.Text             = "Noclip: ON"
+        NoclipBtn.BackgroundColor3 = Color3.fromRGB(160, 0, 255)
+    end
+end)
+
+AuraBtn.MouseButton1Click:Connect(function()
+    KILL_AURA = not KILL_AURA
+    if KILL_AURA then
+        startAura()
+        AuraBtn.Text             = "Kill Aura: ON"
+        AuraBtn.BackgroundColor3 = Color3.fromRGB(220, 80, 0)
+    else
+        stopAura()
+        AuraBtn.Text             = "Kill Aura: OFF"
+        AuraBtn.BackgroundColor3 = Color3.fromRGB(100, 60, 0)
+    end
+end)
+
+RetargetBtn.MouseButton1Click:Connect(function()
+    AUTO_RETARGET = not AUTO_RETARGET
+    RetargetBtn.Text             = AUTO_RETARGET and "Auto-Retarget: ON" or "Auto-Retarget: OFF"
+    RetargetBtn.BackgroundColor3 = AUTO_RETARGET
+        and Color3.fromRGB(0, 120, 60)
+        or  Color3.fromRGB(100, 0, 0)
+end)
+
+-- ─── respawn ─────────────────────────────────────
+LocalPlayer.CharacterAdded:Connect(function(c)
+    character      = c
+    hrp            = c:WaitForChild("HumanoidRootPart")
+    humanoid       = c:WaitForChild("Humanoid")
+    origSizes      = {}
+    hitboxExpanded = false
+    noclipOn       = false
+    noclipConn     = nil
+    if targetPlayer then
+        task.wait(0.5)
+        mount(targetPlayer)
+    end
+end)
+
+startAura()
+print("[TopMount v8] loaded")
