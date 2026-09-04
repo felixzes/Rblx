@@ -1,0 +1,959 @@
+-- Supreme Command System
+-- ;help to open GUI | ; to run commands
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local StarterGui = game:GetService("StarterGui")
+local Lighting = game:GetService("Lighting")
+local SoundService = game:GetService("SoundService")
+
+local lp = Players.LocalPlayer
+local mouse = lp:GetMouse()
+local cam = workspace.CurrentCamera
+
+-- ── state ────────────────────────────────────────────────────────────────────
+
+local State = {
+	fly = false, noclip = false, godmode = false, esp = false,
+	speed = 16, jump = 50, flySpeed = 60,
+	freecam = false, fullbright = false, invisible = false,
+	clicktp = false, inf_jump = false, autoheal = false,
+	spamming = false, auraActive = false, spinActive = false,
+	noFog = false, timelock = false, antiRagdoll = false,
+	antiStun = false, wireframe = false, thirdperson = false,
+	hitbox = false, camlock = false, rainbow = false,
+}
+
+local Connections = {}
+local function addConn(c) table.insert(Connections, c) return c end
+local function clearConn(key)
+	if Connections[key] then
+		pcall(function() Connections[key]:Disconnect() end)
+		Connections[key] = nil
+	end
+end
+
+local function getChar() return lp.Character end
+local function getHum()
+	local c = getChar()
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function getHRP()
+	local c = getChar()
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+-- ── notify ───────────────────────────────────────────────────────────────────
+
+local function notify(title, text, dur)
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = title or "CMD",
+			Text = text or "",
+			Duration = dur or 2,
+		})
+	end)
+end
+
+-- ── fly system ───────────────────────────────────────────────────────────────
+
+local flyConn, flyBV, flyAtt
+
+local function startFly()
+	local hrp = getHRP()
+	local hum = getHum()
+	if not hrp or not hum then return end
+
+	State.fly = true
+	hum.PlatformStand = true
+
+	flyAtt = Instance.new("Attachment", hrp)
+	flyBV = Instance.new("LinearVelocity", hrp)
+	flyBV.Attachment0 = flyAtt
+	flyBV.MaxForce = 1e6
+	flyBV.VectorVelocity = Vector3.zero
+	flyBV.RelativeTo = Enum.ActuatorRelativeTo.World
+
+	flyConn = RunService.Heartbeat:Connect(function()
+		if not State.fly then return end
+		local hrp2 = getHRP()
+		if not hrp2 then return end
+
+		local cf = cam.CFrame
+		local vel = Vector3.zero
+		local spd = State.flySpeed
+
+		if UIS:IsKeyDown(Enum.KeyCode.W) then vel = vel + cf.LookVector end
+		if UIS:IsKeyDown(Enum.KeyCode.S) then vel = vel - cf.LookVector end
+		if UIS:IsKeyDown(Enum.KeyCode.A) then vel = vel - cf.RightVector end
+		if UIS:IsKeyDown(Enum.KeyCode.D) then vel = vel + cf.RightVector end
+		if UIS:IsKeyDown(Enum.KeyCode.Space) then vel = vel + Vector3.new(0,1,0) end
+		if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then vel = vel - Vector3.new(0,1,0) end
+		if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then spd = spd * 2.5 end
+
+		-- mobile thumbstick support
+		local md = (getHum() and getHum().MoveDirection) or Vector3.zero
+		if md.Magnitude > 0.1 then
+			vel = vel + Vector3.new(md.X, 0, md.Z)
+		end
+
+		flyBV.VectorVelocity = vel.Magnitude > 0
+			and vel.Unit * spd
+			or Vector3.zero
+	end)
+end
+
+local function stopFly()
+	State.fly = false
+	if flyConn then flyConn:Disconnect() flyConn = nil end
+	if flyBV then flyBV:Destroy() flyBV = nil end
+	if flyAtt then flyAtt:Destroy() flyAtt = nil end
+	local hum = getHum()
+	if hum then hum.PlatformStand = false end
+end
+
+-- ── noclip ───────────────────────────────────────────────────────────────────
+
+local function startNoclip()
+	State.noclip = true
+	Connections["noclip"] = RunService.Stepped:Connect(function()
+		local c = getChar()
+		if not c then return end
+		for _, p in ipairs(c:GetDescendants()) do
+			if p:IsA("BasePart") then
+				p.CanCollide = false
+			end
+		end
+	end)
+end
+
+local function stopNoclip()
+	State.noclip = false
+	clearConn("noclip")
+	local c = getChar()
+	if not c then return end
+	for _, p in ipairs(c:GetDescendants()) do
+		if p:IsA("BasePart") then p.CanCollide = true end
+	end
+end
+
+-- ── godmode ──────────────────────────────────────────────────────────────────
+
+local function startGod()
+	State.godmode = true
+	Connections["god"] = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if hum then hum.Health = hum.MaxHealth end
+	end)
+end
+
+local function stopGod()
+	State.godmode = false
+	clearConn("god")
+end
+
+-- ── esp ──────────────────────────────────────────────────────────────────────
+
+local espBoxes = {}
+
+local function clearESP()
+	for _, v in pairs(espBoxes) do
+		pcall(function() v:Destroy() end)
+	end
+	espBoxes = {}
+end
+
+local function startESP()
+	State.esp = true
+	clearESP()
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p == lp then continue end
+		local c = p.Character
+		if not c then continue end
+		local hrp = c:FindFirstChild("HumanoidRootPart")
+		if not hrp then continue end
+		local bb = Instance.new("SelectionBox")
+		bb.Adornee = c
+		bb.Color3 = Color3.fromRGB(255, 50, 50)
+		bb.LineThickness = 0.05
+		bb.SurfaceTransparency = 0.8
+		bb.SurfaceColor3 = Color3.fromRGB(255, 50, 50)
+		bb.Parent = workspace
+		espBoxes[p.Name] = bb
+	end
+end
+
+local function stopESP()
+	State.esp = false
+	clearESP()
+end
+
+-- ── autoheal ─────────────────────────────────────────────────────────────────
+
+local function startAutoheal()
+	State.autoheal = true
+	Connections["autoheal"] = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if hum and hum.Health < hum.MaxHealth then
+			hum.Health = math.min(hum.Health + 1, hum.MaxHealth)
+		end
+	end)
+end
+
+local function stopAutoheal()
+	State.autoheal = false
+	clearConn("autoheal")
+end
+
+-- ── inf jump ─────────────────────────────────────────────────────────────────
+
+local function startInfJump()
+	State.inf_jump = true
+	Connections["infjump"] = UIS.JumpRequest:Connect(function()
+		local hum = getHum()
+		if hum then
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+end
+
+local function stopInfJump()
+	State.inf_jump = false
+	clearConn("infjump")
+end
+
+-- ── spin ─────────────────────────────────────────────────────────────────────
+
+local function startSpin()
+	State.spinActive = true
+	Connections["spin"] = RunService.Heartbeat:Connect(function()
+		local hrp = getHRP()
+		if hrp then
+			hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(10), 0)
+		end
+	end)
+end
+
+local function stopSpin()
+	State.spinActive = false
+	clearConn("spin")
+end
+
+-- ── rainbow name ─────────────────────────────────────────────────────────────
+
+local rainbowHue = 0
+local function startRainbow()
+	State.rainbow = true
+	Connections["rainbow"] = RunService.Heartbeat:Connect(function()
+		rainbowHue = (rainbowHue + 0.002) % 1
+		local c = getChar()
+		if not c then return end
+		for _, p in ipairs(c:GetDescendants()) do
+			if p:IsA("BasePart") then
+				p.Color = Color3.fromHSV(rainbowHue, 1, 1)
+			end
+		end
+	end)
+end
+
+local function stopRainbow()
+	State.rainbow = false
+	clearConn("rainbow")
+end
+
+-- ── fullbright ───────────────────────────────────────────────────────────────
+
+local origAmbient, origOutdoor
+local function startFullbright()
+	origAmbient = Lighting.Ambient
+	origOutdoor = Lighting.OutdoorAmbient
+	Lighting.Ambient = Color3.fromRGB(255,255,255)
+	Lighting.OutdoorAmbient = Color3.fromRGB(255,255,255)
+	Lighting.Brightness = 10
+	State.fullbright = true
+end
+
+local function stopFullbright()
+	if origAmbient then Lighting.Ambient = origAmbient end
+	if origOutdoor then Lighting.OutdoorAmbient = origOutdoor end
+	Lighting.Brightness = 1
+	State.fullbright = false
+end
+
+-- ── anti ragdoll ─────────────────────────────────────────────────────────────
+
+local function startAntiRagdoll()
+	State.antiRagdoll = true
+	Connections["antirag"] = RunService.Heartbeat:Connect(function()
+		local c = getChar()
+		local hum = getHum()
+		if not c or not hum then return end
+		for _, d in ipairs(c:GetDescendants()) do
+			if d:IsA("Motor6D") and not d.Enabled then
+				d.Enabled = true
+			end
+		end
+		if hum.PlatformStand then hum.PlatformStand = false end
+		local s = hum:GetState()
+		if s == Enum.HumanoidStateType.Ragdoll or s == Enum.HumanoidStateType.FallingDown then
+			hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
+	end)
+end
+
+local function stopAntiRagdoll()
+	State.antiRagdoll = false
+	clearConn("antirag")
+end
+
+-- ── anti stun ────────────────────────────────────────────────────────────────
+
+local function startAntiStun()
+	State.antiStun = true
+	Connections["antistun"] = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if not hum then return end
+		if hum.WalkSpeed < State.speed then hum.WalkSpeed = State.speed end
+		if hum.PlatformStand then hum.PlatformStand = false end
+		if hum.Sit then hum.Sit = false end
+	end)
+end
+
+local function stopAntiStun()
+	State.antiStun = false
+	clearConn("antistun")
+end
+
+-- ── clicktp ──────────────────────────────────────────────────────────────────
+
+local function startClickTP()
+	State.clicktp = true
+	Connections["clicktp"] = mouse.Button1Down:Connect(function()
+		if not State.clicktp then return end
+		local hrp = getHRP()
+		if hrp and mouse.Target then
+			hrp.CFrame = CFrame.new(mouse.Hit.Position + Vector3.new(0,3,0))
+		end
+	end)
+end
+
+local function stopClickTP()
+	State.clicktp = false
+	clearConn("clicktp")
+end
+
+-- ── hitbox expander ──────────────────────────────────────────────────────────
+
+local origSizes = {}
+local function startHitbox(size)
+	size = size or 10
+	State.hitbox = true
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p == lp then continue end
+		local c = p.Character
+		if not c then continue end
+		local hrp = c:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			origSizes[p.Name] = hrp.Size
+			hrp.Size = Vector3.new(size, size, size)
+		end
+	end
+end
+
+local function stopHitbox()
+	State.hitbox = false
+	for _, p in ipairs(Players:GetPlayers()) do
+		local c = p.Character
+		if not c then continue end
+		local hrp = c:FindFirstChild("HumanoidRootPart")
+		if hrp and origSizes[p.Name] then
+			hrp.Size = origSizes[p.Name]
+		end
+	end
+	origSizes = {}
+end
+
+-- ── time control ─────────────────────────────────────────────────────────────
+
+local function setTime(t)
+	Lighting.TimeOfDay = tostring(t) .. ":00:00"
+end
+
+-- ── fog control ──────────────────────────────────────────────────────────────
+
+local origFogEnd
+local function startNoFog()
+	origFogEnd = Lighting.FogEnd
+	Lighting.FogEnd = 1e6
+	State.noFog = true
+end
+local function stopNoFog()
+	if origFogEnd then Lighting.FogEnd = origFogEnd end
+	State.noFog = false
+end
+
+-- ── invisible ────────────────────────────────────────────────────────────────
+
+local function startInvis()
+	State.invisible = true
+	local c = getChar()
+	if not c then return end
+	for _, p in ipairs(c:GetDescendants()) do
+		if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
+			p.LocalTransparencyModifier = 1
+		end
+		if p:IsA("Decal") then p.Transparency = 1 end
+	end
+end
+
+local function stopInvis()
+	State.invisible = false
+	local c = getChar()
+	if not c then return end
+	for _, p in ipairs(c:GetDescendants()) do
+		if p:IsA("BasePart") then
+			p.LocalTransparencyModifier = 0
+		end
+		if p:IsA("Decal") then p.Transparency = 0 end
+	end
+end
+
+-- ── tp to player ─────────────────────────────────────────────────────────────
+
+local function tpToPlayer(name)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Name:lower():find(name:lower()) and p ~= lp then
+			local hrp = getHRP()
+			local tHRP = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+			if hrp and tHRP then
+				hrp.CFrame = tHRP.CFrame + Vector3.new(3,0,0)
+				notify("Teleport", "→ " .. p.Name)
+				return
+			end
+		end
+	end
+	notify("Error", "Player not found")
+end
+
+-- ── bring player ─────────────────────────────────────────────────────────────
+
+local function bringPlayer(name)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Name:lower():find(name:lower()) and p ~= lp then
+			local hrp = getHRP()
+			local tHRP = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+			if hrp and tHRP then
+				tHRP.CFrame = hrp.CFrame + Vector3.new(3,0,0)
+				notify("Bring", p.Name .. " brought")
+				return
+			end
+		end
+	end
+end
+
+-- ── fling ────────────────────────────────────────────────────────────────────
+
+local function flingPlayer(name)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Name:lower():find(name:lower()) and p ~= lp then
+			local tHRP = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+			if tHRP then
+				tHRP.AssemblyLinearVelocity = Vector3.new(
+					math.random(-200,200), 500, math.random(-200,200)
+				)
+				notify("Fling", p.Name .. " flung")
+				return
+			end
+		end
+	end
+end
+
+-- ── command registry ─────────────────────────────────────────────────────────
+
+local Commands = {}
+
+local function reg(name, desc, cat, fn)
+	Commands[name:lower()] = { name = name, desc = desc, cat = cat, fn = fn }
+end
+
+-- MOVEMENT
+reg("fly","Toggle fly mode","Movement",function() if State.fly then stopFly() notify("Fly","Off") else startFly() notify("Fly","On") end end)
+reg("noclip","Toggle noclip","Movement",function() if State.noclip then stopNoclip() notify("Noclip","Off") else startNoclip() notify("Noclip","On") end end)
+reg("speed","Set walkspeed ;speed 50","Movement",function(a) local s=tonumber(a) if s then State.speed=s local h=getHum() if h then h.WalkSpeed=s end notify("Speed",s) end end)
+reg("jump","Set jump power ;jump 100","Movement",function(a) local j=tonumber(a) if j then State.jump=j local h=getHum() if h then h.JumpPower=j end notify("Jump",j) end end)
+reg("flyspeed","Set fly speed ;flyspeed 100","Movement",function(a) local s=tonumber(a) if s then State.flySpeed=s notify("FlySpeed",s) end end)
+reg("tp","Teleport to player ;tp name","Movement",function(a) if a then tpToPlayer(a) end end)
+reg("tppos","Teleport to coords ;tppos x y z","Movement",function(a,b,c) local x,y,z=tonumber(a),tonumber(b),tonumber(c) if x and y and z then local hrp=getHRP() if hrp then hrp.CFrame=CFrame.new(x,y,z) end end end)
+reg("bring","Bring player ;bring name","Movement",function(a) if a then bringPlayer(a) end end)
+reg("fling","Fling player ;fling name","Movement",function(a) if a then flingPlayer(a) end end)
+reg("clicktp","Toggle click to teleport","Movement",function() if State.clicktp then stopClickTP() notify("ClickTP","Off") else startClickTP() notify("ClickTP","On") end end)
+reg("infjump","Toggle infinite jump","Movement",function() if State.inf_jump then stopInfJump() notify("InfJump","Off") else startInfJump() notify("InfJump","On") end end)
+reg("tpspawn","Teleport to spawn","Movement",function() local s=workspace:FindFirstChild("SpawnLocation") if s then local hrp=getHRP() if hrp then hrp.CFrame=s.CFrame+Vector3.new(0,5,0) end end end)
+reg("unstucker","Unstuck character","Movement",function() local hrp=getHRP() if hrp then hrp.CFrame=hrp.CFrame+Vector3.new(0,10,0) notify("Unstuck","Done") end end)
+reg("vspeed","Set vertical fly speed","Movement",function(a) local s=tonumber(a) if s then State.vspeed=s end end)
+reg("gravity","Set gravity ;gravity 196","Movement",function(a) local g=tonumber(a) if g then workspace.Gravity=g notify("Gravity",g) end end)
+reg("resetgravity","Reset gravity to default","Movement",function() workspace.Gravity=196.2 notify("Gravity","Reset") end end)
+reg("sit","Make character sit","Movement",function() local h=getHum() if h then h.Sit=true end end)
+reg("standup","Make character stand","Movement",function() local h=getHum() if h then h.Sit=false end end)
+reg("walkspeedmax","Max walkspeed","Movement",function() local h=getHum() if h then h.WalkSpeed=500 State.speed=500 end end)
+reg("jumpmax","Max jump power","Movement",function() local h=getHum() if h then h.JumpPower=500 State.jump=500 end end)
+reg("resetspeed","Reset walkspeed","Movement",function() local h=getHum() if h then h.WalkSpeed=16 State.speed=16 end end)
+reg("resetjump","Reset jump power","Movement",function() local h=getHum() if h then h.JumpPower=50 State.jump=50 end end)
+
+-- COMBAT
+reg("godmode","Toggle godmode","Combat",function() if State.godmode then stopGod() notify("Godmode","Off") else startGod() notify("Godmode","On") end end)
+reg("antistun","Toggle anti stun","Combat",function() if State.antiStun then stopAntiStun() notify("AntiStun","Off") else startAntiStun() notify("AntiStun","On") end end)
+reg("antirag","Toggle anti ragdoll","Combat",function() if State.antiRagdoll then stopAntiRagdoll() notify("AntiRag","Off") else startAntiRagdoll() notify("AntiRag","On") end end)
+reg("hitbox","Expand hitboxes ;hitbox 15","Combat",function(a) if State.hitbox then stopHitbox() notify("Hitbox","Off") else startHitbox(tonumber(a)) notify("Hitbox","On") end end)
+reg("flingall","Fling all players","Combat",function() for _,p in ipairs(Players:GetPlayers()) do if p~=lp then local h=p.Character and p.Character:FindFirstChild("HumanoidRootPart") if h then h.AssemblyLinearVelocity=Vector3.new(math.random(-300,300),800,math.random(-300,300)) end end end notify("FlingAll","Done") end)
+reg("killall","Kill all (set health 0)","Combat",function() for _,p in ipairs(Players:GetPlayers()) do if p~=lp then local h=p.Character and p.Character:FindFirstChildOfClass("Humanoid") if h then h.Health=0 end end end end)
+reg("kill","Kill player ;kill name","Combat",function(a) for _,p in ipairs(Players:GetPlayers()) do if p.Name:lower():find(a:lower()) and p~=lp then local h=p.Character and p.Character:FindFirstChildOfClass("Humanoid") if h then h.Health=0 end end end end)
+reg("autoheal","Toggle auto heal","Combat",function() if State.autoheal then stopAutoheal() notify("AutoHeal","Off") else startAutoheal() notify("AutoHeal","On") end end)
+reg("heal","Heal self full hp","Combat",function() local h=getHum() if h then h.Health=h.MaxHealth notify("Heal","Full HP") end end)
+reg("damage","Damage self ;damage 50","Combat",function(a) local h=getHum() local d=tonumber(a) if h and d then h.Health=math.max(0,h.Health-d) end end)
+reg("sethealth","Set health ;sethealth 50","Combat",function(a) local h=getHum() local v=tonumber(a) if h and v then h.Health=v end end)
+reg("maxhealth","Set max health ;maxhealth 200","Combat",function(a) local h=getHum() local v=tonumber(a) if h and v then h.MaxHealth=v h.Health=v end end)
+
+-- VISUAL
+reg("esp","Toggle ESP boxes","Visual",function() if State.esp then stopESP() notify("ESP","Off") else startESP() notify("ESP","On") end end)
+reg("fullbright","Toggle fullbright","Visual",function() if State.fullbright then stopFullbright() notify("Fullbright","Off") else startFullbright() notify("Fullbright","On") end end)
+reg("nofog","Toggle no fog","Visual",function() if State.noFog then stopNoFog() notify("NoFog","Off") else startNoFog() notify("NoFog","On") end end)
+reg("rainbow","Toggle rainbow character","Visual",function() if State.rainbow then stopRainbow() notify("Rainbow","Off") else startRainbow() notify("Rainbow","On") end end)
+reg("spin","Toggle character spin","Visual",function() if State.spinActive then stopSpin() notify("Spin","Off") else startSpin() notify("Spin","On") end end)
+reg("invisible","Toggle invisibility","Visual",function() if State.invisible then stopInvis() notify("Invisible","Off") else startInvis() notify("Invisible","On") end end)
+reg("time","Set time of day ;time 12","Visual",function(a) local t=tonumber(a) if t then setTime(t) notify("Time",t..":00") end end)
+reg("day","Set daytime","Visual",function() setTime(14) notify("Time","Day") end)
+reg("night","Set nighttime","Visual",function() setTime(0) notify("Time","Night") end)
+reg("sunset","Set sunset","Visual",function() setTime(18) notify("Time","Sunset") end)
+reg("fog","Set fog ;fog 100","Visual",function(a) local f=tonumber(a) if f then Lighting.FogEnd=f Lighting.FogStart=0 notify("Fog",f) end end)
+reg("ambient","Set ambient ;ambient 128 128 128","Visual",function(a,b,c) local r,g,bl=tonumber(a),tonumber(b),tonumber(c) if r and g and bl then Lighting.Ambient=Color3.fromRGB(r,g,bl) end end)
+reg("skycolor","Set sky color ;skycolor r g b","Visual",function(a,b,c) local r,g,bl=tonumber(a),tonumber(b),tonumber(c) if r and g and bl then Lighting.OutdoorAmbient=Color3.fromRGB(r,g,bl) end end)
+reg("charcolor","Set character color ;charcolor r g b","Visual",function(a,b,c) local r,g,bl=tonumber(a),tonumber(b),tonumber(c) local ch=getChar() if ch and r and g and bl then for _,p in ipairs(ch:GetDescendants()) do if p:IsA("BasePart") then p.Color=Color3.fromRGB(r,g,bl) end end end end)
+reg("resetcolor","Reset character color","Visual",function() local ch=getChar() if ch then for _,p in ipairs(ch:GetDescendants()) do if p:IsA("BasePart") then p.BrickColor=BrickColor.new("Medium stone grey") end end end end)
+reg("shadowless","Remove shadows","Visual",function() Lighting.GlobalShadows=false notify("Shadows","Off") end)
+reg("shadows","Enable shadows","Visual",function() Lighting.GlobalShadows=true notify("Shadows","On") end)
+reg("blur","Set blur ;blur 10","Visual",function(a) local v=tonumber(a) if v then local b=Lighting:FindFirstChildOfClass("BlurEffect") or Instance.new("BlurEffect",Lighting) b.Size=v notify("Blur",v) end end)
+reg("noblur","Remove blur","Visual",function() local b=Lighting:FindFirstChildOfClass("BlurEffect") if b then b:Destroy() end notify("Blur","Off") end)
+reg("brightness","Set brightness ;brightness 5","Visual",function(a) local v=tonumber(a) if v then Lighting.Brightness=v end end)
+
+-- PLAYER
+reg("reset","Reset character","Player",function() local h=getHum() if h then h.Health=0 end end)
+reg("name","Change display name ;name NewName","Player",function(a) if a then lp.DisplayName=a notify("Name",a) end end)
+reg("desc","Change description ;desc text","Player",function(a) pcall(function() lp.Character.Humanoid:SetDescription(Players:GetHumanoidDescriptionFromUserId(lp.UserId)) end) end)
+reg("chat","Chat message ;chat hello","Player",function(a) if a then lp:Chat(a) end end)
+reg("pm","PM player ;pm name msg","Player",function(a,b) if a and b then for _,p in ipairs(Players:GetPlayers()) do if p.Name:lower():find(a:lower()) then StarterGui:SetCore("SendNotification",{Title="PM to "..p.Name,Text=b,Duration=3}) end end end end)
+reg("follow","Follow player ;follow name","Player",function(a)
+	clearConn("follow")
+	if not a then return end
+	Connections["follow"]=RunService.Heartbeat:Connect(function()
+		for _,p in ipairs(Players:GetPlayers()) do
+			if p.Name:lower():find(a:lower()) and p~=lp then
+				local tHRP=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+				local hrp=getHRP()
+				local hum=getHum()
+				if tHRP and hrp and hum then
+					local dir=(tHRP.Position-hrp.Position)
+					if dir.Magnitude>5 then hum:MoveTo(tHRP.Position) end
+				end
+			end
+		end
+	end)
+	notify("Follow","Following "..a)
+end)
+reg("unfollow","Stop following","Player",function() clearConn("follow") notify("Follow","Stopped") end)
+reg("copypos","Print your position","Player",function() local hrp=getHRP() if hrp then local p=hrp.Position notify("Position",math.floor(p.X)..","..math.floor(p.Y)..","..math.floor(p.Z)) end end)
+reg("age","Show player age ;age name","Player",function(a) for _,p in ipairs(Players:GetPlayers()) do if p.Name:lower():find((a or ""):lower()) then notify(p.Name,"Account age: "..p.AccountAge.."d") end end end)
+reg("id","Show player ID ;id name","Player",function(a) for _,p in ipairs(Players:GetPlayers()) do if p.Name:lower():find((a or ""):lower()) then notify(p.Name,"ID: "..p.UserId) end end end)
+reg("camlock","Toggle camlock nearest","Player",function()
+	State.camlock=not State.camlock
+	if State.camlock then
+		clearConn("camlock")
+		local nearest=nil
+		local myHRP=getHRP()
+		if not myHRP then return end
+		local nearestDist=math.huge
+		for _,p in ipairs(Players:GetPlayers()) do
+			if p==lp then continue end
+			local hrp=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+			if hrp then local d=(hrp.Position-myHRP.Position).Magnitude if d<nearestDist then nearestDist=d nearest=p end end
+		end
+		if nearest then
+			cam.CameraType=Enum.CameraType.Custom
+			Connections["camlock"]=RunService.RenderStepped:Connect(function()
+				if not State.camlock then return end
+				local tHRP=nearest.Character and nearest.Character:FindFirstChild("HumanoidRootPart")
+				if tHRP then
+					local back=tHRP.CFrame*CFrame.new(0,2,3)
+					cam.CFrame=CFrame.new(cam.CFrame.Position,(back.Position))
+				end
+			end)
+			notify("Camlock","→ "..nearest.Name)
+		end
+	else
+		clearConn("camlock")
+		cam.CameraType=Enum.CameraType.Custom
+		notify("Camlock","Off")
+	end
+end)
+
+-- WORLD
+reg("baseplate","Toggle baseplate visibility","World",function() local b=workspace:FindFirstChild("Baseplate") if b then b.Transparency=b.Transparency==0 and 1 or 0 end end)
+reg("deletebp","Delete baseplate","World",function() local b=workspace:FindFirstChild("Baseplate") if b then b:Destroy() notify("Baseplate","Deleted") end end)
+reg("explode","Explode at position","World",function() local hrp=getHRP() if hrp then local e=Instance.new("Explosion") e.Position=hrp.Position e.BlastRadius=15 e.BlastPressure=500000 e.Parent=workspace end end)
+reg("freeze","Freeze all players","World",function() for _,p in ipairs(Players:GetPlayers()) do if p~=lp then local hrp=p.Character and p.Character:FindFirstChild("HumanoidRootPart") if hrp then hrp.Anchored=true end end end notify("Freeze","All frozen") end)
+reg("unfreeze","Unfreeze all players","World",function() for _,p in ipairs(Players:GetPlayers()) do local hrp=p.Character and p.Character:FindFirstChild("HumanoidRootPart") if hrp then hrp.Anchored=false end end notify("Unfreeze","Done") end)
+reg("loopexplode","Loop explode","World",function()
+	State.loopExplode=not State.loopExplode
+	if State.loopExplode then
+		Connections["loopexplode"]=RunService.Heartbeat:Connect(function()
+			local hrp=getHRP() if hrp then local e=Instance.new("Explosion") e.Position=hrp.Position e.BlastRadius=20 e.BlastPressure=1e6 e.Parent=workspace end
+		end)
+		notify("LoopExplode","On")
+	else
+		clearConn("loopexplode") notify("LoopExplode","Off")
+	end
+end)
+reg("clearws","Clear workspace","World",function() for _,v in ipairs(workspace:GetChildren()) do if not v:IsA("Terrain") and not v:IsA("Camera") and v.Name~="Baseplate" then pcall(function() v:Destroy() end) end end notify("Workspace","Cleared") end)
+reg("music","Play music ;music assetid","World",function(a) local id=tonumber(a) if id then local s=Instance.new("Sound",workspace) s.SoundId="rbxassetid://"..id s.Volume=1 s:Play() notify("Music","Playing "..id) end end)
+reg("stopmusic","Stop all sounds","World",function() for _,s in ipairs(workspace:GetDescendants()) do if s:IsA("Sound") then s:Stop() end end notify("Music","Stopped") end)
+reg("volume","Set volume ;volume 0.5","World",function(a) local v=tonumber(a) if v then SoundService.AmbientReverb=Enum.ReverbType.NoReverb for _,s in ipairs(workspace:GetDescendants()) do if s:IsA("Sound") then s.Volume=v end end end end)
+
+-- MISC
+reg("help","Open command GUI","Misc",function() guiOpen=not guiOpen mainFrame.Visible=guiOpen end)
+reg("cmds","Open command GUI","Misc",function() guiOpen=not guiOpen mainFrame.Visible=guiOpen end)
+reg("clear","Clear chat","Misc",function() for i=1,10 do lp:Chat("") end end)
+reg("serverinfo","Show server info","Misc",function() notify("Server","Players: "..#Players:GetPlayers().."\nGame: "..game.PlaceId) end)
+reg("fps","Show FPS","Misc",function() notify("FPS",math.floor(1/RunService.Heartbeat:Wait())) end)
+reg("ping","Show ping","Misc",function() notify("Ping",math.floor(lp:GetNetworkPing()*1000).."ms") end)
+reg("rejoin","Rejoin server","Misc",function() game:GetService("TeleportService"):Teleport(game.PlaceId,lp) end)
+reg("quit","Close game","Misc",function() game:Shutdown() end)
+reg("credits","Show credits","Misc",function() notify("Supreme CMD","made by @vxmpingz_") end)
+reg("printcmds","Print all commands to output","Misc",function() for k,v in pairs(Commands) do print(";"..k.." — "..v.desc) end end)
+reg("antigrav","Toggle anti gravity","Misc",function()
+	State.antigrav=not State.antigrav
+	if State.antigrav then
+		Connections["antigrav"]=RunService.Heartbeat:Connect(function()
+			local hrp=getHRP() if hrp then hrp.AssemblyLinearVelocity=Vector3.new(hrp.AssemblyLinearVelocity.X,math.max(hrp.AssemblyLinearVelocity.Y,5),hrp.AssemblyLinearVelocity.Z) end
+		end)
+		notify("AntiGrav","On")
+	else clearConn("antigrav") notify("AntiGrav","Off") end
+end)
+reg("loopspin","Loop spin character","Misc",function() if State.spinActive then stopSpin() notify("Spin","Off") else startSpin() notify("Spin","On") end end)
+reg("btools","Give btools (paint/delete/move)","Misc",function()
+	local tools={"244521256","244521548","244521652"}
+	for _,id in ipairs(tools) do
+		pcall(function()
+			local t=game:GetService("InsertService"):LoadAsset(tonumber(id))
+			t.Parent=lp.Backpack
+		end)
+	end
+	notify("Btools","Inserted")
+end)
+
+-- ── command parser ────────────────────────────────────────────────────────────
+
+lp.Chatted:Connect(function(msg)
+	if msg:sub(1,1) ~= ";" then return end
+	local parts = {}
+	for word in msg:sub(2):gmatch("%S+") do
+		table.insert(parts, word)
+	end
+	if #parts == 0 then return end
+	local cmdName = parts[1]:lower()
+	local args = {table.unpack(parts, 2)}
+
+	if cmdName == "help" then
+		guiOpen = not guiOpen
+		mainFrame.Visible = guiOpen
+		return
+	end
+
+	local cmd = Commands[cmdName]
+	if cmd then
+		pcall(function() cmd.fn(table.unpack(args)) end)
+	else
+		notify("CMD","Unknown: ;"..cmdName)
+	end
+end)
+
+-- ── GUI ───────────────────────────────────────────────────────────────────────
+
+local sg = Instance.new("ScreenGui")
+sg.Name = "SupremeCMD"
+sg.ResetOnSpawn = false
+sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+sg.Parent = gethui and gethui() or lp.PlayerGui
+
+-- MAIN FRAME
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 680, 0, 440)
+mainFrame.Position = UDim2.new(0.5, -340, 0.5, -220)
+mainFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 12)
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Visible = false
+mainFrame.Parent = sg
+
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
+
+local mainStroke = Instance.new("UIStroke", mainFrame)
+mainStroke.Thickness = 1
+mainStroke.Color = Color3.fromRGB(40, 40, 50)
+
+-- HEADER
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 44)
+header.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+header.BorderSizePixel = 0
+header.Parent = mainFrame
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
+
+local headerTitle = Instance.new("TextLabel")
+headerTitle.Size = UDim2.new(1, -100, 1, 0)
+headerTitle.Position = UDim2.new(0, 16, 0, 0)
+headerTitle.BackgroundTransparency = 1
+headerTitle.Text = "◈ SUPREME CMD"
+headerTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+headerTitle.TextSize = 15
+headerTitle.Font = Enum.Font.GothamBold
+headerTitle.TextXAlignment = Enum.TextXAlignment.Left
+headerTitle.Parent = header
+
+local cmdCount = Instance.new("TextLabel")
+cmdCount.Size = UDim2.new(0, 80, 1, 0)
+cmdCount.Position = UDim2.new(1, -160, 0, 0)
+cmdCount.BackgroundTransparency = 1
+cmdCount.TextColor3 = Color3.fromRGB(100, 100, 120)
+cmdCount.TextSize = 11
+cmdCount.Font = Enum.Font.Gotham
+cmdCount.Text = "0 cmds"
+cmdCount.Parent = header
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 32, 0, 32)
+closeBtn.Position = UDim2.new(1, -40, 0.5, -16)
+closeBtn.BackgroundColor3 = Color3.fromRGB(40, 20, 20)
+closeBtn.BorderSizePixel = 0
+closeBtn.Text = "✕"
+closeBtn.TextColor3 = Color3.fromRGB(200, 80, 80)
+closeBtn.TextSize = 14
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.Parent = header
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
+
+-- SEARCH
+local searchFrame = Instance.new("Frame")
+searchFrame.Size = UDim2.new(1, -24, 0, 34)
+searchFrame.Position = UDim2.new(0, 12, 0, 50)
+searchFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+searchFrame.BorderSizePixel = 0
+searchFrame.Parent = mainFrame
+Instance.new("UICorner", searchFrame).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", searchFrame).Color = Color3.fromRGB(35, 35, 45)
+
+local searchBox = Instance.new("TextBox")
+searchBox.Size = UDim2.new(1, -36, 1, 0)
+searchBox.Position = UDim2.new(0, 32, 0, 0)
+searchBox.BackgroundTransparency = 1
+searchBox.PlaceholderText = "search commands..."
+searchBox.PlaceholderColor3 = Color3.fromRGB(70, 70, 90)
+searchBox.TextColor3 = Color3.fromRGB(220, 220, 230)
+searchBox.TextSize = 12
+searchBox.Font = Enum.Font.Gotham
+searchBox.ClearTextOnFocus = false
+searchBox.Text = ""
+searchBox.Parent = searchFrame
+
+local searchIcon = Instance.new("TextLabel")
+searchIcon.Size = UDim2.new(0, 30, 1, 0)
+searchIcon.BackgroundTransparency = 1
+searchIcon.Text = "⌕"
+searchIcon.TextColor3 = Color3.fromRGB(80, 80, 100)
+searchIcon.TextSize = 16
+searchIcon.Font = Enum.Font.GothamBold
+searchIcon.Parent = searchFrame
+
+-- CATEGORY TABS
+local cats = {"All","Movement","Combat","Visual","Player","World","Misc"}
+local tabFrame = Instance.new("Frame")
+tabFrame.Size = UDim2.new(1, -24, 0, 28)
+tabFrame.Position = UDim2.new(0, 12, 0, 90)
+tabFrame.BackgroundTransparency = 1
+tabFrame.Parent = mainFrame
+
+local tabLayout = Instance.new("UIListLayout", tabFrame)
+tabLayout.FillDirection = Enum.FillDirection.Horizontal
+tabLayout.Padding = UDim.new(0, 6)
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local activeTab = "All"
+local tabButtons = {}
+
+local function setTab(name)
+	activeTab = name
+	for _, tb in pairs(tabButtons) do
+		TweenService:Create(tb, TweenInfo.new(0.15), {
+			BackgroundColor3 = tb.Name == name
+				and Color3.fromRGB(50, 50, 220)
+				or Color3.fromRGB(20, 20, 28),
+			TextColor3 = tb.Name == name
+				and Color3.fromRGB(255,255,255)
+				or Color3.fromRGB(100,100,120),
+		}):Play()
+	end
+end
+
+local function filterCmds(search, cat)
+	local results = {}
+	for k, v in pairs(Commands) do
+		local matchCat = cat == "All" or v.cat == cat
+		local matchSearch = search == "" or k:find(search:lower()) or v.desc:lower():find(search:lower())
+		if matchCat and matchSearch then
+			table.insert(results, v)
+		end
+	end
+	table.sort(results, function(a,b) return a.name < b.name end)
+	return results
+end
+
+-- LIST
+local listContainer = Instance.new("ScrollingFrame")
+listContainer.Size = UDim2.new(1, -24, 1, -138)
+listContainer.Position = UDim2.new(0, 12, 0, 126)
+listContainer.BackgroundTransparency = 1
+listContainer.BorderSizePixel = 0
+listContainer.ScrollBarThickness = 3
+listContainer.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 200)
+listContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+listContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+listContainer.Parent = mainFrame
+
+local listLayout = Instance.new("UIListLayout", listContainer)
+listLayout.Padding = UDim.new(0, 4)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local catColors = {
+	Movement = Color3.fromRGB(80,140,255),
+	Combat   = Color3.fromRGB(255,80,80),
+	Visual   = Color3.fromRGB(180,80,255),
+	Player   = Color3.fromRGB(80,220,140),
+	World    = Color3.fromRGB(255,180,60),
+	Misc     = Color3.fromRGB(160,160,180),
+}
+
+local cmdCards = {}
+
+local function buildList(search, cat)
+	for _, c in ipairs(cmdCards) do c:Destroy() end
+	cmdCards = {}
+
+	local results = filterCmds(search or "", cat or activeTab)
+	cmdCount.Text = #results .. " cmds"
+
+	for i, cmd in ipairs(results) do
+		local card = Instance.new("Frame")
+		card.Size = UDim2.new(1, -4, 0, 44)
+		card.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+		card.BorderSizePixel = 0
+		card.LayoutOrder = i
+		card.Parent = listContainer
+		Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+
+		local catDot = Instance.new("Frame")
+		catDot.Size = UDim2.new(0, 3, 0.6, 0)
+		catDot.Position = UDim2.new(0, 6, 0.2, 0)
+		catDot.BackgroundColor3 = catColors[cmd.cat] or Color3.fromRGB(100,100,100)
+		catDot.BorderSizePixel = 0
+		catDot.Parent = card
+		Instance.new("UICorner", catDot).CornerRadius = UDim.new(1, 0)
+
+		local nameLabel = Instance.new("TextLabel")
+		nameLabel.Size = UDim2.new(0.5, -20, 0, 22)
+		nameLabel.Position = UDim2.new(0, 18, 0, 4)
+		nameLabel.BackgroundTransparency = 1
+		nameLabel.Text = ";" .. cmd.name
+		nameLabel.TextColor3 = Color3.fromRGB(220, 220, 240)
+		nameLabel.TextSize = 12
+		nameLabel.Font = Enum.Font.GothamBold
+		nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+		nameLabel.Parent = card
+
+		local descLabel = Instance.new("TextLabel")
+		descLabel.Size = UDim2.new(0.6, -20, 0, 18)
+		descLabel.Position = UDim2.new(0, 18, 0, 24)
+		descLabel.BackgroundTransparency = 1
+		descLabel.Text = cmd.desc
+		descLabel.TextColor3 = Color3.fromRGB(90, 90, 110)
+		descLabel.TextSize = 10
+		descLabel.Font = Enum.Font.Gotham
+		descLabel.TextXAlignment = Enum.TextXAlignment.Left
+		descLabel.Parent = card
+
+		local runBtn = Instance.new("TextButton")
+		runBtn.Size = UDim2.new(0, 60, 0, 26)
+		runBtn.Position = UDim2.new(1, -68, 0.5, -13)
+		runBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 180)
+		runBtn.BorderSizePixel = 0
+		runBtn.Text = "RUN"
+		runBtn.TextColor3 = Color3.fromRGB(200, 200, 255)
+		runBtn.TextSize = 11
+		runBtn.Font = Enum.Font.GothamBold
+		runBtn.Parent = card
+		Instance.new("UICorner", runBtn).CornerRadius = UDim.new(0, 6)
+
+		runBtn.MouseButton1Click:Connect(function()
+			TweenService:Create(runBtn, TweenInfo.new(0.1), {
+				BackgroundColor3 = Color3.fromRGB(60, 60, 255),
+			}):Play()
+			task.delay(0.15, function()
+				TweenService:Create(runBtn, TweenInfo.new(0.1), {
+					BackgroundColor3 = Color3.fromRGB(30, 30, 180),
+				}):Play()
+			end)
+			pcall(function() cmd.fn() end)
+		end)
+
+		table.insert(cmdCards, card)
+	end
+end
+
+-- BUILD TABS
+for _, cat in ipairs(cats) do
+	local tb = Instance.new("TextButton")
+	tb.Name = cat
+	tb.Size = UDim2.new(0, 72, 1, 0)
+	tb.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+	tb.BorderSizePixel = 0
+	tb.Text = cat
+	tb.TextColor3 = Color3.fromRGB(100, 100, 120)
+	tb.TextSize = 11
+	tb.Font = Enum.Font.GothamBold
+	tb.Parent = tabFrame
+	Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 6)
+	tabButtons[cat] = tb
+
+	tb.MouseButton1Click:Connect(function()
+		setTab(cat)
+		buildList(searchBox.Text, cat)
+	end)
+end
+
+setTab("All")
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+	buildList(searchBox.Text, activeTab)
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+	guiOpen = false
+	mainFrame.Visible = false
+end)
+
+-- ── init ──────────────────────────────────────────────────────────────────────
+
+guiOpen = false
+buildList("", "All")
+notify("Supreme CMD","loaded — type ;help to open")
