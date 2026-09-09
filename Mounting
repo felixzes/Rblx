@@ -1,442 +1,767 @@
--- TopMount v8 — maximum
--- executor script
-
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local LocalPlayer      = Players.LocalPlayer
+local Workspace        = game:GetService("Workspace")
+local Lighting         = game:GetService("Lighting")
 
-local character        = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local hrp              = character:WaitForChild("HumanoidRootPart")
-local humanoid         = character:WaitForChild("Humanoid")
+local LP   = Players.LocalPlayer
+local char = LP.Character or LP.CharacterAdded:Wait()
+local hrp  = char:WaitForChild("HumanoidRootPart")
 
-local ABOVE            = 1
-local HIT_OFFSET       = -1        -- default overlap inside target
-local AUTO_RETARGET    = true      -- re-lock nearest if target dies
-local KILL_AURA        = false     -- auto m1 while mounted
-local AURA_RATE        = 0.08      -- seconds between m1 hits
-local lockConn         = nil
-local auraConn         = nil
-local targetPlayer     = nil
-local mounted          = false
-local lastAura         = 0
+-- ═══════════════════════════════════════════════════════
+-- SHADOW FOLLOW
+-- ═══════════════════════════════════════════════════════
+local dist   = 5
+local sfOn   = false
+local sfConn = nil
+local sfScan = nil
+local target = nil
 
--- ─── hitbox ──────────────────────────────────────
-local HITBOX_SIZE    = Vector3.new(8, 8, 8)
-local hitboxExpanded = false
-local origSizes      = {}
-
-local function expandHitbox(char)
-    if hitboxExpanded then return end
-    hitboxExpanded = true
-    for _, part in ipairs(char:GetDescendants()) do
-        if part:IsA("BasePart") then
-            origSizes[part] = part.Size
-            pcall(function() part.Size = part.Size + HITBOX_SIZE end)
-        end
-    end
+local function getHRP(p)
+    return p and p.Character and p.Character:FindFirstChild("HumanoidRootPart")
 end
 
-local function restoreHitbox(char)
-    if not hitboxExpanded then return end
-    hitboxExpanded = false
-    for part, sz in pairs(origSizes) do
-        if part and part.Parent then
-            pcall(function() part.Size = sz end)
-        end
-    end
-    origSizes = {}
-end
-
--- ─── noclip ──────────────────────────────────────
-local noclipConn = nil
-local noclipOn   = false
-
-local function enableNoclip()
-    if noclipOn then return end
-    noclipOn = true
-    noclipConn = RunService.Stepped:Connect(function()
-        if not character then return end
-        for _, part in ipairs(character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
-        end
-    end)
-end
-
-local function disableNoclip()
-    noclipOn = false
-    if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
-    if character then
-        for _, part in ipairs(character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                pcall(function() part.CanCollide = true end)
-            end
-        end
-    end
-end
-
--- ─── nearest ─────────────────────────────────────
-local function nearest(exclude)
-    local best, bestDist = nil, math.huge
+local function nearest()
+    local myH = getHRP(LP); if not myH then return nil end
+    local best, bestD = nil, math.huge
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p ~= exclude and p.Character then
-            local r = p.Character:FindFirstChild("HumanoidRootPart")
-            local h = p.Character:FindFirstChild("Humanoid")
-            if r and h and h.Health > 0 then
-                local d = (r.Position - hrp.Position).Magnitude
-                if d < bestDist then bestDist = d; best = p end
+        if p ~= LP then
+            local h = getHRP(p)
+            if h then
+                local d = (h.Position - myH.Position).Magnitude
+                if d < bestD then bestD = d; best = p end
             end
         end
     end
     return best
 end
 
--- ─── kill aura ───────────────────────────────────
-local function startAura()
-    if auraConn then return end
-    auraConn = RunService.Heartbeat:Connect(function()
-        if not KILL_AURA or not mounted then return end
-        local now = tick()
-        if now - lastAura < AURA_RATE then return end
-        lastAura = now
-        -- fire left click
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-        task.delay(0.05, function()
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-        end)
+local sfStatusLbl, sfTargetLbl, sfToggleBtn
+
+local function sfStop()
+    if sfConn then sfConn:Disconnect(); sfConn = nil end
+    if sfScan then sfScan:Disconnect(); sfScan = nil end
+end
+
+local sfStart
+sfStart = function()
+    sfStop()
+    if not sfOn then return end
+    target = nearest()
+    if sfStatusLbl then
+        sfStatusLbl.Text       = target and "● following" or "● no players"
+        sfStatusLbl.TextColor3 = target and Color3.fromRGB(80,220,120) or Color3.fromRGB(220,100,60)
+        sfTargetLbl.Text       = target and target.Name or ""
+    end
+    if not target then return end
+    sfConn = RunService.Heartbeat:Connect(function()
+        if not sfOn then return end
+        local myH = getHRP(LP); local tH = getHRP(target)
+        if not myH or not tH then target = nearest(); return end
+        local behind = tH.CFrame.Position - tH.CFrame.LookVector * dist
+        myH.CFrame      = CFrame.new(Vector3.new(behind.X, tH.Position.Y, behind.Z), tH.CFrame.Position)
+        myH.Velocity    = Vector3.zero
+        myH.RotVelocity = Vector3.zero
+    end)
+    local t = 0
+    sfScan = RunService.Heartbeat:Connect(function(dt)
+        t = t + dt; if t < 2 then return end; t = 0
+        local n = nearest()
+        if n and n ~= target then
+            target = n
+            if sfTargetLbl then sfTargetLbl.Text = target.Name end
+        end
     end)
 end
 
-local function stopAura()
-    if auraConn then auraConn:Disconnect(); auraConn = nil end
+-- ═══════════════════════════════════════════════════════
+-- HITBOX EXPANDER
+-- ═══════════════════════════════════════════════════════
+local HIT_SIZE   = 20
+local hitOn      = false
+local expanded   = {}
+local expandConn = nil
+
+local function expandPlayer(p)
+    if p == LP then return end
+    local c = p.Character; if not c then return end
+    if expanded[p] then return end
+    expanded[p] = {}
+    for _, obj in ipairs(c:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            expanded[p][obj] = obj.Size
+            pcall(function() obj.Size = Vector3.new(HIT_SIZE,HIT_SIZE,HIT_SIZE) end)
+        end
+    end
 end
 
--- ─── GUI ─────────────────────────────────────────
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name           = "TopMountGUI"
-ScreenGui.ResetOnSpawn   = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent         = LocalPlayer:WaitForChild("PlayerGui")
+local function restorePlayer(p)
+    if not expanded[p] then return end
+    for part, sz in pairs(expanded[p]) do
+        if part and part.Parent then pcall(function() part.Size = sz end) end
+    end
+    expanded[p] = nil
+end
 
-local Panel = Instance.new("Frame")
-Panel.Size             = UDim2.new(0, 230, 0, 390)
-Panel.Position         = UDim2.new(0.5, -115, 0, 30)
-Panel.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
-Panel.BorderSizePixel  = 0
-Panel.ZIndex           = 9
-Panel.Parent           = ScreenGui
-Instance.new("UICorner", Panel).CornerRadius = UDim.new(0, 14)
+local function startHitbox()
+    hitOn = true
+    for _, p in ipairs(Players:GetPlayers()) do expandPlayer(p) end
+    expandConn = RunService.Heartbeat:Connect(function()
+        if not hitOn then return end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP then
+                if not expanded[p] then expandPlayer(p)
+                else
+                    local c = p.Character
+                    if c then
+                        for _, obj in ipairs(c:GetDescendants()) do
+                            if obj:IsA("BasePart") and obj.Size.Magnitude < HIT_SIZE then
+                                pcall(function() obj.Size = Vector3.new(HIT_SIZE,HIT_SIZE,HIT_SIZE) end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
 
--- drag
-local drag, dragTouch, dragStart, dragPos = false, nil, Vector2.zero, Panel.Position
-Panel.InputBegan:Connect(function(i)
+local function stopHitbox()
+    hitOn = false
+    if expandConn then expandConn:Disconnect(); expandConn = nil end
+    for _, p in ipairs(Players:GetPlayers()) do restorePlayer(p) end
+end
+
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function()
+        task.wait(0.5); if hitOn then expandPlayer(p) end
+    end)
+end)
+Players.PlayerRemoving:Connect(function(p) expanded[p] = nil end)
+
+-- ═══════════════════════════════════════════════════════
+-- VOID FLOOR
+-- ═══════════════════════════════════════════════════════
+local VOID_Y    = -100
+local FLOOR_Y   = -80
+local floorPart = nil
+
+local function spawnFloor()
+    if floorPart and floorPart.Parent then return end
+    floorPart              = Instance.new("Part")
+    floorPart.Name         = "VoidFloor"
+    floorPart.Anchored     = true
+    floorPart.CanCollide   = true
+    floorPart.Size         = Vector3.new(500, 2, 500)
+    floorPart.Position     = Vector3.new(hrp.Position.X, FLOOR_Y, hrp.Position.Z)
+    floorPart.BrickColor   = BrickColor.new("Dark stone grey")
+    floorPart.Material     = Enum.Material.SmoothPlastic
+    floorPart.Transparency = 0.4
+    floorPart.Parent       = Workspace
+    hrp.CFrame   = CFrame.new(hrp.Position.X, FLOOR_Y + 2, hrp.Position.Z)
+    hrp.Velocity = Vector3.zero
+    task.delay(10, function()
+        if floorPart and floorPart.Parent then floorPart:Destroy(); floorPart = nil end
+    end)
+end
+
+RunService.Heartbeat:Connect(function()
+    local c = LP.Character; if not c then return end
+    local h = c:FindFirstChild("HumanoidRootPart"); if not h then return end
+    if h.Position.Y < VOID_Y then spawnFloor() end
+    if floorPart and floorPart.Parent then
+        floorPart.Position = Vector3.new(h.Position.X, FLOOR_Y, h.Position.Z)
+    end
+end)
+
+LP.CharacterAdded:Connect(function(c)
+    char = c; hrp = c:WaitForChild("HumanoidRootPart")
+    if sfOn then task.wait(0.5); sfStart() end
+end)
+
+-- ═══════════════════════════════════════════════════════
+-- VFX NUKE — removes everything visual in the entire game
+-- ═══════════════════════════════════════════════════════
+local vfxOn      = false
+local vfxConns   = {}
+
+local VFX_CLASSES = {
+    "ParticleEmitter","Trail","Beam","Smoke","Fire","Sparkles",
+    "BillboardGui","SurfaceGui","SurfaceAppearance",
+    "PointLight","SpotLight","SurfaceLight",
+    "SelectionBox","SelectionSphere","BoxHandleAdornment",
+    "SphereHandleAdornment","ConeHandleAdornment",
+    "ImageHandleAdornment","LineHandleAdornment",
+    "WireframeHandleAdornment",
+}
+
+local LIGHTING_FX = {
+    "BlurEffect","BloomEffect","ColorCorrectionEffect",
+    "SunRaysEffect","DepthOfFieldEffect","ColorGradingEffect",
+    "FilmGrainEffect","GlassBlurEffect",
+}
+
+local SKY_CLASSES = {
+    "Sky","Atmosphere",
+}
+
+local function killObj(obj)
+    if not obj or not obj.Parent then return end
+    if obj:IsA("Explosion") then
+        pcall(function()
+            obj.BlastPressure = 0
+            obj.BlastRadius   = 0
+        end)
+        return
+    end
+    for _, cls in ipairs(VFX_CLASSES) do
+        if obj:IsA(cls) then pcall(function() obj:Destroy() end); return end
+    end
+end
+
+local function killLighting()
+    for _, obj in ipairs(Lighting:GetChildren()) do
+        for _, cls in ipairs(LIGHTING_FX) do
+            if obj:IsA(cls) then pcall(function() obj:Destroy() end) end
+        end
+        for _, cls in ipairs(SKY_CLASSES) do
+            if obj:IsA(cls) then pcall(function() obj:Destroy() end) end
+        end
+    end
+    -- flatten ambient so the game doesn't look pitch black
+    pcall(function()
+        Lighting.Brightness       = 2
+        Lighting.GlobalShadows    = false
+        Lighting.FogEnd           = 100000
+        Lighting.FogStart         = 100000
+        Lighting.Ambient          = Color3.fromRGB(128,128,128)
+        Lighting.OutdoorAmbient   = Color3.fromRGB(128,128,128)
+    end)
+end
+
+local function sweepAll()
+    -- sweep entire game tree
+    for _, service in ipairs({Workspace, game:GetService("ReplicatedStorage"), game:GetService("StarterGui")}) do
+        pcall(function()
+            for _, obj in ipairs(service:GetDescendants()) do
+                killObj(obj)
+            end
+        end)
+    end
+    killLighting()
+end
+
+local function startVFX()
+    vfxOn = true
+    sweepAll()
+
+    -- watch new objects everywhere
+    local c1 = Workspace.DescendantAdded:Connect(function(obj)
+        if vfxOn then task.defer(function() killObj(obj) end) end
+    end)
+    local c2 = Lighting.ChildAdded:Connect(function(obj)
+        if not vfxOn then return end
+        for _, cls in ipairs(LIGHTING_FX) do
+            if obj:IsA(cls) then pcall(function() obj:Destroy() end) end
+        end
+    end)
+    -- re-sweep every 3 seconds to catch anything that slipped through
+    local c3 = RunService.Heartbeat:Connect(function()
+        if not vfxOn then return end
+    end)
+    local sweepTimer = 0
+    local c4 = RunService.Heartbeat:Connect(function(dt)
+        if not vfxOn then return end
+        sweepTimer = sweepTimer + dt
+        if sweepTimer < 3 then return end
+        sweepTimer = 0
+        sweepAll()
+    end)
+    table.insert(vfxConns, c1)
+    table.insert(vfxConns, c2)
+    table.insert(vfxConns, c3)
+    table.insert(vfxConns, c4)
+end
+
+local function stopVFX()
+    vfxOn = false
+    for _, c in ipairs(vfxConns) do c:Disconnect() end
+    vfxConns = {}
+end
+
+-- ═══════════════════════════════════════════════════════
+-- GUI
+-- ═══════════════════════════════════════════════════════
+local C = {
+    BG      = Color3.fromRGB(10, 11, 18),
+    PANEL   = Color3.fromRGB(16, 17, 28),
+    BORDER  = Color3.fromRGB(38, 40, 66),
+    ACCENT  = Color3.fromRGB(99, 102, 241),
+    GREEN   = Color3.fromRGB(34, 197, 94),
+    RED     = Color3.fromRGB(220, 38, 38),
+    YELLOW  = Color3.fromRGB(234, 179, 8),
+    BLUE    = Color3.fromRGB(59, 130, 246),
+    TEXT    = Color3.fromRGB(226, 232, 240),
+    SUB     = Color3.fromRGB(100, 116, 139),
+    TABACT  = Color3.fromRGB(99, 102, 241),
+    TABINAC = Color3.fromRGB(22, 24, 38),
+}
+
+local sg = Instance.new("ScreenGui")
+sg.Name="HubGui"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true; sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+sg.Parent=LP:WaitForChild("PlayerGui")
+
+-- ── main frame ──────────────────────────────────
+local W, H = 280, 420
+local panel = Instance.new("Frame")
+panel.Size             = UDim2.new(0,W,0,H)
+panel.Position         = UDim2.new(0.5,-W/2,0.5,-H/2)
+panel.BackgroundColor3 = C.BG
+panel.BorderSizePixel  = 0
+panel.Active           = true
+panel.ZIndex           = 10
+panel.Parent           = sg
+Instance.new("UICorner",panel).CornerRadius = UDim.new(0,16)
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color=C.BORDER; mainStroke.Thickness=1.5; mainStroke.Parent=panel
+
+-- ── title bar ────────────────────────────────────
+local titleBar = Instance.new("Frame")
+titleBar.Size             = UDim2.new(1,0,0,42)
+titleBar.BackgroundColor3 = C.PANEL
+titleBar.BorderSizePixel  = 0
+titleBar.ZIndex           = 11
+titleBar.Parent           = panel
+Instance.new("UICorner",titleBar).CornerRadius = UDim.new(0,16)
+-- fix bottom corners
+local tbfix = Instance.new("Frame")
+tbfix.Size=UDim2.new(1,0,0,10); tbfix.Position=UDim2.new(0,0,1,-10)
+tbfix.BackgroundColor3=C.PANEL; tbfix.BorderSizePixel=0; tbfix.ZIndex=11; tbfix.Parent=titleBar
+
+local accent = Instance.new("Frame")
+accent.Size=UDim2.new(0,3,0,22); accent.Position=UDim2.new(0,12,0.5,-11)
+accent.BackgroundColor3=C.ACCENT; accent.BorderSizePixel=0; accent.ZIndex=12; accent.Parent=titleBar
+Instance.new("UICorner",accent).CornerRadius=UDim.new(1,0)
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.Size=UDim2.new(1,-30,1,0); titleLbl.Position=UDim2.new(0,22,0,0)
+titleLbl.BackgroundTransparency=1; titleLbl.Text="hub"
+titleLbl.TextColor3=C.TEXT; titleLbl.TextSize=14; titleLbl.Font=Enum.Font.GothamBold
+titleLbl.TextXAlignment=Enum.TextXAlignment.Left; titleLbl.ZIndex=12; titleLbl.Parent=titleBar
+
+-- ── full-panel resize drag ────────────────────────
+-- drags from any edge/corner within 10px, otherwise moves the panel
+local EDGE = 10
+local dragMode = nil  -- "move" | "tl" | "tr" | "bl" | "br" | "l" | "r" | "t" | "b"
+local dragStart = Vector2.zero
+local panelStartPos, panelStartSize
+
+local function getEdgeMode(lx, ly)
+    local pw, ph = panel.AbsoluteSize.X, panel.AbsoluteSize.Y
+    local onL = lx < EDGE
+    local onR = lx > pw - EDGE
+    local onT = ly < EDGE
+    local onB = ly > ph - EDGE
+    if onT and onL then return "tl"
+    elseif onT and onR then return "tr"
+    elseif onB and onL then return "bl"
+    elseif onB and onR then return "br"
+    elseif onL then return "l"
+    elseif onR then return "r"
+    elseif onT then return "t"
+    elseif onB then return "b"
+    end
+    return "move"
+end
+
+panel.InputBegan:Connect(function(i)
     if i.UserInputType ~= Enum.UserInputType.MouseButton1
     and i.UserInputType ~= Enum.UserInputType.Touch then return end
-    drag = true; dragTouch = i
-    dragStart = Vector2.new(i.Position.X, i.Position.Y)
-    dragPos = Panel.Position
+    local lx = i.Position.X - panel.AbsolutePosition.X
+    local ly = i.Position.Y - panel.AbsolutePosition.Y
+    dragMode        = getEdgeMode(lx, ly)
+    dragStart       = Vector2.new(i.Position.X, i.Position.Y)
+    panelStartPos   = panel.Position
+    panelStartSize  = panel.Size
+    i.Changed:Connect(function()
+        if i.UserInputState == Enum.UserInputState.End then dragMode = nil end
+    end)
 end)
+
 UserInputService.InputChanged:Connect(function(i)
-    if not drag or i ~= dragTouch then return end
+    if not dragMode then return end
+    if i.UserInputType ~= Enum.UserInputType.MouseMovement
+    and i.UserInputType ~= Enum.UserInputType.Touch then return end
     local dx = i.Position.X - dragStart.X
     local dy = i.Position.Y - dragStart.Y
-    Panel.Position = UDim2.new(dragPos.X.Scale, dragPos.X.Offset + dx, dragPos.Y.Scale, dragPos.Y.Offset + dy)
+    local ox  = panelStartPos.X.Offset
+    local oy  = panelStartPos.Y.Offset
+    local ow  = panelStartSize.X.Offset
+    local oh  = panelStartSize.Y.Offset
+    local MIN = 200
+
+    if dragMode == "move" then
+        panel.Position = UDim2.new(panelStartPos.X.Scale, ox+dx, panelStartPos.Y.Scale, oy+dy)
+    elseif dragMode == "r" then
+        panel.Size = UDim2.new(0, math.max(MIN,ow+dx), 0, oh)
+    elseif dragMode == "l" then
+        local nw = math.max(MIN, ow-dx)
+        panel.Position = UDim2.new(panelStartPos.X.Scale, ox+(ow-nw), panelStartPos.Y.Scale, oy)
+        panel.Size     = UDim2.new(0, nw, 0, oh)
+    elseif dragMode == "b" then
+        panel.Size = UDim2.new(0, ow, 0, math.max(MIN,oh+dy))
+    elseif dragMode == "t" then
+        local nh = math.max(MIN, oh-dy)
+        panel.Position = UDim2.new(panelStartPos.X.Scale, ox, panelStartPos.Y.Scale, oy+(oh-nh))
+        panel.Size     = UDim2.new(0, ow, 0, nh)
+    elseif dragMode == "br" then
+        panel.Size = UDim2.new(0, math.max(MIN,ow+dx), 0, math.max(MIN,oh+dy))
+    elseif dragMode == "bl" then
+        local nw = math.max(MIN, ow-dx)
+        panel.Position = UDim2.new(panelStartPos.X.Scale, ox+(ow-nw), panelStartPos.Y.Scale, oy)
+        panel.Size     = UDim2.new(0, nw, 0, math.max(MIN,oh+dy))
+    elseif dragMode == "tr" then
+        local nh = math.max(MIN, oh-dy)
+        panel.Position = UDim2.new(panelStartPos.X.Scale, ox, panelStartPos.Y.Scale, oy+(oh-nh))
+        panel.Size     = UDim2.new(0, math.max(MIN,ow+dx), 0, nh)
+    elseif dragMode == "tl" then
+        local nw = math.max(MIN, ow-dx)
+        local nh = math.max(MIN, oh-dy)
+        panel.Position = UDim2.new(panelStartPos.X.Scale, ox+(ow-nw), panelStartPos.Y.Scale, oy+(oh-nh))
+        panel.Size     = UDim2.new(0, nw, 0, nh)
+    end
 end)
+
 UserInputService.InputEnded:Connect(function(i)
-    if i == dragTouch then drag = false; dragTouch = nil end
+    if i.UserInputType == Enum.UserInputType.MouseButton1
+    or i.UserInputType == Enum.UserInputType.Touch then
+        dragMode = nil
+    end
 end)
 
--- title
-local Title = Instance.new("TextLabel")
-Title.Size             = UDim2.new(1, 0, 0, 36)
-Title.Text             = "TopMount v8"
-Title.TextColor3       = Color3.fromRGB(255, 255, 255)
-Title.BackgroundColor3 = Color3.fromRGB(0, 60, 180)
-Title.Font             = Enum.Font.GothamBold
-Title.TextSize         = 16
-Title.BorderSizePixel  = 0
-Title.ZIndex           = 11
-Title.Parent           = Panel
-Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 14)
+-- ── tab bar ──────────────────────────────────────
+local TAB_NAMES  = { "Follow", "Hitbox", "Void", "VFX" }
+local TAB_COLORS = { C.BLUE, C.RED, C.GREEN, C.YELLOW }
+local tabFrames  = {}
+local tabBtns    = {}
+local activeTab  = 1
 
-local function makeBtn(txt, yOff, r, g, b)
-    local B = Instance.new("TextButton")
-    B.Size             = UDim2.new(0.88, 0, 0, 40)
-    B.Position         = UDim2.new(0.06, 0, 0, yOff)
-    B.BackgroundColor3 = Color3.fromRGB(r, g, b)
-    B.TextColor3       = Color3.fromRGB(255, 255, 255)
-    B.Text             = txt
-    B.Font             = Enum.Font.GothamBold
-    B.TextSize         = 14
-    B.AutoButtonColor  = false
-    B.BorderSizePixel  = 0
-    B.ZIndex           = 11
-    B.Parent           = Panel
-    Instance.new("UICorner", B).CornerRadius = UDim.new(0, 10)
-    return B
-end
+local tabBar = Instance.new("Frame")
+tabBar.Size             = UDim2.new(1,-16,0,32)
+tabBar.Position         = UDim2.new(0,8,0,46)
+tabBar.BackgroundColor3 = C.PANEL
+tabBar.BorderSizePixel  = 0
+tabBar.ZIndex           = 11
+tabBar.Parent           = panel
+Instance.new("UICorner",tabBar).CornerRadius=UDim.new(0,10)
+Instance.new("UIStroke",tabBar).Color=C.BORDER
 
-local function makeLabel(txt, yOff)
-    local L = Instance.new("TextLabel")
-    L.Size                   = UDim2.new(0.88, 0, 0, 14)
-    L.Position               = UDim2.new(0.06, 0, 0, yOff)
-    L.Text                   = txt
-    L.TextColor3             = Color3.fromRGB(140, 140, 180)
-    L.BackgroundTransparency = 1
-    L.Font                   = Enum.Font.Gotham
-    L.TextSize               = 11
-    L.TextXAlignment         = Enum.TextXAlignment.Left
-    L.ZIndex                 = 11
-    L.Parent                 = Panel
-    return L
-end
+local tabLayout = Instance.new("UIListLayout",tabBar)
+tabLayout.FillDirection=Enum.FillDirection.Horizontal
+tabLayout.HorizontalAlignment=Enum.HorizontalAlignment.Left
+tabLayout.VerticalAlignment=Enum.VerticalAlignment.Center
+tabLayout.Padding=UDim.new(0,2)
+Instance.new("UIPadding",tabBar).PaddingLeft=UDim.new(0,3)
 
-local function makeStepRow(label, yOff, defaultVal, minV, maxV, onChange)
-    makeLabel(label, yOff)
-    local Dec = Instance.new("TextButton")
-    Dec.Size             = UDim2.new(0.22, 0, 0, 30)
-    Dec.Position         = UDim2.new(0.06, 0, 0, yOff + 16)
-    Dec.BackgroundColor3 = Color3.fromRGB(140, 40, 0)
-    Dec.TextColor3       = Color3.fromRGB(255, 255, 255)
-    Dec.Text             = "-"
-    Dec.Font             = Enum.Font.GothamBold
-    Dec.TextSize         = 18
-    Dec.AutoButtonColor  = false
-    Dec.BorderSizePixel  = 0
-    Dec.ZIndex           = 11
-    Dec.Parent           = Panel
-    Instance.new("UICorner", Dec).CornerRadius = UDim.new(0, 8)
+local contentArea = Instance.new("Frame")
+contentArea.Size=UDim2.new(1,-16,1,-90); contentArea.Position=UDim2.new(0,8,0,84)
+contentArea.BackgroundTransparency=1; contentArea.ZIndex=11; contentArea.Parent=panel
 
-    local Disp = Instance.new("TextLabel")
-    Disp.Size             = UDim2.new(0.40, 0, 0, 30)
-    Disp.Position         = UDim2.new(0.30, 0, 0, yOff + 16)
-    Disp.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
-    Disp.TextColor3       = Color3.fromRGB(255, 255, 255)
-    Disp.Text             = tostring(defaultVal) .. " st"
-    Disp.Font             = Enum.Font.GothamBold
-    Disp.TextSize         = 13
-    Disp.BorderSizePixel  = 0
-    Disp.ZIndex           = 11
-    Disp.Parent           = Panel
-    Instance.new("UICorner", Disp).CornerRadius = UDim.new(0, 8)
-
-    local Inc = Instance.new("TextButton")
-    Inc.Size             = UDim2.new(0.22, 0, 0, 30)
-    Inc.Position         = UDim2.new(0.72, 0, 0, yOff + 16)
-    Inc.BackgroundColor3 = Color3.fromRGB(0, 120, 50)
-    Inc.TextColor3       = Color3.fromRGB(255, 255, 255)
-    Inc.Text             = "+"
-    Inc.Font             = Enum.Font.GothamBold
-    Inc.TextSize         = 18
-    Inc.AutoButtonColor  = false
-    Inc.BorderSizePixel  = 0
-    Inc.ZIndex           = 11
-    Inc.Parent           = Panel
-    Instance.new("UICorner", Inc).CornerRadius = UDim.new(0, 8)
-
-    local val = defaultVal
-    Dec.MouseButton1Click:Connect(function()
-        val = math.max(minV, val - 1)
-        Disp.Text = tostring(val) .. " st"
-        onChange(val)
-    end)
-    Inc.MouseButton1Click:Connect(function()
-        val = math.min(maxV, val + 1)
-        Disp.Text = tostring(val) .. " st"
-        onChange(val)
-    end)
-end
-
-local ToggleBtn  = makeBtn("Mount: OFF",          44,  180, 0,   0)
-local HitboxBtn  = makeBtn("Hitbox Expand: OFF",  90,  0,   100, 180)
-local NoclipBtn  = makeBtn("Noclip: OFF",         136, 60,  0,   140)
-local AuraBtn    = makeBtn("Kill Aura: OFF",      182, 100, 60,  0)
-local RetargetBtn= makeBtn("Auto-Retarget: ON",   228, 0,   120, 60)
-
-makeStepRow("Studs Above Head",          276, ABOVE,      -10, 50,  function(v) ABOVE = v end)
-makeStepRow("Hit Overlap (into target)", 322, HIT_OFFSET, -5,  5,   function(v) HIT_OFFSET = v end)
-
-local TargetLabel = makeLabel("Target: none", 370)
-
--- ─── setBtn ──────────────────────────────────────
-local function setBtn(on)
-    mounted                    = on
-    ToggleBtn.Text             = on and "Mount: ON" or "Mount: OFF"
-    ToggleBtn.BackgroundColor3 = on
-        and Color3.fromRGB(40, 180, 60)
-        or  Color3.fromRGB(180, 0, 0)
-    TargetLabel.Text = on and targetPlayer
-        and ("Target: " .. targetPlayer.Name)
-        or  "Target: none"
-end
-
--- ─── stop ────────────────────────────────────────
-local function stop()
-    if lockConn then lockConn:Disconnect(); lockConn = nil end
-    targetPlayer = nil
-    pcall(function()
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,  true)
-        humanoid:ChangeState(Enum.HumanoidStateType.GravityScale)
-    end)
-    setBtn(false)
-end
-getgenv().stopMount = stop
-
--- ─── CFrame builder ──────────────────────────────
-local function buildFaceDownCFrame(pos, yaw)
-    return CFrame.new(pos)
-        * CFrame.Angles(0, yaw, 0)
-        * CFrame.Angles(-math.pi / 2, 0, 0)
-end
-
--- ─── mount ───────────────────────────────────────
-local function mount(p)
-    if lockConn then lockConn:Disconnect(); lockConn = nil end
-    targetPlayer = p
-
-    pcall(function()
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,  false)
-        humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-    end)
-
-    setBtn(true)
-
-    lockConn = RunService.Heartbeat:Connect(function()
-        local tp = targetPlayer
-        if not tp or not tp.Character then
-            -- auto-retarget if enabled
-            if AUTO_RETARGET then
-                local next = nearest()
-                if next then mount(next) end
-            else
-                stop()
-            end
-            return
-        end
-
-        local th = tp.Character:FindFirstChild("Humanoid")
-        if th and th.Health <= 0 then
-            if AUTO_RETARGET then
-                local next = nearest(tp)
-                if next then
-                    task.delay(0.3, function() mount(next) end)
-                else
-                    stop()
-                end
-            else
-                stop()
-            end
-            return
-        end
-
-        local tRoot = tp.Character:FindFirstChild("HumanoidRootPart")
-        local tHead = tp.Character:FindFirstChild("Head")
-        if not tRoot then stop(); return end
-
-        local headTopY = tHead
-            and (tHead.Position.Y + tHead.Size.Y * 0.5)
-            or  (tRoot.Position.Y + 3)
-
-        local pos = Vector3.new(
-            tRoot.Position.X,
-            headTopY + ABOVE + HIT_OFFSET,
-            tRoot.Position.Z
-        )
-
-        local _, yaw, _ = tRoot.CFrame:ToEulerAnglesYXZ()
-
-        pcall(function()
-            hrp.Velocity    = Vector3.zero
-            hrp.RotVelocity = Vector3.zero
-        end)
-
-        hrp.CFrame = buildFaceDownCFrame(pos, yaw)
-
-        pcall(function()
-            hrp.Velocity    = Vector3.zero
-            hrp.RotVelocity = Vector3.zero
-        end)
-    end)
-end
-
--- ─── button wiring ───────────────────────────────
-ToggleBtn.MouseButton1Click:Connect(function()
-    if mounted then
-        stop()
-    else
-        local target = nearest()
-        if target then
-            mount(target)
+local function setTab(idx)
+    activeTab = idx
+    for i, f in ipairs(tabFrames) do
+        f.Visible = (i == idx)
+    end
+    for i, b in ipairs(tabBtns) do
+        if i == idx then
+            b.BackgroundColor3 = TAB_COLORS[i]
+            b.TextColor3       = Color3.fromRGB(255,255,255)
         else
-            TargetLabel.Text = "No players found"
+            b.BackgroundColor3 = C.TABINAC
+            b.TextColor3       = C.SUB
         end
     end
-end)
+end
 
-HitboxBtn.MouseButton1Click:Connect(function()
-    if hitboxExpanded then
-        restoreHitbox(character)
-        HitboxBtn.Text             = "Hitbox Expand: OFF"
-        HitboxBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 180)
+for i, name in ipairs(TAB_NAMES) do
+    local b = Instance.new("TextButton")
+    b.Size             = UDim2.new(0.25,-3,1,-6)
+    b.BackgroundColor3 = C.TABINAC
+    b.BorderSizePixel  = 0
+    b.Text             = name
+    b.TextColor3       = C.SUB
+    b.TextSize         = 11
+    b.Font             = Enum.Font.GothamBold
+    b.ZIndex           = 12
+    b.Parent           = tabBar
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,8)
+    tabBtns[i] = b
+
+    local f = Instance.new("Frame")
+    f.Size=UDim2.new(1,0,1,0); f.BackgroundTransparency=1
+    f.Visible=(i==1); f.ZIndex=12; f.Parent=contentArea
+    tabFrames[i] = f
+
+    local idx = i
+    b.MouseButton1Click:Connect(function() setTab(idx) end)
+end
+setTab(1)
+
+-- ── GUI helpers ───────────────────────────────────
+local function mkLbl(parent, txt, y, col, sz)
+    local L = Instance.new("TextLabel")
+    L.Size=UDim2.new(1,0,0,14); L.Position=UDim2.new(0,0,0,y)
+    L.BackgroundTransparency=1; L.Text=txt
+    L.TextColor3=col or C.SUB; L.TextSize=sz or 10
+    L.Font=Enum.Font.Gotham; L.TextXAlignment=Enum.TextXAlignment.Left
+    L.ZIndex=13; L.Parent=parent; return L
+end
+
+local function mkBigLbl(parent, txt, y, col)
+    local L = Instance.new("TextLabel")
+    L.Size=UDim2.new(1,0,0,18); L.Position=UDim2.new(0,0,0,y)
+    L.BackgroundTransparency=1; L.Text=txt
+    L.TextColor3=col or C.TEXT; L.TextSize=13
+    L.Font=Enum.Font.GothamBold; L.TextXAlignment=Enum.TextXAlignment.Left
+    L.ZIndex=13; L.Parent=parent; return L
+end
+
+local function mkBtn(parent, txt, y, h, col)
+    local b = Instance.new("TextButton")
+    b.Size=UDim2.new(1,0,0,h or 34); b.Position=UDim2.new(0,0,0,y)
+    b.BackgroundColor3=col or C.ACCENT; b.BorderSizePixel=0
+    b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255)
+    b.TextSize=12; b.Font=Enum.Font.GothamBold
+    b.AutoButtonColor=false; b.ZIndex=13; b.Parent=parent
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,10)
+    local s=Instance.new("UIStroke",b); s.Color=Color3.fromRGB(255,255,255); s.Transparency=0.85; s.Thickness=1
+    b.MouseEnter:Connect(function() b.BackgroundColor3=Color3.new(col.R*1.15,col.G*1.15,col.B*1.15) end)
+    b.MouseLeave:Connect(function() b.BackgroundColor3=col end)
+    return b
+end
+
+local function mkCard(parent, y, h)
+    local f = Instance.new("Frame")
+    f.Size=UDim2.new(1,0,0,h); f.Position=UDim2.new(0,0,0,y)
+    f.BackgroundColor3=C.PANEL; f.BorderSizePixel=0; f.ZIndex=12; f.Parent=parent
+    Instance.new("UICorner",f).CornerRadius=UDim.new(0,10)
+    local s=Instance.new("UIStroke",f); s.Color=C.BORDER; s.Thickness=1
+    local pad=Instance.new("UIPadding",f)
+    pad.PaddingLeft=UDim.new(0,10); pad.PaddingRight=UDim.new(0,10)
+    pad.PaddingTop=UDim.new(0,8);   pad.PaddingBottom=UDim.new(0,8)
+    return f
+end
+
+local function mkStepper(parent, y, getVal, onDec, onInc)
+    local row = Instance.new("Frame")
+    row.Size=UDim2.new(1,0,0,28); row.Position=UDim2.new(0,0,0,y)
+    row.BackgroundTransparency=1; row.ZIndex=13; row.Parent=parent
+
+    local dec = Instance.new("TextButton")
+    dec.Size=UDim2.new(0,28,0,28); dec.Position=UDim2.new(0,0,0,0)
+    dec.BackgroundColor3=Color3.fromRGB(30,32,50); dec.BorderSizePixel=0
+    dec.Text="−"; dec.TextColor3=C.TEXT; dec.TextSize=16; dec.Font=Enum.Font.GothamBold
+    dec.ZIndex=14; dec.Parent=row
+    Instance.new("UICorner",dec).CornerRadius=UDim.new(0,8)
+
+    local disp = Instance.new("TextLabel")
+    disp.Size=UDim2.new(1,-64,0,28); disp.Position=UDim2.new(0,32,0,0)
+    disp.BackgroundColor3=Color3.fromRGB(22,24,38); disp.BorderSizePixel=0
+    disp.Text=getVal(); disp.TextColor3=C.TEXT; disp.TextSize=12; disp.Font=Enum.Font.GothamBold
+    disp.ZIndex=14; disp.Parent=row
+    Instance.new("UICorner",disp).CornerRadius=UDim.new(0,8)
+
+    local inc = Instance.new("TextButton")
+    inc.Size=UDim2.new(0,28,0,28); inc.Position=UDim2.new(1,-28,0,0)
+    inc.BackgroundColor3=Color3.fromRGB(30,32,50); inc.BorderSizePixel=0
+    inc.Text="+"; inc.TextColor3=C.TEXT; inc.TextSize=16; inc.Font=Enum.Font.GothamBold
+    inc.ZIndex=14; inc.Parent=row
+    Instance.new("UICorner",inc).CornerRadius=UDim.new(0,8)
+
+    dec.MouseButton1Click:Connect(function() onDec(); disp.Text=getVal() end)
+    inc.MouseButton1Click:Connect(function() onInc(); disp.Text=getVal() end)
+    return disp
+end
+
+local function mkToggleRow(parent, y, labelTxt, initState, col, onToggle)
+    local row = Instance.new("Frame")
+    row.Size=UDim2.new(1,0,0,28); row.Position=UDim2.new(0,0,0,y)
+    row.BackgroundTransparency=1; row.ZIndex=13; row.Parent=parent
+
+    local lbl2 = Instance.new("TextLabel")
+    lbl2.Size=UDim2.new(1,-50,1,0); lbl2.BackgroundTransparency=1
+    lbl2.Text=labelTxt; lbl2.TextColor3=C.TEXT; lbl2.TextSize=12; lbl2.Font=Enum.Font.Gotham
+    lbl2.TextXAlignment=Enum.TextXAlignment.Left; lbl2.ZIndex=14; lbl2.Parent=row
+
+    local on = initState
+    local toggle = Instance.new("TextButton")
+    toggle.Size=UDim2.new(0,44,0,22); toggle.Position=UDim2.new(1,-44,0.5,-11)
+    toggle.BackgroundColor3=on and col or C.BORDER; toggle.BorderSizePixel=0
+    toggle.Text=""; toggle.ZIndex=14; toggle.Parent=row
+    Instance.new("UICorner",toggle).CornerRadius=UDim.new(1,0)
+
+    local knob = Instance.new("Frame")
+    knob.Size=UDim2.new(0,16,0,16); knob.Position=on and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)
+    knob.BackgroundColor3=Color3.fromRGB(255,255,255); knob.BorderSizePixel=0
+    knob.ZIndex=15; knob.Parent=toggle
+    Instance.new("UICorner",knob).CornerRadius=UDim.new(1,0)
+
+    toggle.MouseButton1Click:Connect(function()
+        on = not on
+        toggle.BackgroundColor3 = on and col or C.BORDER
+        knob.Position = on and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)
+        onToggle(on)
+    end)
+    return toggle, function() return on end
+end
+
+-- ══════════════════════════════════════════════
+-- TAB 1 — FOLLOW
+-- ══════════════════════════════════════════════
+local f1 = tabFrames[1]
+local fpad = Instance.new("UIPadding",f1); fpad.PaddingTop=UDim.new(0,4)
+
+mkBigLbl(f1,"Shadow Follow",0,C.BLUE)
+mkLbl(f1,"auto-targets nearest, stays on their back",16,C.SUB)
+
+local c1a = mkCard(f1,34,58)
+sfStatusLbl = mkBigLbl(c1a,"○ idle",0,C.SUB)
+sfTargetLbl = mkLbl(c1a,"",18,C.BLUE)
+mkLbl(c1a,"studs behind",32,C.SUB)
+
+local c1b = mkCard(f1,98,46)
+mkLbl(c1b,"distance",0,C.SUB)
+mkStepper(c1b,16,
+    function() return dist.." st" end,
+    function() dist=math.max(1,dist-1) end,
+    function() dist=math.min(100,dist+1) end
+)
+
+sfToggleBtn = mkBtn(f1,"▶  Start Follow",152,34,Color3.fromRGB(30,64,175))
+sfToggleBtn.MouseButton1Click:Connect(function()
+    sfOn = not sfOn
+    if sfOn then
+        sfToggleBtn.Text="■  Stop Follow"; sfToggleBtn.BackgroundColor3=C.RED
+        sfStart()
     else
-        expandHitbox(character)
-        HitboxBtn.Text             = "Hitbox Expand: ON"
-        HitboxBtn.BackgroundColor3 = Color3.fromRGB(50, 205, 50)
+        sfStop()
+        sfToggleBtn.Text="▶  Start Follow"; sfToggleBtn.BackgroundColor3=Color3.fromRGB(30,64,175)
+        sfStatusLbl.Text="○ idle"; sfStatusLbl.TextColor3=C.SUB
+        sfTargetLbl.Text=""
     end
 end)
 
-NoclipBtn.MouseButton1Click:Connect(function()
-    if noclipOn then
-        disableNoclip()
-        NoclipBtn.Text             = "Noclip: OFF"
-        NoclipBtn.BackgroundColor3 = Color3.fromRGB(60, 0, 140)
+-- ══════════════════════════════════════════════
+-- TAB 2 — HITBOX
+-- ══════════════════════════════════════════════
+local f2 = tabFrames[2]
+local f2pad = Instance.new("UIPadding",f2); f2pad.PaddingTop=UDim.new(0,4)
+
+mkBigLbl(f2,"Hitbox Extender",0,C.RED)
+mkLbl(f2,"expands enemy parts so every move connects",16,C.SUB)
+
+local hitStatusLbl = mkLbl(f2,"status: off",34,C.SUB,11)
+
+local c2a = mkCard(f2,52,46)
+mkLbl(c2a,"expand size (studs)",0,C.SUB)
+mkStepper(c2a,16,
+    function() return HIT_SIZE.." st" end,
+    function() HIT_SIZE=math.max(5,HIT_SIZE-5) end,
+    function() HIT_SIZE=math.min(500,HIT_SIZE+5) end
+)
+
+local hitBtn = mkBtn(f2,"Hitbox Extend: OFF",106,34,Color3.fromRGB(60,10,10))
+hitBtn.MouseButton1Click:Connect(function()
+    if hitOn then
+        stopHitbox()
+        hitBtn.Text="Hitbox Extend: OFF"; hitBtn.BackgroundColor3=Color3.fromRGB(60,10,10)
+        hitStatusLbl.Text="status: off"; hitStatusLbl.TextColor3=C.SUB
     else
-        enableNoclip()
-        NoclipBtn.Text             = "Noclip: ON"
-        NoclipBtn.BackgroundColor3 = Color3.fromRGB(160, 0, 255)
+        startHitbox()
+        hitBtn.Text="Hitbox Extend: ON"; hitBtn.BackgroundColor3=C.RED
+        hitStatusLbl.Text="status: active"; hitStatusLbl.TextColor3=C.RED
     end
 end)
 
-AuraBtn.MouseButton1Click:Connect(function()
-    KILL_AURA = not KILL_AURA
-    if KILL_AURA then
-        startAura()
-        AuraBtn.Text             = "Kill Aura: ON"
-        AuraBtn.BackgroundColor3 = Color3.fromRGB(220, 80, 0)
+mkLbl(f2,"tip: higher values = easier to hit airborne enemies",148,C.SUB,9)
+mkLbl(f2,"tip: respawn resets enemy sizes, re-enable after",160,C.SUB,9)
+
+-- ══════════════════════════════════════════════
+-- TAB 3 — VOID FLOOR
+-- ══════════════════════════════════════════════
+local f3 = tabFrames[3]
+local f3pad = Instance.new("UIPadding",f3); f3pad.PaddingTop=UDim.new(0,4)
+
+mkBigLbl(f3,"Void Floor",0,C.GREEN)
+mkLbl(f3,"spawns a platform when you fall below threshold",16,C.SUB)
+
+local voidStatusLbl = mkLbl(f3,"watching...",34,C.GREEN,11)
+
+local c3a = mkCard(f3,52,46)
+mkLbl(c3a,"trigger Y threshold",0,C.SUB)
+mkStepper(c3a,16,
+    function() return tostring(VOID_Y) end,
+    function() VOID_Y=VOID_Y-50 end,
+    function() VOID_Y=VOID_Y+50 end
+)
+
+local c3b = mkCard(f3,106,46)
+mkLbl(c3b,"floor spawn Y",0,C.SUB)
+mkStepper(c3b,16,
+    function() return tostring(FLOOR_Y) end,
+    function() FLOOR_Y=FLOOR_Y-10 end,
+    function() FLOOR_Y=FLOOR_Y+10 end
+)
+
+mkLbl(f3,"void floor is always active",158,C.GREEN,10)
+mkLbl(f3,"floor self-destructs after 10 seconds",170,C.SUB,9)
+
+RunService.Heartbeat:Connect(function()
+    if not voidStatusLbl then return end
+    if floorPart and floorPart.Parent then
+        voidStatusLbl.Text="⬛ floor active"; voidStatusLbl.TextColor3=C.GREEN
     else
-        stopAura()
-        AuraBtn.Text             = "Kill Aura: OFF"
-        AuraBtn.BackgroundColor3 = Color3.fromRGB(100, 60, 0)
+        voidStatusLbl.Text="watching..."; voidStatusLbl.TextColor3=C.SUB
     end
 end)
 
-RetargetBtn.MouseButton1Click:Connect(function()
-    AUTO_RETARGET = not AUTO_RETARGET
-    RetargetBtn.Text             = AUTO_RETARGET and "Auto-Retarget: ON" or "Auto-Retarget: OFF"
-    RetargetBtn.BackgroundColor3 = AUTO_RETARGET
-        and Color3.fromRGB(0, 120, 60)
-        or  Color3.fromRGB(100, 0, 0)
-end)
+-- ══════════════════════════════════════════════
+-- TAB 4 — VFX
+-- ══════════════════════════════════════════════
+local f4 = tabFrames[4]
+local f4pad = Instance.new("UIPadding",f4); f4pad.PaddingTop=UDim.new(0,4)
 
--- ─── respawn ─────────────────────────────────────
-LocalPlayer.CharacterAdded:Connect(function(c)
-    character      = c
-    hrp            = c:WaitForChild("HumanoidRootPart")
-    humanoid       = c:WaitForChild("Humanoid")
-    origSizes      = {}
-    hitboxExpanded = false
-    noclipOn       = false
-    noclipConn     = nil
-    if targetPlayer then
-        task.wait(0.5)
-        mount(targetPlayer)
+mkBigLbl(f4,"VFX Remover",0,C.YELLOW)
+mkLbl(f4,"nukes all visual effects in the entire game",16,C.SUB)
+
+local vfxStatusLbl = mkLbl(f4,"status: off",34,C.SUB,11)
+
+local vfxBtn = mkBtn(f4,"Remove All VFX: OFF",52,34,Color3.fromRGB(60,50,10))
+vfxBtn.MouseButton1Click:Connect(function()
+    if vfxOn then
+        stopVFX()
+        vfxBtn.Text="Remove All VFX: OFF"; vfxBtn.BackgroundColor3=Color3.fromRGB(60,50,10)
+        vfxStatusLbl.Text="status: off"; vfxStatusLbl.TextColor3=C.SUB
+    else
+        startVFX()
+        vfxBtn.Text="Remove All VFX: ON"; vfxBtn.BackgroundColor3=C.YELLOW
+        vfxStatusLbl.Text="status: nuking"; vfxStatusLbl.TextColor3=C.YELLOW
     end
 end)
 
-startAura()
-print("[TopMount v8] loaded")
+local c4a = mkCard(f4,96,100)
+local removes = {
+    "ParticleEmitter  Trail  Beam",
+    "Smoke  Fire  Sparkles",
+    "PointLight  SpotLight  SurfaceLight",
+    "BlurEffect  BloomEffect  SunRays",
+    "ColorCorrection  DepthOfField",
+    "BillboardGui  SurfaceGui",
+    "Explosions (zeroed)",
+    "Atmosphere  Sky  Fog",
+}
+for i, line in ipairs(removes) do
+    mkLbl(c4a, "• "..line, (i-1)*11, C.SUB, 9)
+end
+
+mkLbl(f4,"re-sweeps every 3s to catch new effects",202,C.SUB,9)
