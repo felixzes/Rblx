@@ -1,0 +1,428 @@
+--[[
+    chatfly.lua
+    :fly <name>     — makes target fly (BodyVelocity + BodyGyro forced on their character)
+    :land <name>    — removes fly from target
+    :flyall         — flies everyone
+    :landall        — lands everyone
+    works by writing movers into the target's character parts via network ownership claim
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TextChatService  = game:GetService("TextChatService")
+local Workspace        = game:GetService("Workspace")
+
+local LP = Players.LocalPlayer
+
+-- ─── state ───────────────────────────────────────
+local flying = {}   -- player → { bv, bg, conn }
+
+-- ─── network claim ───────────────────────────────
+local function claimParts(char)
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") then
+            pcall(function()
+                p:SetNetworkOwner(LP)
+                sethiddenproperty(LP, "SimulationRadius",    2147483647)
+                sethiddenproperty(LP, "MaxSimulationRadius", 2147483647)
+            end)
+        end
+    end
+    LP.ReplicationFocus = Workspace
+end
+
+-- ─── fly on a player ─────────────────────────────
+local function startFly(p)
+    if flying[p] then return end
+    local char = p.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+
+    claimParts(char)
+
+    -- suppress gravity
+    if hum then
+        pcall(function()
+            hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Jumping,  false)
+        end)
+    end
+
+    local bv = Instance.new("BodyVelocity")
+    bv.Velocity  = Vector3.new(0, 30, 0)   -- launch upward first
+    bv.MaxForce  = Vector3.new(0, 1e6, 0)
+    bv.P         = 1e4
+    bv.Parent    = hrp
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    bg.P         = 1e4
+    bg.D         = 500
+    bg.CFrame    = hrp.CFrame
+    bg.Parent    = hrp
+
+    -- after launch, switch to hover
+    task.delay(0.6, function()
+        if not flying[p] then return end
+        bv.Velocity = Vector3.new(0, 0, 0)
+        bv.MaxForce = Vector3.new(0, 1e9, 0)
+    end)
+
+    -- heartbeat: re-enforce ownership + keep them floating
+    local conn = RunService.Heartbeat:Connect(function()
+        if not flying[p] then return end
+        local c = p.Character
+        if not c then return end
+        local h = c:FindFirstChild("HumanoidRootPart")
+        if not h then return end
+        -- re-enforce network ownership every frame
+        pcall(function() h:SetNetworkOwner(LP) end)
+        -- keep vertical velocity nulled so they hover
+        if bv and bv.Parent then
+            bv.MaxForce = Vector3.new(0, 1e9, 0)
+            -- if they have no vertical motion keep them locked
+            if math.abs(h.Velocity.Y) < 2 then
+                bv.Velocity = Vector3.new(0, 0, 0)
+            end
+        end
+    end)
+
+    flying[p] = { bv = bv, bg = bg, conn = conn }
+end
+
+local function stopFly(p)
+    local data = flying[p]
+    if not data then return end
+    flying[p] = nil
+    data.conn:Disconnect()
+    if data.bv and data.bv.Parent then data.bv:Destroy() end
+    if data.bg and data.bg.Parent then data.bg:Destroy() end
+    local char = p.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function()
+                hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+                hum:SetStateEnabled(Enum.HumanoidStateType.Jumping,  true)
+            end)
+        end
+    end
+end
+
+local function flyAll()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then startFly(p) end
+    end
+end
+
+local function landAll()
+    for _, p in ipairs(Players:GetPlayers()) do
+        stopFly(p)
+    end
+end
+
+-- ─── name resolve (partial match) ────────────────
+local function resolvePlayer(name)
+    name = name:lower()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower() == name then return p end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower():sub(1, #name) == name then return p end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower():find(name, 1, true) then return p end
+    end
+    return nil
+end
+
+-- ─── chat hook ───────────────────────────────────
+local function handleMsg(text)
+    text = text:match("^%s*(.-)%s*$")  -- trim
+    local cmd, arg = text:match("^:(%S+)%s*(.*)")
+    if not cmd then return end
+    cmd = cmd:lower()
+    arg = arg and arg:match("^%s*(.-)%s*$") or ""
+
+    if cmd == "fly" then
+        if arg == "" then
+            notify("❌", ":fly requires a username")
+            return
+        end
+        local p = resolvePlayer(arg)
+        if not p then notify("❌", "player not found: "..arg); return end
+        startFly(p)
+        notify("✈", "flying "..p.Name)
+
+    elseif cmd == "land" then
+        if arg == "" then
+            notify("❌", ":land requires a username")
+            return
+        end
+        local p = resolvePlayer(arg)
+        if not p then notify("❌", "player not found: "..arg); return end
+        stopFly(p)
+        notify("🛬", "landed "..p.Name)
+
+    elseif cmd == "flyall" then
+        flyAll()
+        notify("✈", "flying all players")
+
+    elseif cmd == "landall" then
+        landAll()
+        notify("🛬", "landed all players")
+
+    elseif cmd == "flyhelp" then
+        notify("📖", ":fly <name>  :land <name>  :flyall  :landall")
+    end
+end
+
+-- ─── notification helper ─────────────────────────
+-- defined after handleMsg since it's a forward ref
+notify = function(icon, msg)
+    local StarterGui = game:GetService("StarterGui")
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title    = icon .. " chatfly",
+            Text     = msg,
+            Duration = 3,
+        })
+    end)
+    -- also print to the GUI log (built below)
+    if logAdd then logAdd(icon.." "..msg) end
+end
+
+-- ─── chat intercept ──────────────────────────────
+-- works on both legacy and new TextChatService
+local function hookChat()
+    -- new chat
+    if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+        local ch = TextChatService:FindFirstChild("TextChannels")
+            and TextChatService.TextChannels:FindFirstChild("RBXGeneral")
+        if ch then
+            -- intercept before send: use a TextChannel:SendAsync wrapper
+            -- hook via MessageReceived on the local player's outgoing messages
+            TextChatService.SendingMessage:Connect(function(msg)
+                local txt = msg.Text
+                if txt:sub(1,1) == ":" then
+                    handleMsg(txt)
+                end
+            end)
+        end
+        -- also hook via MessageReceived for messages from self
+        TextChatService.MessageReceived:Connect(function(msg)
+            if msg.TextSource and msg.TextSource.UserId == LP.UserId then
+                local txt = msg.Text
+                if txt:sub(1,1) == ":" then
+                    handleMsg(txt)
+                end
+            end
+        end)
+    else
+        -- legacy chat
+        local ok, chatGui = pcall(function()
+            return LP.PlayerGui:WaitForChild("Chat", 5)
+        end)
+        if ok and chatGui then
+            pcall(function()
+                local frame = chatGui:FindFirstChild("Frame")
+                local chatBar = frame and frame:FindFirstChildWhichIsA("TextBox", true)
+                if chatBar then
+                    chatBar.FocusLost:Connect(function(enter)
+                        if enter then
+                            local txt = chatBar.Text
+                            if txt:sub(1,1) == ":" then
+                                handleMsg(txt)
+                            end
+                        end
+                    end)
+                end
+            end)
+        end
+        -- fallback: hook via chat event
+        pcall(function()
+            local re = game:GetService("ReplicatedStorage")
+                :FindFirstChild("DefaultChatSystemChatEvents")
+            if re then
+                local sayMsg = re:FindFirstChild("SayMessageRequest")
+                if sayMsg then
+                    -- we can't hook FireServer but we can listen for the GUI box
+                end
+            end
+        end)
+    end
+end
+
+hookChat()
+
+-- also intercept via a raw UserInputService hook on Enter key as fallback
+-- reads the chat box text directly
+local function rawChatHook()
+    UserInputService.InputBegan:Connect(function(input, gpe)
+        if input.KeyCode ~= Enum.KeyCode.Return and input.KeyCode ~= Enum.KeyCode.KeypadEnter then return end
+        -- find active TextBox
+        local focused = UserInputService:GetFocusedTextBox()
+        if not focused then return end
+        local txt = focused.Text
+        if txt and txt:sub(1,1) == ":" then
+            handleMsg(txt)
+        end
+    end)
+end
+rawChatHook()
+
+-- ─── cleanup on player leave ─────────────────────
+Players.PlayerRemoving:Connect(function(p)
+    stopFly(p)
+end)
+
+-- ─── GUI ─────────────────────────────────────────
+local sg = Instance.new("ScreenGui")
+sg.Name="ChatFlyGui"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true
+sg.Parent=LP:WaitForChild("PlayerGui")
+
+local panel = Instance.new("Frame")
+panel.Size=UDim2.new(0,240,0,320); panel.Position=UDim2.new(0,16,0.5,-160)
+panel.BackgroundColor3=Color3.fromRGB(8,9,16); panel.BorderSizePixel=0
+panel.Active=true; panel.Parent=sg
+Instance.new("UICorner",panel).CornerRadius=UDim.new(0,14)
+local stroke=Instance.new("UIStroke")
+stroke.Color=Color3.fromRGB(60,60,180); stroke.Thickness=1.5; stroke.Parent=panel
+
+-- title bar
+local bar=Instance.new("Frame")
+bar.Size=UDim2.new(1,0,0,36); bar.BackgroundColor3=Color3.fromRGB(14,16,36)
+bar.BorderSizePixel=0; bar.ZIndex=2; bar.Parent=panel
+Instance.new("UICorner",bar).CornerRadius=UDim.new(0,14)
+local fix=Instance.new("Frame"); fix.Size=UDim2.new(1,0,0,8); fix.Position=UDim2.new(0,0,1,-8)
+fix.BackgroundColor3=Color3.fromRGB(14,16,36); fix.BorderSizePixel=0; fix.ZIndex=2; fix.Parent=bar
+local titleL=Instance.new("TextLabel")
+titleL.Size=UDim2.new(1,-8,1,0); titleL.Position=UDim2.new(0,12,0,0)
+titleL.BackgroundTransparency=1; titleL.Text="✦ chatfly"
+titleL.TextColor3=Color3.fromRGB(255,255,255); titleL.TextSize=14
+titleL.Font=Enum.Font.GothamBold; titleL.TextXAlignment=Enum.TextXAlignment.Left
+titleL.ZIndex=3; titleL.Parent=bar
+
+-- drag
+local drag,ds,sp=false,Vector2.zero,UDim2.new()
+bar.InputBegan:Connect(function(i)
+    if i.UserInputType~=Enum.UserInputType.MouseButton1
+    and i.UserInputType~=Enum.UserInputType.Touch then return end
+    drag=true; ds=Vector2.new(i.Position.X,i.Position.Y); sp=panel.Position
+    i.Changed:Connect(function()
+        if i.UserInputState==Enum.UserInputState.End then drag=false end
+    end)
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if not drag then return end
+    if i.UserInputType~=Enum.UserInputType.MouseMovement
+    and i.UserInputType~=Enum.UserInputType.Touch then return end
+    local d=Vector2.new(i.Position.X,i.Position.Y)-ds
+    panel.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y)
+end)
+
+-- command reference card
+local function refLbl(txt, y, col)
+    local L=Instance.new("TextLabel")
+    L.Size=UDim2.new(1,-20,0,14); L.Position=UDim2.new(0,10,0,y)
+    L.BackgroundTransparency=1; L.Text=txt
+    L.TextColor3=col or Color3.fromRGB(120,130,180); L.TextSize=10
+    L.Font=Enum.Font.Gotham; L.TextXAlignment=Enum.TextXAlignment.Left
+    L.ZIndex=3; L.Parent=panel; return L
+end
+
+refLbl("commands", 42, Color3.fromRGB(180,180,255))
+local refs = {
+    {":fly <name>",   "make player fly"},
+    {":land <name>",  "bring player down"},
+    {":flyall",       "fly everyone"},
+    {":landall",      "land everyone"},
+    {":flyhelp",      "show this list"},
+}
+for i, r in ipairs(refs) do
+    local y = 56 + (i-1)*20
+    local cmd = Instance.new("TextLabel")
+    cmd.Size=UDim2.new(0.44,0,0,16); cmd.Position=UDim2.new(0,10,0,y)
+    cmd.BackgroundTransparency=1; cmd.Text=r[1]
+    cmd.TextColor3=Color3.fromRGB(99,102,241); cmd.TextSize=10
+    cmd.Font=Enum.Font.GothamBold; cmd.TextXAlignment=Enum.TextXAlignment.Left
+    cmd.ZIndex=3; cmd.Parent=panel
+
+    local desc = Instance.new("TextLabel")
+    desc.Size=UDim2.new(0.56,-10,0,16); desc.Position=UDim2.new(0.44,0,0,y)
+    desc.BackgroundTransparency=1; desc.Text=r[2]
+    desc.TextColor3=Color3.fromRGB(100,110,150); desc.TextSize=10
+    desc.Font=Enum.Font.Gotham; desc.TextXAlignment=Enum.TextXAlignment.Left
+    desc.ZIndex=3; desc.Parent=panel
+end
+
+-- divider
+local div=Instance.new("Frame")
+div.Size=UDim2.new(1,-20,0,1); div.Position=UDim2.new(0,10,0,162)
+div.BackgroundColor3=Color3.fromRGB(30,32,60); div.BorderSizePixel=0; div.ZIndex=3; div.Parent=panel
+
+-- quick buttons
+refLbl("quick actions",168,Color3.fromRGB(180,180,255))
+
+local function qBtn(txt, y, col, cb)
+    local b=Instance.new("TextButton")
+    b.Size=UDim2.new(0.47,0,0,28); b.Position=y
+    b.BackgroundColor3=col; b.BorderSizePixel=0
+    b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255)
+    b.TextSize=11; b.Font=Enum.Font.GothamBold; b.ZIndex=3; b.Parent=panel
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,8)
+    b.MouseButton1Click:Connect(cb)
+    return b
+end
+
+qBtn("✈ Fly All",    UDim2.new(0,10,0,182), Color3.fromRGB(30,64,175), flyAll)
+qBtn("🛬 Land All",  UDim2.new(0.53,0,0,182), Color3.fromRGB(100,20,20), landAll)
+
+-- log
+refLbl("log",218,Color3.fromRGB(180,180,255))
+
+local logFrame=Instance.new("ScrollingFrame")
+logFrame.Size=UDim2.new(1,-20,0,84); logFrame.Position=UDim2.new(0,10,0,232)
+logFrame.BackgroundColor3=Color3.fromRGB(10,11,20); logFrame.BorderSizePixel=0
+logFrame.ScrollBarThickness=2; logFrame.ScrollBarImageColor3=Color3.fromRGB(80,80,200)
+logFrame.CanvasSize=UDim2.new(0,0,0,0); logFrame.AutomaticCanvasSize=Enum.AutomaticSize.Y
+logFrame.ZIndex=3; logFrame.Parent=panel
+Instance.new("UICorner",logFrame).CornerRadius=UDim.new(0,8)
+Instance.new("UIStroke",logFrame).Color=Color3.fromRGB(30,32,60)
+local logLayout=Instance.new("UIListLayout",logFrame)
+logLayout.Padding=UDim.new(0,2); logLayout.SortOrder=Enum.SortOrder.LayoutOrder
+local logPad=Instance.new("UIPadding",logFrame)
+logPad.PaddingAll=UDim.new(0,4)
+
+local logCount = 0
+logAdd = function(txt)
+    logCount = logCount + 1
+    local L=Instance.new("TextLabel")
+    L.Size=UDim2.new(1,0,0,13); L.BackgroundTransparency=1
+    L.Text=txt; L.TextColor3=Color3.fromRGB(140,200,140); L.TextSize=9
+    L.Font=Enum.Font.Code; L.TextXAlignment=Enum.TextXAlignment.Left
+    L.LayoutOrder=logCount; L.ZIndex=4; L.Parent=logFrame
+    -- keep scroll at bottom
+    task.defer(function()
+        logFrame.CanvasPosition=Vector2.new(0,logFrame.AbsoluteCanvasSize.Y)
+    end)
+    -- cap log at 40 lines
+    local kids=logFrame:GetChildren()
+    local lines={}
+    for _,k in ipairs(kids) do if k:IsA("TextLabel") then table.insert(lines,k) end end
+    if #lines>40 then lines[1]:Destroy() end
+end
+
+-- live flying list
+RunService.Heartbeat:Connect(function()
+    local names={}
+    for p in pairs(flying) do
+        if p and p.Parent then table.insert(names, p.Name) end
+    end
+end)
+
+logAdd("✦ chatfly loaded — type :flyhelp in chat")
+logAdd("tip: partial names work  (:fly rob → Roblox)")
