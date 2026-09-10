@@ -1,0 +1,797 @@
+--[[
+    hollow_purple.lua
+    4 swords 45st LEFT + 9st FRONT of player
+    4 swords 45st RIGHT + 9st FRONT of player
+    CHARGE: both clusters drift toward each other slowly (speed adjustable)
+    RELEASE: merged ball launches in direction controlled by thumb drag
+    built on Devil's Blade BLAD advanced 500-point shape
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local SoundService     = game:GetService("SoundService")
+local StarterGui       = game:GetService("StarterGui")
+local Workspace        = game:GetService("Workspace")
+local LP               = Players.LocalPlayer
+
+local character        = LP.Character or LP.CharacterAdded:Wait()
+local HRP              = character:WaitForChild("HumanoidRootPart")
+
+-- ── network ───────────────────────────────────────────────────────────────────
+if not getgenv().Network then
+    getgenv().Network={BaseParts={},Velocity=Vector3.new(14.46,14.46,14.46)}
+    local N=getgenv().Network
+    N.RetainPart=function(p)
+        if typeof(p)=="Instance" and p:IsA("BasePart") and p:IsDescendantOf(Workspace) then
+            if not table.find(N.BaseParts,p) then
+                table.insert(N.BaseParts,p)
+                p.CustomPhysicalProperties=PhysicalProperties.new(0,0,0,0,0)
+                p.CanCollide=false
+            end
+        end
+    end
+    LP.ReplicationFocus=Workspace
+    RunService.Heartbeat:Connect(function()
+        pcall(function()
+            sethiddenproperty(LP,"SimulationRadius",math.huge)
+            sethiddenproperty(LP,"MaxSimulationRadius",math.huge)
+        end)
+        for _,p in pairs(getgenv().Network.BaseParts) do
+            if p:IsDescendantOf(Workspace) and p.Parent then
+                p.Velocity=getgenv().Network.Velocity
+            end
+        end
+    end)
+end
+
+local function playSound(id)
+    local s=Instance.new("Sound"); s.SoundId="rbxassetid://"..id
+    s.Parent=SoundService; s:Play(); s.Ended:Connect(function() s:Destroy() end)
+end
+playSound("2865227271")
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ── 500-POINT DEVIL BLADE TARGET TABLE (full advanced shape from BLAD) ────────
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local TARGETS={}
+local PHI=(1+math.sqrt(5))/2
+
+local function ring(i,n,r,fz) local a=2*math.pi*(i-1)/n; return r*math.cos(a),r*math.sin(a)*(fz or 1) end
+local function sun(i,n,R,fz) local r=R*math.sqrt(i/n); local a=2*math.pi*i/(PHI*PHI); return r*math.cos(a),r*math.sin(a)*(fz or 1) end
+local function b3(t,p0,p1,p2,p3) local u=1-t; return u^3*p0+3*u^2*t*p1+3*u*t^2*p2+t^3*p3 end
+local function jt(i,s) return ((i*1619+s*1013)%1000)/500-1 end
+
+for i=1,24 do local x,z=ring(i,24,10.5,.30); table.insert(TARGETS,{x=x,y=-57+(i%4)*.6,z=z}) end
+for i=1,18 do local x,z=ring(i,18,7.0,.30); table.insert(TARGETS,{x=x,y=-56+(i%3)*.7,z=z}) end
+for i=1,20 do local x,z=sun(i,20,6.2,.28); table.insert(TARGETS,{x=x,y=-55.5+(i%4)*.5,z=z}) end
+for i=1,8  do local x,z=sun(i,8,2.8,.18); table.insert(TARGETS,{x=x,y=-55+i*.1,z=z}) end
+for i=1,32 do
+    local lt=(i-1)/31; local y=-50+lt*8; local rp=math.sin(lt*math.pi*5); local r=2.4+rp*.9
+    local a=2*math.pi*i/PHI; table.insert(TARGETS,{x=r*math.cos(a),y=y,z=r*math.sin(a)*.42})
+end
+for i=1,16 do local lt=(i-1)/15; table.insert(TARGETS,{x=-11+lt*22,y=-40+(i%3)*.7,z=jt(i,1)*1.6}) end
+for i=1,22 do local t=(i-1)/21; local th=(1-t)*3.8+.5; table.insert(TARGETS,{x=b3(t,-11,-20,-25,-24)+jt(i,3)*th*.4,y=b3(t,-40,-39,-37,-34),z=jt(i,2)*th*.5}) end
+for i=1,22 do local t=(i-1)/21; local th=(1-t)*3.8+.5; table.insert(TARGETS,{x=b3(t,11,20,25,24)+jt(i,5)*th*.4,y=b3(t,-40,-39,-37,-34),z=jt(i,4)*th*.5}) end
+for i=1,8  do local a=2*math.pi*(i-1)/8; table.insert(TARGETS,{x=-24+math.cos(a)*2.8,y=-34+math.sin(a)*2.2,z=jt(i,6)*.9}) end
+for i=1,8  do local a=2*math.pi*(i-1)/8; table.insert(TARGETS,{x= 24+math.cos(a)*2.8,y=-34+math.sin(a)*2.2,z=jt(i,7)*.9}) end
+for i=1,10 do local lt=(i-1)/9; local th=(1-lt)*2.8+.3; table.insert(TARGETS,{x=b3(lt,-9,-14,-16,-13),y=b3(lt,-40,-43,-47,-49),z=jt(i,8)*th*.4}) end
+for i=1,10 do local lt=(i-1)/9; local th=(1-lt)*2.8+.3; table.insert(TARGETS,{x=b3(lt,9,14,16,13),y=b3(lt,-40,-43,-47,-49),z=jt(i,9)*th*.4}) end
+for i=1,4  do local lt=(i-1)/3; table.insert(TARGETS,{x=-3.6,y=-38-lt*6,z=jt(i,10)*.3}) end
+for i=1,4  do local lt=(i-1)/3; table.insert(TARGETS,{x= 3.6,y=-38-lt*6,z=jt(i,11)*.3}) end
+
+local BROOT=-14; local BTIP=60; local BMW=13.5; local BMD=2.2
+local function bp(y)
+    if y<=BROOT then return BMW,BMD end
+    if y>=BTIP  then return 0,0 end
+    local be=54
+    if y<=be then
+        local t=(y-BROOT)/(be-BROOT)
+        return math.max(0,BMW*(1-t^1.6)),math.max(0,BMD*(1-t^1.3))
+    end
+    local t=(y-be)/(BTIP-be); return BMW*(1-t)*.08,BMD*(1-t)*.18
+end
+
+for i=1,16 do local lt=(i-1)/15; local y=-22+lt*8; local hw,hd=bp(y); local a=2*math.pi*i/PHI; local r=math.sqrt((i-.5)/16); table.insert(TARGETS,{x=r*hw*math.cos(a),y=y,z=r*hd*math.sin(a)}) end
+for i=1,8  do local a=2*math.pi*(i-1)/8; local hw,hd=bp(-14); table.insert(TARGETS,{x=hw*math.cos(a),y=-14+(i%3)*.4,z=hd*math.sin(a)}) end
+for i=1,64 do
+    local lt=(i-1)/63; local y=-14+lt*42; local hw,hd=bp(y); local mode=i%10; local x,z
+    if mode<4 then local side=(i%2==0)and 1 or -1; x=side*(hw*.93+jt(i,12)*.9); z=jt(i,13)*hd*.45
+    elseif mode<7 then x=jt(i,14)*hw*.80; z=(i%2==0 and 1 or -1)*(hd*.88+jt(i,15)*.15)
+    elseif mode<9 then local a=2*math.pi*i/PHI; local r=math.sqrt(((i-1)%16+.5)/16); x=r*hw*math.cos(a); z=r*hd*math.sin(a)
+    else x=jt(i,16)*hw*.18; z=jt(i,17)*.20 end
+    table.insert(TARGETS,{x=x,y=y,z=z})
+end
+for i=1,14 do local lt=(i-1)/13; local y=-14+lt*46; local hw=bp(y); table.insert(TARGETS,{x=jt(i,18)*hw*.20,y=y,z=jt(i,19)*.18}) end
+for i=1,40 do
+    local lt=(i-1)/39; local y=28+lt*16; local hw,hd=bp(y); local mode=i%8; local x,z
+    if mode<3 then local side=(i%2==0)and 1 or -1; x=side*(hw*.92+jt(i,20)*.6); z=jt(i,21)*hd*.4
+    elseif mode<6 then x=jt(i,22)*hw*.75; z=(i%2==0 and 1 or -1)*(hd*.85+jt(i,23)*.12)
+    else local a=2*math.pi*i/PHI; local r=math.sqrt(((i-1)%12+.5)/12); x=r*hw*math.cos(a); z=r*hd*math.sin(a) end
+    table.insert(TARGETS,{x=x,y=y,z=z})
+end
+for i=1,32 do
+    local lt=(i-1)/31; local y=44+lt*10; local hw,hd=bp(y); if hw<.05 then hw=.05 end
+    local mode=i%6; local x,z
+    if mode<2 then local side=(i%2==0)and 1 or -1; x=side*(hw*.94+jt(i,24)*.4); z=jt(i,25)*hd*.35
+    elseif mode<4 then x=jt(i,26)*hw*.70; z=(i%2==0 and 1 or -1)*(hd*.82+jt(i,27)*.10)
+    else local a=2*math.pi*i/PHI; local r=math.sqrt(((i-1)%8+.5)/8); x=r*hw*math.cos(a); z=r*hd*math.sin(a) end
+    table.insert(TARGETS,{x=x,y=y,z=z})
+end
+for i=1,14 do local lt=(i-1)/13; local y=44+lt*12; local hw,hd=bp(y); table.insert(TARGETS,{x=jt(i,28)*hw*.55,y=y,z=hd*.70+jt(i,29)*hd*.25}) end
+for i=1,16 do local lt=(i-1)/15; local y=54+lt*4; local hw,hd=bp(y); if hw<.03 then hw=.03 end; local a=2*math.pi*i/PHI; local r=math.sqrt((i-.5)/16); table.insert(TARGETS,{x=r*hw*math.cos(a),y=y,z=r*hd*math.sin(a)}) end
+for i=1,8  do local lt=(i-1)/7; local y=58+lt*2; local hw=.5*(1-lt); local a=2*math.pi*i/PHI; table.insert(TARGETS,{x=hw*math.cos(a),y=y,z=hw*math.sin(a)*.15}) end
+
+while #TARGETS<500 do table.insert(TARGETS,{x=0,y=60,z=0}) end
+if #TARGETS>500 then for i=#TARGETS,501,-1 do TARGETS[i]=nil end end
+local function getSlot(i) return TARGETS[((i-1)%500)+1] end
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ── SWORD ENGINE ─────────────────────────────────────────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local MAX_SWORDS=8
+local swords={}
+local partOwner={}; local partCounter=0; local activeSwordCount=0
+
+local function createSword(idx)
+    local sw={}; sw.idx=idx; sw.enabled=false; sw.parts={}
+    sw.yaw=0; sw.pitch=0; sw.centerPos=HRP.Position
+
+    sw.folder=Instance.new("Folder",Workspace)
+    sw.anchor=Instance.new("Part",sw.folder)
+    sw.anchor.Anchored=true; sw.anchor.CanCollide=false
+    sw.anchor.Transparency=1; sw.anchor.Size=Vector3.new(1,1,1)
+    sw.anchor.Position=HRP.Position
+
+    local TA="S"..idx.."A"; local TP="S"..idx.."P"; local TT="S"..idx.."T"
+
+    sw.eligible=function(p)
+        if not p:IsA("BasePart") or p.Anchored then return false end
+        if not p:IsDescendantOf(Workspace) then return false end
+        for _,s in ipairs(swords) do if p:IsDescendantOf(s.folder) then return false end end
+        if LP.Character and p:IsDescendantOf(LP.Character) then return false end
+        local a=p.Parent
+        while a and a~=Workspace do
+            if a:FindFirstChild("Humanoid") or a:FindFirstChild("Head") then return false end
+            a=a.Parent
+        end
+        return true
+    end
+
+    sw.force=function(p)
+        for _,x in next,p:GetChildren() do
+            if x:IsA("BodyAngularVelocity") or x:IsA("BodyForce") or x:IsA("BodyGyro")
+            or x:IsA("BodyPosition") or x:IsA("BodyThrust") or x:IsA("BodyVelocity")
+            or x:IsA("RocketPropulsion") then x:Destroy() end
+        end
+        for _,n in ipairs({TA,TP,TT}) do local c=p:FindFirstChild(n); if c then c:Destroy() end end
+        p.CanCollide=false
+        local att=Instance.new("Attachment",p); att.Name=TA
+        local torq=Instance.new("Torque",p); torq.Name=TT
+        torq.Torque=Vector3.new(1e9,1e9,1e9); torq.Attachment0=att
+        local na=Instance.new("Attachment",sw.anchor)
+        local ap=Instance.new("AlignPosition",p); ap.Name=TP
+        ap.MaxForce=math.huge; ap.MaxVelocity=math.huge; ap.Responsiveness=2000
+        ap.Attachment0=att; ap.Attachment1=na; ap.Parent=p
+    end
+
+    sw.clean=function(p)
+        if not p or not p.Parent then return end
+        for _,n in ipairs({TA,TP,TT}) do local c=p:FindFirstChild(n); if c then c:Destroy() end end
+    end
+
+    sw.rot=function(x,y,z)
+        local cy,sy=math.cos(sw.yaw),math.sin(sw.yaw)
+        local cp,sp=math.cos(sw.pitch),math.sin(sw.pitch)
+        local rx=cy*x-sy*z; local rz=sy*x+cy*z
+        return rx,cp*y-sp*rz,sp*y+cp*rz
+    end
+
+    return sw
+end
+
+for i=1,MAX_SWORDS do table.insert(swords,createSword(i)) end
+
+local function resetPartitions()
+    for _,sw in ipairs(swords) do
+        for _,p in ipairs(sw.parts) do sw.clean(p) end
+        sw.parts={}
+        for _,ch in ipairs(sw.anchor:GetChildren()) do
+            if ch:IsA("Attachment") then ch:Destroy() end
+        end
+    end
+    partOwner={}; partCounter=0
+    if activeSwordCount==0 then return end
+    local pool={}
+    for _,p in ipairs(Workspace:GetDescendants()) do
+        if p:IsA("BasePart") and not p.Anchored then
+            local skip=false
+            for _,sw in ipairs(swords) do if p:IsDescendantOf(sw.folder) then skip=true; break end end
+            if not skip and LP.Character and p:IsDescendantOf(LP.Character) then skip=true end
+            if not skip then
+                local a=p.Parent
+                while a and a~=Workspace do
+                    if a:FindFirstChild("Humanoid") or a:FindFirstChild("Head") then skip=true; break end
+                    a=a.Parent
+                end
+            end
+            if not skip then table.insert(pool,p) end
+        end
+    end
+    for i,p in ipairs(pool) do
+        local assigned=((i-1)%activeSwordCount)+1
+        partOwner[p]=assigned; partCounter=i
+        local sw=swords[assigned]
+        if sw.enabled then
+            if getgenv().Network then getgenv().Network.RetainPart(p) end
+            sw.force(p); table.insert(sw.parts,p)
+        end
+    end
+end
+
+local function globalAdd(p)
+    if activeSwordCount==0 then return end
+    if not p:IsA("BasePart") or p.Anchored then return end
+    if not p:IsDescendantOf(Workspace) then return end
+    for _,sw in ipairs(swords) do if p:IsDescendantOf(sw.folder) then return end end
+    if LP.Character and p:IsDescendantOf(LP.Character) then return end
+    local a=p.Parent
+    while a and a~=Workspace do
+        if a:FindFirstChild("Humanoid") or a:FindFirstChild("Head") then return end
+        a=a.Parent
+    end
+    if partOwner[p] then
+        local sw=swords[partOwner[p]]
+        if sw and sw.enabled and not table.find(sw.parts,p) then sw.force(p); table.insert(sw.parts,p) end
+        return
+    end
+    partCounter=partCounter+1
+    local assigned=((partCounter-1)%activeSwordCount)+1
+    partOwner[p]=assigned
+    local sw=swords[assigned]
+    if sw and sw.enabled then
+        if getgenv().Network then getgenv().Network.RetainPart(p) end
+        sw.force(p); table.insert(sw.parts,p)
+    end
+end
+
+local function globalRemove(p)
+    for _,sw in ipairs(swords) do
+        local idx=table.find(sw.parts,p); if idx then table.remove(sw.parts,idx) end
+    end
+    partOwner[p]=nil
+end
+
+Workspace.DescendantAdded:Connect(globalAdd)
+Workspace.DescendantRemoving:Connect(globalRemove)
+RunService.Stepped:Connect(function()
+    for _,p in ipairs(Workspace:GetDescendants()) do
+        if p:IsA("BasePart") and not p.Anchored and not partOwner[p] then globalAdd(p) end
+    end
+end)
+
+-- shape engine
+RunService.Heartbeat:Connect(function()
+    for _,sw in ipairs(swords) do
+        if sw.enabled then
+            for i,part in ipairs(sw.parts) do
+                if part.Parent and not part.Anchored then
+                    local s=getSlot(i)
+                    local rx,ry,rz=sw.rot(s.x,s.y,s.z)
+                    local target=sw.centerPos+Vector3.new(rx,ry,rz)
+                    local dir=target-part.Position
+                    if dir.Magnitude>0 then part.Velocity=dir.Unit*999999 end
+                end
+            end
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ── HOLLOW PURPLE STATE MACHINE ───────────────────────────────────────────────
+--
+-- STATES:
+--   idle     → swords follow fixed offset positions (L×4 + R×4)
+--   charging → clusters converge toward merge point at speed CONFIG.chargeSpeed
+--   merged   → ball hovers at merge point, aim joystick active
+--   firing   → ball launches in aim direction at CONFIG.fireSpeed
+--
+-- POSITIONS:
+--   LEFT  cluster: 45st left + 9st forward of HRP (×4 swords spread 4st apart)
+--   RIGHT cluster: 45st right + 9st forward of HRP (×4 swords spread 4st apart)
+--   MERGE point:   9st forward of HRP, center
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local STATE = {
+    IDLE     = "idle",
+    CHARGING = "charging",
+    MERGED   = "merged",
+    FIRING   = "firing",
+}
+
+local CONFIG = {
+    SIDE_DIST    = 45,    -- studs left/right
+    FRONT_DIST   = 9,     -- studs forward
+    SWORD_SPREAD = 4,     -- spacing between swords in same cluster
+    CHARGE_SPEED = 8,     -- studs/s convergence speed (adjustable)
+    FIRE_SPEED   = 120,   -- studs/s projectile launch speed (adjustable)
+    FIRE_DURATION = 3,    -- seconds before fire clears
+}
+
+local state       = STATE.IDLE
+local chargeT     = 0         -- accumulator for convergence
+local fireDir     = Vector3.new(0,0,-1)  -- direction of fire (default forward)
+local aimActive   = false     -- thumb joystick being held
+local aimDelta    = Vector2.zero
+local aimTouch    = nil
+local fireTimer   = 0
+
+-- compute the world positions for all 8 swords given current HRP
+local function getSwordPositions()
+    local cf      = HRP.CFrame
+    local fwd     = cf.LookVector
+    local right   = cf.RightVector
+    local origin  = cf.Position + fwd * CONFIG.FRONT_DIST
+
+    local positions = {}
+    -- swords 1-4: LEFT cluster
+    for i=1,4 do
+        local offset = -right * (CONFIG.SIDE_DIST + (i-1)*CONFIG.SWORD_SPREAD)
+        positions[i] = origin + offset
+    end
+    -- swords 5-8: RIGHT cluster
+    for i=1,4 do
+        local offset = right * (CONFIG.SIDE_DIST + (i-1)*CONFIG.SWORD_SPREAD)
+        positions[i+4] = origin + offset
+    end
+    return positions
+end
+
+-- center merge point 9st forward of HRP
+local function getMergePoint()
+    return HRP.Position + HRP.CFrame.LookVector * CONFIG.FRONT_DIST
+end
+
+-- set all 8 sword center positions to a set of Vector3s
+local function setSwordCenters(positions)
+    for i=1,8 do
+        if swords[i] and swords[i].enabled then
+            swords[i].centerPos   = positions[i] or positions[1]
+            swords[i].anchor.Position = swords[i].centerPos
+        end
+    end
+end
+
+-- lerp all swords toward merge point
+local function convergeSwords(dt)
+    local merge   = getMergePoint()
+    local speed   = CONFIG.CHARGE_SPEED * dt
+    local allDone = true
+
+    for i=1,8 do
+        local sw=swords[i]
+        if sw.enabled then
+            local diff = merge - sw.centerPos
+            local dist = diff.Magnitude
+            if dist > 0.5 then
+                allDone = false
+                sw.centerPos   = sw.centerPos + diff.Unit * math.min(speed, dist)
+            else
+                sw.centerPos   = merge
+            end
+            sw.anchor.Position = sw.centerPos
+        end
+    end
+
+    return allDone
+end
+
+-- launch: set velocity of all parts directly toward fireDir
+local function launchParts()
+    for _,sw in ipairs(swords) do
+        for _,p in ipairs(sw.parts) do
+            if p and p.Parent then
+                -- remove AlignPosition so parts fly free
+                for _,ch in ipairs(p:GetChildren()) do
+                    if ch:IsA("AlignPosition") or ch:IsA("Torque") or ch:IsA("Attachment") then
+                        ch:Destroy()
+                    end
+                end
+                pcall(function()
+                    p.Velocity = fireDir * CONFIG.FIRE_SPEED
+                end)
+            end
+        end
+        -- clear part list so engine doesn't re-constrain them
+        sw.parts={}
+    end
+    partOwner={}; partCounter=0
+end
+
+-- reset everything back to idle
+local function resetToIdle()
+    state = STATE.IDLE
+    chargeT = 0
+    -- reposition swords to their formation spots
+    local positions = getSwordPositions()
+    setSwordCenters(positions)
+end
+
+-- ── main state machine heartbeat ──────────────────────────────────────────────
+RunService.Heartbeat:Connect(function(dt)
+    if state == STATE.IDLE then
+        -- follow player formation continuously
+        if activeSwordCount > 0 then
+            local positions = getSwordPositions()
+            setSwordCenters(positions)
+        end
+
+    elseif state == STATE.CHARGING then
+        local done = convergeSwords(dt)
+        if done then
+            state = STATE.MERGED
+            playSound("2865227271")
+        end
+
+    elseif state == STATE.MERGED then
+        -- hold merge point, update to follow HRP movement
+        local merge = getMergePoint()
+        for i=1,8 do
+            local sw=swords[i]
+            if sw.enabled then
+                sw.centerPos=merge; sw.anchor.Position=merge
+            end
+        end
+
+        -- aim direction: use joystick delta to rotate fire direction
+        if aimActive then
+            local cf     = HRP.CFrame
+            local fwd    = Vector3.new(cf.LookVector.X,0,cf.LookVector.Z)
+            local rgt    = Vector3.new(cf.RightVector.X,0,cf.RightVector.Z)
+            if fwd.Magnitude>0.01 then fwd=fwd.Unit end
+            if rgt.Magnitude>0.01 then rgt=rgt.Unit end
+            -- joystick X = yaw (horizontal aim), Y = pitch (vertical aim)
+            local yawDir   = (rgt * aimDelta.X + fwd * (-aimDelta.Y))
+            if yawDir.Magnitude > 0.01 then
+                fireDir = Vector3.new(yawDir.X, 0, yawDir.Z).Unit
+            end
+        end
+
+    elseif state == STATE.FIRING then
+        fireTimer = fireTimer - dt
+        if fireTimer <= 0 then
+            -- clean up and reset
+            for _,sw in ipairs(swords) do
+                for _,p in ipairs(sw.parts) do
+                    if p and p.Parent then pcall(function() p:Destroy() end) end
+                end
+                sw.parts={}
+            end
+            partOwner={}; partCounter=0
+            state=STATE.IDLE
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ── GUI ───────────────────────────────────────────────────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local sg=Instance.new("ScreenGui"); sg.Name="HollowPurpleGUI"
+sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true
+sg.Parent=LP:WaitForChild("PlayerGui")
+
+-- ── main panel ────────────────────────────────────────────────────────────────
+local panel=Instance.new("Frame")
+panel.Size=UDim2.new(0,280,0,580); panel.Position=UDim2.new(0,12,0.5,-290)
+panel.BackgroundColor3=Color3.fromRGB(10,5,18); panel.BackgroundTransparency=0.05
+panel.BorderSizePixel=0; panel.Active=true; panel.ZIndex=10; panel.Parent=sg
+Instance.new("UICorner",panel).CornerRadius=UDim.new(0,16)
+local pstroke=Instance.new("UIStroke"); pstroke.Color=Color3.fromRGB(140,0,220)
+pstroke.Thickness=2; pstroke.Parent=panel
+
+-- title bar
+local titlebar=Instance.new("Frame"); titlebar.Size=UDim2.new(1,0,0,40)
+titlebar.BackgroundColor3=Color3.fromRGB(100,0,180); titlebar.BorderSizePixel=0
+titlebar.ZIndex=11; titlebar.Parent=panel
+Instance.new("UICorner",titlebar).CornerRadius=UDim.new(0,16)
+local titleLbl=Instance.new("TextLabel"); titleLbl.Size=UDim2.new(1,-12,1,0)
+titleLbl.Position=UDim2.new(0,12,0,0); titleLbl.BackgroundTransparency=1
+titleLbl.Text="⬤  HOLLOW PURPLE"; titleLbl.TextColor3=Color3.fromRGB(255,220,255)
+titleLbl.TextSize=16; titleLbl.Font=Enum.Font.GothamBold
+titleLbl.TextXAlignment=Enum.TextXAlignment.Left; titleLbl.ZIndex=12; titleLbl.Parent=titlebar
+
+-- drag
+local drag=false; local ds=Vector2.zero; local sp=UDim2.new()
+titlebar.InputBegan:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1
+    or i.UserInputType==Enum.UserInputType.Touch then
+        drag=true; ds=Vector2.new(i.Position.X,i.Position.Y); sp=panel.Position
+        i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then drag=false end end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if not drag then return end
+    if i.UserInputType==Enum.UserInputType.MouseMovement
+    or i.UserInputType==Enum.UserInputType.Touch then
+        local d=Vector2.new(i.Position.X,i.Position.Y)-ds
+        panel.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y)
+    end
+end)
+
+-- helpers
+local function sect(txt,y)
+    local f=Instance.new("Frame"); f.Size=UDim2.new(1,-16,0,22)
+    f.Position=UDim2.new(0,8,0,y); f.BackgroundColor3=Color3.fromRGB(60,0,100)
+    f.BorderSizePixel=0; f.ZIndex=11; f.Parent=panel
+    Instance.new("UICorner",f).CornerRadius=UDim.new(0,6)
+    local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-8,1,0)
+    l.Position=UDim2.new(0,6,0,0); l.BackgroundTransparency=1; l.Text=txt
+    l.TextColor3=Color3.fromRGB(220,160,255); l.TextSize=12; l.Font=Enum.Font.GothamBold
+    l.TextXAlignment=Enum.TextXAlignment.Left; l.ZIndex=12; l.Parent=f
+    return f
+end
+
+local function lbl(txt,y,col)
+    local L=Instance.new("TextLabel"); L.Size=UDim2.new(1,-16,0,16)
+    L.Position=UDim2.new(0,8,0,y); L.BackgroundTransparency=1; L.Text=txt
+    L.TextColor3=col or Color3.fromRGB(180,140,220); L.TextSize=11
+    L.Font=Enum.Font.Gotham; L.TextXAlignment=Enum.TextXAlignment.Left
+    L.ZIndex=11; L.Parent=panel; return L
+end
+
+local function bigBtn(txt,y,h,col,tc)
+    local b=Instance.new("TextButton"); b.Size=UDim2.new(1,-16,0,h or 40)
+    b.Position=UDim2.new(0,8,0,y); b.BackgroundColor3=col or Color3.fromRGB(100,0,180)
+    b.BorderSizePixel=0; b.Text=txt; b.TextColor3=tc or Color3.fromRGB(255,255,255)
+    b.TextSize=15; b.Font=Enum.Font.GothamBold; b.ZIndex=11; b.Parent=panel
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,10); return b
+end
+
+local function stepper(labelTxt,y,getVal,onInc,onDec)
+    lbl(labelTxt,y)
+    local row=Instance.new("Frame"); row.Size=UDim2.new(1,-16,0,32)
+    row.Position=UDim2.new(0,8,0,y+16); row.BackgroundColor3=Color3.fromRGB(16,8,28)
+    row.BorderSizePixel=0; row.ZIndex=11; row.Parent=panel
+    Instance.new("UICorner",row).CornerRadius=UDim.new(0,8)
+
+    local dec=Instance.new("TextButton"); dec.Size=UDim2.new(0,32,1,-6)
+    dec.Position=UDim2.new(0,3,0,3); dec.BackgroundColor3=Color3.fromRGB(80,0,140)
+    dec.BorderSizePixel=0; dec.Text="−"; dec.TextColor3=Color3.fromRGB(255,255,255)
+    dec.TextSize=18; dec.Font=Enum.Font.GothamBold; dec.ZIndex=12; dec.Parent=row
+    Instance.new("UICorner",dec).CornerRadius=UDim.new(0,6)
+
+    local disp=Instance.new("TextLabel"); disp.Size=UDim2.new(1,-76,1,-6)
+    disp.Position=UDim2.new(0,38,0,3); disp.BackgroundColor3=Color3.fromRGB(24,10,40)
+    disp.TextColor3=Color3.fromRGB(220,180,255); disp.TextSize=14; disp.Font=Enum.Font.GothamBold
+    disp.Text=tostring(getVal()); disp.BorderSizePixel=0; disp.ZIndex=12; disp.Parent=row
+    Instance.new("UICorner",disp).CornerRadius=UDim.new(0,6)
+
+    local inc=Instance.new("TextButton"); inc.Size=UDim2.new(0,32,1,-6)
+    inc.Position=UDim2.new(1,-35,0,3); inc.BackgroundColor3=Color3.fromRGB(120,0,200)
+    inc.BorderSizePixel=0; inc.Text="+"; inc.TextColor3=Color3.fromRGB(255,255,255)
+    inc.TextSize=18; inc.Font=Enum.Font.GothamBold; inc.ZIndex=12; inc.Parent=row
+    Instance.new("UICorner",inc).CornerRadius=UDim.new(0,6)
+
+    dec.MouseButton1Click:Connect(function() onDec(); disp.Text=tostring(getVal()) end)
+    inc.MouseButton1Click:Connect(function() onInc(); disp.Text=tostring(getVal()) end)
+    return disp
+end
+
+-- ── status display ────────────────────────────────────────────────────────────
+sect("STATUS",46)
+local stateLbl=lbl("idle — swords in formation",72,Color3.fromRGB(160,255,160))
+stateLbl.TextSize=12; stateLbl.Font=Enum.Font.GothamBold
+
+RunService.Heartbeat:Connect(function()
+    if state==STATE.IDLE then
+        stateLbl.Text="● idle — formation active"
+        stateLbl.TextColor3=Color3.fromRGB(160,255,160)
+        pstroke.Color=Color3.fromRGB(140,0,220)
+    elseif state==STATE.CHARGING then
+        stateLbl.Text="◎ charging — converging..."
+        stateLbl.TextColor3=Color3.fromRGB(255,200,80)
+        pstroke.Color=Color3.fromRGB(255,200,80)
+    elseif state==STATE.MERGED then
+        stateLbl.Text="⬤ merged — aim & fire!"
+        stateLbl.TextColor3=Color3.fromRGB(220,100,255)
+        pstroke.Color=Color3.fromRGB(220,100,255)
+    elseif state==STATE.FIRING then
+        stateLbl.Text=string.format("➤ firing! (%.1fs)", fireTimer)
+        stateLbl.TextColor3=Color3.fromRGB(255,80,80)
+        pstroke.Color=Color3.fromRGB(255,80,80)
+    end
+end)
+
+-- ── formation settings ────────────────────────────────────────────────────────
+sect("FORMATION",96)
+
+stepper("Side Distance (studs)",114,
+    function() return CONFIG.SIDE_DIST end,
+    function() CONFIG.SIDE_DIST=math.min(200,CONFIG.SIDE_DIST+5) end,
+    function() CONFIG.SIDE_DIST=math.max(5, CONFIG.SIDE_DIST-5) end)
+
+stepper("Forward Distance (studs)",164,
+    function() return CONFIG.FRONT_DIST end,
+    function() CONFIG.FRONT_DIST=math.min(50,CONFIG.FRONT_DIST+1) end,
+    function() CONFIG.FRONT_DIST=math.max(1, CONFIG.FRONT_DIST-1) end)
+
+-- ── charge settings ───────────────────────────────────────────────────────────
+sect("CHARGE",218)
+
+stepper("Convergence Speed (st/s)",236,
+    function() return CONFIG.CHARGE_SPEED end,
+    function() CONFIG.CHARGE_SPEED=math.min(200,CONFIG.CHARGE_SPEED+1) end,
+    function() CONFIG.CHARGE_SPEED=math.max(1,  CONFIG.CHARGE_SPEED-1) end)
+
+stepper("Fire Speed (st/s)",286,
+    function() return CONFIG.FIRE_SPEED end,
+    function() CONFIG.FIRE_SPEED=math.min(2000,CONFIG.FIRE_SPEED+10) end,
+    function() CONFIG.FIRE_SPEED=math.max(10,  CONFIG.FIRE_SPEED-10) end)
+
+-- ── sword count selector ──────────────────────────────────────────────────────
+sect("SUMMON COUNT",336)
+
+local countRow=Instance.new("Frame"); countRow.Size=UDim2.new(1,-16,0,34)
+countRow.Position=UDim2.new(0,8,0,362); countRow.BackgroundTransparency=1
+countRow.ZIndex=11; countRow.Parent=panel
+local countLayout=Instance.new("UIListLayout",countRow)
+countLayout.FillDirection=Enum.FillDirection.Horizontal
+countLayout.HorizontalAlignment=Enum.HorizontalAlignment.Center
+countLayout.VerticalAlignment=Enum.VerticalAlignment.Center
+countLayout.Padding=UDim.new(0,6)
+
+local countBtns={}
+local countCols={
+    Color3.fromRGB(160,0,0),Color3.fromRGB(0,100,160),
+    Color3.fromRGB(0,140,60),Color3.fromRGB(160,80,0),
+    Color3.fromRGB(140,0,140),Color3.fromRGB(0,130,110),
+    Color3.fromRGB(100,60,0),Color3.fromRGB(60,60,180),
+}
+
+for i=1,8 do
+    local b=Instance.new("TextButton"); b.Size=UDim2.new(0,26,0,30)
+    b.BackgroundColor3=Color3.fromRGB(40,40,40); b.BorderSizePixel=0
+    b.Text=tostring(i); b.TextColor3=Color3.fromRGB(200,200,200)
+    b.TextSize=12; b.Font=Enum.Font.GothamBold; b.ZIndex=12; b.Parent=countRow
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,6)
+    countBtns[i]=b
+end
+
+local function setSwordCount(n)
+    activeSwordCount=n
+    for i=1,8 do
+        swords[i].enabled=(i<=n)
+        countBtns[i].BackgroundColor3=(i<=n) and countCols[i] or Color3.fromRGB(40,40,40)
+    end
+    resetPartitions()
+    if state~=STATE.IDLE then state=STATE.IDLE end
+    local positions=getSwordPositions()
+    setSwordCenters(positions)
+    playSound("12221967")
+end
+for i=1,8 do countBtns[i].MouseButton1Click:Connect(function() setSwordCount(i) end) end
+
+-- ── action buttons ────────────────────────────────────────────────────────────
+sect("ACTIONS",402)
+
+local chargeBtn=bigBtn("◎  CHARGE",424,44,Color3.fromRGB(160,80,0))
+local fireBtn  =bigBtn("➤  FIRE",474,44,Color3.fromRGB(160,0,0))
+local resetBtn =bigBtn("↩  Reset Formation",524,30,Color3.fromRGB(40,40,80))
+resetBtn.TextSize=12
+
+chargeBtn.MouseButton1Click:Connect(function()
+    if state==STATE.IDLE and activeSwordCount>0 then
+        state=STATE.CHARGING
+        playSound("2865227271")
+    elseif state==STATE.CHARGING or state==STATE.MERGED then
+        -- cancel charge, return to idle
+        resetToIdle()
+    end
+end)
+
+fireBtn.MouseButton1Click:Connect(function()
+    if state~=STATE.MERGED then return end
+    state=STATE.FIRING
+    fireTimer=CONFIG.FIRE_DURATION
+    launchParts()
+    playSound("2865227271")
+end)
+
+resetBtn.MouseButton1Click:Connect(function()
+    -- hard reset — release all parts, go idle
+    for _,sw in ipairs(swords) do
+        for _,p in ipairs(sw.parts) do sw.clean(p) end
+        sw.parts={}
+    end
+    partOwner={}; partCounter=0
+    state=STATE.IDLE; chargeT=0
+    if activeSwordCount>0 then
+        resetPartitions()
+        local positions=getSwordPositions()
+        setSwordCenters(positions)
+    end
+    playSound("12221967")
+end)
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ── AIM JOYSTICK (bottom center — thumb drag) ─────────────────────────────────
+-- only active when state == MERGED
+-- drag controls fire direction (left/right + up/down aim)
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local aimPad=Instance.new("Frame"); aimPad.Size=UDim2.new(0,120,0,120)
+aimPad.Position=UDim2.new(0.5,-60,1,-140)
+aimPad.BackgroundColor3=Color3.fromRGB(80,0,140); aimPad.BackgroundTransparency=0.5
+aimPad.BorderSizePixel=0; aimPad.ZIndex=10; aimPad.Parent=sg
+Instance.new("UICorner",aimPad).CornerRadius=UDim.new(1,0)
+
+local aimKnob=Instance.new("Frame"); aimKnob.Size=UDim2.new(0,40,0,40)
+aimKnob.Position=UDim2.new(0.5,-20,0.5,-20)
+aimKnob.BackgroundColor3=Color3.fromRGB(200,80,255); aimKnob.BackgroundTransparency=0.1
+aimKnob.BorderSizePixel=0; aimKnob.ZIndex=11; aimKnob.Parent=aimPad
+Instance.new("UICorner",aimKnob).CornerRadius=UDim.new(1,0)
+
+local aimLbl=Instance.new("TextLabel"); aimLbl.Size=UDim2.new(1,0,0,14)
+aimLbl.Position=UDim2.new(0,0,1,4); aimLbl.BackgroundTransparency=1
+aimLbl.Text="aim (active when merged)"
+aimLbl.TextColor3=Color3.fromRGB(200,150,255); aimLbl.TextSize=10
+aimLbl.Font=Enum.Font.Gotham; aimLbl.ZIndex=11; aimLbl.Parent=aimPad
+
+-- update knob visibility based on state
+RunService.Heartbeat:Connect(function()
+    aimPad.BackgroundTransparency=state==STATE.MERGED and 0.35 or 0.70
+    aimKnob.BackgroundTransparency=state==STATE.MERGED and 0.05 or 0.60
+end)
+
+local AIM_RADIUS=46
+local function clamp2(v,r) local m=v.Magnitude; return m>r and v/m*r or v end
+
+aimPad.InputBegan:Connect(function(inp)
+    if state~=STATE.MERGED then return end
+    if (inp.UserInputType==Enum.UserInputType.Touch
+    or  inp.UserInputType==Enum.UserInputType.MouseButton1) and not aimActive then
+        aimActive=true; aimTouch=inp
+        aimDelta=Vector2.zero
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(inp)
+    if not aimActive or inp~=aimTouch then return end
+    if inp.UserInputType~=Enum.UserInputType.Touch
+    and inp.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    -- delta from pad center
+    local padAbsPos=aimPad.AbsolutePosition
+    local padCenter=padAbsPos+aimPad.AbsoluteSize*0.5
+    local raw=Vector2.new(inp.Position.X,inp.Position.Y)-padCenter
+    local clamped=clamp2(raw,AIM_RADIUS)
+    aimDelta=clamped
+    aimKnob.Position=UDim2.new(0.5,clamped.X-20,0.5,clamped.Y-20)
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+    if inp==aimTouch then
+        aimActive=false; aimTouch=nil; aimDelta=Vector2.zero
+        aimKnob.Position=UDim2.new(0.5,-20,0.5,-20)
+    end
+end)
+
+-- ── character respawn ─────────────────────────────────────────────────────────
+LP.CharacterAdded:Connect(function(nc)
+    character=nc; HRP=nc:WaitForChild("HumanoidRootPart")
+    state=STATE.IDLE; chargeT=0
+    for _,sw in ipairs(swords) do sw.parts={}; sw.enabled=false end
+    partOwner={}; partCounter=0; activeSwordCount=0
+    for i=1,8 do countBtns[i].BackgroundColor3=Color3.fromRGB(40,40,40) end
+end)
+
+-- ── init notification ─────────────────────────────────────────────────────────
+pcall(function()
+    StarterGui:SetCore("SendNotification",{
+        Title="Hollow Purple",
+        Text="Summon swords → Charge → Aim → Fire",
+        Duration=5
+    })
+end)
