@@ -1,0 +1,279 @@
+--[[
+    Legends of Speed — 89020 Rebirth Farmer
+    Methods: firetouchinterest hoops + orbEvent spam + rebirthEvent loop
+    Engine: executor environment (firetouchinterest required)
+    Target: 89,020 rebirths
+]]
+
+-- ─── Services ────────────────────────────────────────────────────────────────
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local RepStorage  = game:GetService("ReplicatedStorage")
+local StarterGui  = game:GetService("StarterGui")
+local VirtualUser = game:GetService("VirtualUser")
+
+local Player      = Players.LocalPlayer
+local rEvents     = RepStorage:WaitForChild("rEvents", 10)
+
+if not rEvents then
+    warn("[RebirthFarmer] rEvents not found — wrong game?"); return
+end
+
+local rebirthEvent = rEvents:WaitForChild("rebirthEvent", 10)
+local orbEvent     = rEvents:WaitForChild("orbEvent", 10)
+
+-- ─── Config ──────────────────────────────────────────────────────────────────
+local TARGET         = 89020
+local ORB_BURST      = 25      -- orb fires per frame (tune down if kicked)
+local REBIRTH_RATE   = 0.05    -- rebirth attempt interval (seconds)
+local RUNNING        = true
+
+-- ─── Player stat readers (game uses IntValues on Player) ─────────────────────
+local function getVal(names)
+    for _, n in ipairs(names) do
+        local v = Player:FindFirstChild(n)
+        if v and v.Value then return v.Value end
+    end
+    return 0
+end
+
+local function getLevel()
+    return getVal({"level","Level","Steps","steps","xp","XP"})
+end
+
+local function getRebirths()
+    return getVal({"rebirths","Rebirths","rebirthCount","RebirthCount","totalRebirths"})
+end
+
+local function getRebirthLevelReq()
+    -- wiki formula: starts at 50, +25 per rebirth
+    return 50 + (getRebirths() * 25)
+end
+
+-- ─── Anti-AFK ────────────────────────────────────────────────────────────────
+Player.Idled:Connect(function()
+    VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
+
+-- ─── GUI ─────────────────────────────────────────────────────────────────────
+local gui = Instance.new("ScreenGui")
+gui.Name            = "LOSRebirthFarm"
+gui.ResetOnSpawn    = false
+gui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+gui.Parent          = Player:WaitForChild("PlayerGui")
+
+local function mkFrame(parent, size, pos, bg, bgT, r)
+    local f = Instance.new("Frame")
+    f.Size=size; f.Position=pos or UDim2.new(0,0,0,0)
+    f.BackgroundColor3=bg or Color3.fromRGB(15,5,20)
+    f.BackgroundTransparency=bgT or 0
+    f.BorderSizePixel=0; f.Parent=parent
+    if r then Instance.new("UICorner",f).CornerRadius=UDim.new(0,r) end
+    return f
+end
+
+local function mkLabel(parent, text, pos, size, fs, fc, align)
+    local L = Instance.new("TextLabel")
+    L.Text=text; L.Size=size or UDim2.new(1,0,0,22)
+    L.Position=pos or UDim2.new(0,0,0,0)
+    L.TextColor3=fc or Color3.fromRGB(255,255,255)
+    L.BackgroundTransparency=1; L.Font=Enum.Font.GothamBold
+    L.TextSize=fs or 13; L.BorderSizePixel=0
+    L.TextXAlignment=align or Enum.TextXAlignment.Left
+    L.Parent=parent; return L
+end
+
+-- Main panel (draggable)
+local panel = mkFrame(gui,
+    UDim2.new(0,320,0,165),
+    UDim2.new(0,12,0,12),
+    Color3.fromRGB(10,5,18), 0, 12)
+
+local header = mkFrame(panel,
+    UDim2.new(1,0,0,32), UDim2.new(0,0,0,0),
+    Color3.fromRGB(60,0,120), 0, 12)
+mkLabel(header, "⚡ LoS REBIRTH FARMER  [Target: 89,020]",
+    UDim2.new(0,10,0,0), UDim2.new(1,-10,1,0),
+    13, Color3.fromRGB(255,210,0), Enum.TextXAlignment.Left)
+
+local rebirthLbl = mkLabel(panel, "Rebirths: 0 / 89,020",
+    UDim2.new(0,8,0,36), UDim2.new(1,-16,0,22),
+    14, Color3.fromRGB(210,100,255))
+
+local levelLbl = mkLabel(panel, "Level: 0  |  Need: 50  |  Session: +0",
+    UDim2.new(0,8,0,58), UDim2.new(1,-16,0,20),
+    12, Color3.fromRGB(80,200,255))
+
+-- Progress bar
+local barBg = mkFrame(panel,
+    UDim2.new(1,-16,0,10),
+    UDim2.new(0,8,0,82),
+    Color3.fromRGB(35,20,55), 0, 5)
+local barFill = mkFrame(barBg,
+    UDim2.new(0,0,1,0), UDim2.new(0,0,0,0),
+    Color3.fromRGB(120,0,220), 0, 5)
+
+local pctLbl = mkLabel(panel, "0.000%",
+    UDim2.new(0,8,0,94), UDim2.new(1,-16,0,18),
+    11, Color3.fromRGB(160,255,160))
+
+local statusLbl = mkLabel(panel, "◉  Initialising farm loops...",
+    UDim2.new(0,8,0,114), UDim2.new(1,-16,0,18),
+    12, Color3.fromRGB(255,180,80))
+
+local stopBtn = Instance.new("TextButton")
+stopBtn.Size=UDim2.new(0,80,0,22)
+stopBtn.Position=UDim2.new(1,-88,0,138)
+stopBtn.Text="■ STOP"
+stopBtn.BackgroundColor3=Color3.fromRGB(160,0,0)
+stopBtn.TextColor3=Color3.fromRGB(255,255,255)
+stopBtn.Font=Enum.Font.GothamBold
+stopBtn.TextSize=12
+stopBtn.BorderSizePixel=0
+stopBtn.Parent=panel
+Instance.new("UICorner",stopBtn).CornerRadius=UDim.new(0,6)
+stopBtn.MouseButton1Click:Connect(function()
+    RUNNING=false
+    statusLbl.Text="◉  Stopped by user."
+    statusLbl.TextColor3=Color3.fromRGB(255,80,80)
+end)
+
+-- Panel drag
+local dragging=false; local dragStart; local startPos
+header.InputBegan:Connect(function(inp)
+    if inp.UserInputType==Enum.UserInputType.MouseButton1 or inp.UserInputType==Enum.UserInputType.Touch then
+        dragging=true; dragStart=inp.Position; startPos=panel.Position
+    end
+end)
+game:GetService("UserInputService").InputChanged:Connect(function(inp)
+    if dragging then
+        local delta=inp.Position-dragStart
+        panel.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+delta.X,startPos.Y.Scale,startPos.Y.Offset+delta.Y)
+    end
+end)
+game:GetService("UserInputService").InputEnded:Connect(function(inp)
+    if inp.UserInputType==Enum.UserInputType.MouseButton1 or inp.UserInputType==Enum.UserInputType.Touch then
+        dragging=false
+    end
+end)
+
+-- ─── All known orb types × zones ─────────────────────────────────────────────
+-- Burst-fires every frame — server rate-limits per player, but multi-type helps
+local ORB_ARGS = {
+    {"collectOrb", "Yellow Orb",  "City"},
+    {"collectOrb", "Red Orb",     "City"},
+    {"collectOrb", "Blue Orb",    "City"},
+    {"collectOrb", "Green Orb",   "City"},
+    {"collectOrb", "Purple Orb",  "City"},
+    {"collectOrb", "Orange Orb",  "City"},
+    {"collectOrb", "Gem",         "City"},
+    {"collectOrb", "Yellow Orb",  "Forest"},
+    {"collectOrb", "Red Orb",     "Forest"},
+    {"collectOrb", "Blue Orb",    "Forest"},
+    {"collectOrb", "Gem",         "Forest"},
+    {"collectOrb", "Yellow Orb",  "Beach"},
+    {"collectOrb", "Red Orb",     "Beach"},
+    {"collectOrb", "Gem",         "Beach"},
+}
+
+-- ─── Method 1: firetouchinterest on all Hoops (fastest legit step method) ─────
+local steppedConn
+steppedConn = RunService.Stepped:Connect(function()
+    if not RUNNING then steppedConn:Disconnect(); return end
+    local char = Player.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local hoopFolder = workspace:FindFirstChild("Hoops")
+    if not hoopFolder then return end
+    for _, hoop in next, hoopFolder:GetChildren() do
+        pcall(function()
+            firetouchinterest(hrp, hoop, 0)
+            firetouchinterest(hrp, hoop, 1)
+        end)
+    end
+end)
+
+-- ─── Method 2: orbEvent burst (multi-type, max rate) ─────────────────────────
+task.spawn(function()
+    while RUNNING do
+        for _, args in ipairs(ORB_ARGS) do
+            for _=1, ORB_BURST do
+                pcall(function()
+                    orbEvent:FireServer(table.unpack(args))
+                end)
+            end
+        end
+        task.wait()  -- yield one frame between bursts
+    end
+end)
+
+-- ─── Method 3: rebirthEvent spam ─────────────────────────────────────────────
+-- Server checks level — fires constantly so rebirth triggers the instant we qualify
+task.spawn(function()
+    while RUNNING do
+        pcall(function()
+            rebirthEvent:FireServer("rebirthRequest")
+        end)
+        task.wait(REBIRTH_RATE)
+    end
+end)
+
+-- ─── UI + session tracker ─────────────────────────────────────────────────────
+local sessionStart = getRebirths()
+local startTime    = os.time()
+
+task.spawn(function()
+    while RUNNING do
+        local current  = getRebirths()
+        local lv       = getLevel()
+        local need     = getRebirthLevelReq()
+        local session  = current - sessionStart
+        local pct      = math.clamp(current / TARGET, 0, 1)
+        local elapsed  = os.time() - startTime
+        local rate     = elapsed > 0 and (session / elapsed * 3600) or 0  -- per hour
+
+        -- Labels
+        rebirthLbl.Text = ("Rebirths: %d / %d"):format(current, TARGET)
+        levelLbl.Text   = ("Level: %d  |  Need: %d  |  Session: +%d  [%.0f/hr]"):format(
+            lv, need, session, rate)
+        pctLbl.Text     = ("%.4f%%  complete"):format(pct * 100)
+
+        -- Progress bar
+        barFill.Size = UDim2.new(pct, 0, 1, 0)
+        barFill.BackgroundColor3 = Color3.fromHSV(0.78 - (pct * 0.78), 1, 1)
+
+        if current >= TARGET then
+            RUNNING = false
+            statusLbl.Text = "✅  89,020 REBIRTHS REACHED!"
+            statusLbl.TextColor3 = Color3.fromRGB(255, 255, 0)
+            rebirthLbl.TextColor3 = Color3.fromRGB(255, 255, 0)
+            pcall(function()
+                StarterGui:SetCore("SendNotification",{
+                    Title="RebirthFarmer",Text="89,020 rebirths reached!",Duration=10
+                })
+            end)
+        else
+            local farming = lv >= need and "◉ Rebirthing..." or
+                            ("◉ Farming steps... (%d / %d)"):format(lv, need)
+            statusLbl.Text = farming
+        end
+
+        task.wait(0.3)
+    end
+end)
+
+-- ─── Notify ──────────────────────────────────────────────────────────────────
+pcall(function()
+    StarterGui:SetCore("SendNotification",{
+        Title   = "⚡ Rebirth Farmer",
+        Text    = "Running. Target: 89,020. Leave it going.",
+        Duration= 5,
+    })
+end)
+
+print("[RebirthFarmer] All loops active. Target: 89,020 rebirths.")
+print("[RebirthFarmer] orbEvent burst x"..ORB_BURST.." per type | "..#ORB_ARGS.." types | Hoop touch: every Stepped")
+print("[RebirthFarmer] rebirthEvent fires every "..REBIRTH_RATE.."s")
