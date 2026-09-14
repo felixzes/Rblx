@@ -1,0 +1,621 @@
+--[[
+    Legends of Speed — Supreme Rebirth Farmer v2
+    Glitch methods: firetouchinterest hoops + orbEvent spam + rebirthEvent loop
+    GUI: pick any orb individually or all, all zones, glitch rebirth display
+    Research: wiki.fandom + scriptblox + github sources
+]]
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local RepStorage  = game:GetService("ReplicatedStorage")
+local StarterGui  = game:GetService("StarterGui")
+local TweenService= game:GetService("TweenService")
+local VirtualUser = game:GetService("VirtualUser")
+local UIS         = game:GetService("UserInputService")
+
+local lp          = Players.LocalPlayer
+local rEvents     = RepStorage:WaitForChild("rEvents", 10)
+if not rEvents then warn("[LoS] rEvents not found") return end
+
+local rebirthEvent = rEvents:WaitForChild("rebirthEvent", 10)
+local orbEvent     = rEvents:WaitForChild("orbEvent", 10)
+
+-- ─── Anti-AFK ─────────────────────────────────────────────────────────────────
+lp.Idled:Connect(function()
+    VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
+
+-- ─── State ────────────────────────────────────────────────────────────────────
+local CFG = {
+    running       = false,
+    orbBurst      = 25,
+    rebirthRate   = 0.05,
+    target        = 89020,
+    hoopGlitch    = true,
+    orbGlitch     = true,
+    rebirthGlitch = true,
+}
+
+-- ─── All orbs × all zones (from wiki + source research) ──────────────────────
+
+-- Every orb type confirmed in the game
+local ALL_ORBS = {
+    { name = "Yellow Orb",  color = Color3.fromRGB(255, 220, 0),   key = "Yellow Orb"  },
+    { name = "Red Orb",     color = Color3.fromRGB(220, 50,  50),  key = "Red Orb"     },
+    { name = "Blue Orb",    color = Color3.fromRGB(50,  130, 255), key = "Blue Orb"    },
+    { name = "Green Orb",   color = Color3.fromRGB(60,  200, 80),  key = "Green Orb"   },
+    { name = "Orange Orb",  color = Color3.fromRGB(255, 140, 0),   key = "Orange Orb"  },
+    { name = "Purple Orb",  color = Color3.fromRGB(160, 60,  220), key = "Purple Orb"  },
+    { name = "Gem",         color = Color3.fromRGB(80,  255, 220), key = "Gem"         },
+}
+
+-- Every confirmed zone/world
+local ALL_ZONES = {
+    "City",
+    "Snow City",
+    "Magma City",
+    "Legends Highway",
+    "Speed Desert",
+    "Outer Space",
+    "Speed Jungle",
+}
+
+-- Which orbs and zones are toggled on
+local orbEnabled  = {}
+local zoneEnabled = {}
+for _, o in ipairs(ALL_ORBS)  do orbEnabled[o.key]  = true end
+for _, z in ipairs(ALL_ZONES) do zoneEnabled[z]      = true end
+
+-- ─── Glitch rebirth info (from research) ─────────────────────────────────────
+-- Displayed in GUI — these are the known glitch methods that bypass normal reqs
+local GLITCH_INFO = {
+    {
+        name  = "Hoop Touch Glitch",
+        desc  = "firetouchinterest on all Hoops every Stepped — bypasses speed req to collect hoop XP",
+        color = Color3.fromRGB(255, 200, 60),
+        key   = "hoopGlitch",
+    },
+    {
+        name  = "OrbEvent Spam Glitch",
+        desc  = "FireServer orbEvent faster than server rate-limit — stacks steps beyond normal collection speed",
+        color = Color3.fromRGB(60, 200, 255),
+        key   = "orbGlitch",
+    },
+    {
+        name  = "RebirthEvent Loop Glitch",
+        desc  = "Spam rebirthEvent:FireServer every 0.05s — triggers rebirth the instant level requirement is met",
+        color = Color3.fromRGB(180, 80, 255),
+        key   = "rebirthGlitch",
+    },
+    {
+        name  = "Multi-Zone Orb Glitch",
+        desc  = "Fire orbEvent for all zones simultaneously — server counts steps from all worlds at once",
+        color = Color3.fromRGB(80, 255, 140),
+        key   = "orbGlitch",
+    },
+    {
+        name  = "Rebirth Req Formula",
+        desc  = "Level req = 50 + (rebirths × 25). At rebirth 100 you need level 2550. Script fires continuously.",
+        color = Color3.fromRGB(255, 120, 80),
+        key   = nil,
+    },
+}
+
+-- ─── Stat readers ─────────────────────────────────────────────────────────────
+local function getVal(names)
+    for _, n in ipairs(names) do
+        local v = lp:FindFirstChild(n)
+        if v and v.Value then return v.Value end
+    end
+    return 0
+end
+local function getLevel()    return getVal({"level","Level","Steps","steps","xp","XP"}) end
+local function getRebirths() return getVal({"rebirths","Rebirths","rebirthCount","RebirthCount","totalRebirths"}) end
+local function getRebirthReq() return 50 + getRebirths()*25 end
+
+-- ─── Farm loops ──────────────────────────────────────────────────────────────
+
+-- Loop 1: Hoop touch glitch
+local hoopConn
+local function startHoopGlitch()
+    if hoopConn then return end
+    hoopConn = RunService.Stepped:Connect(function()
+        if not CFG.running or not CFG.hoopGlitch then return end
+        local char = lp.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local hoopFolder = workspace:FindFirstChild("Hoops")
+        if not hoopFolder then return end
+        for _, hoop in next, hoopFolder:GetChildren() do
+            pcall(function()
+                firetouchinterest(hrp, hoop, 0)
+                firetouchinterest(hrp, hoop, 1)
+            end)
+        end
+    end)
+end
+local function stopHoopGlitch()
+    if hoopConn then hoopConn:Disconnect() hoopConn = nil end
+end
+
+-- Loop 2: OrbEvent spam glitch — only fires selected orbs × selected zones
+local function buildOrbArgs()
+    local args = {}
+    for _, o in ipairs(ALL_ORBS) do
+        if orbEnabled[o.key] then
+            for _, z in ipairs(ALL_ZONES) do
+                if zoneEnabled[z] then
+                    table.insert(args, {"collectOrb", o.key, z})
+                end
+            end
+        end
+    end
+    return args
+end
+
+local orbRunning = false
+local function startOrbGlitch()
+    if orbRunning then return end
+    orbRunning = true
+    task.spawn(function()
+        while CFG.running and CFG.orbGlitch do
+            local args = buildOrbArgs()
+            for _, a in ipairs(args) do
+                for _ = 1, CFG.orbBurst do
+                    pcall(function()
+                        orbEvent:FireServer(table.unpack(a))
+                    end)
+                end
+            end
+            task.wait()
+        end
+        orbRunning = false
+    end)
+end
+
+-- Loop 3: RebirthEvent loop glitch
+local rebirthRunning = false
+local function startRebirthGlitch()
+    if rebirthRunning then return end
+    rebirthRunning = true
+    task.spawn(function()
+        while CFG.running and CFG.rebirthGlitch do
+            pcall(function()
+                rebirthEvent:FireServer("rebirthRequest")
+            end)
+            task.wait(CFG.rebirthRate)
+        end
+        rebirthRunning = false
+    end)
+end
+
+local function startAll()
+    CFG.running = true
+    startHoopGlitch()
+    startOrbGlitch()
+    startRebirthGlitch()
+end
+
+local function stopAll()
+    CFG.running = false
+    stopHoopGlitch()
+end
+
+-- ─── GUI ─────────────────────────────────────────────────────────────────────
+local C = Color3.fromRGB
+
+local sg = Instance.new("ScreenGui")
+sg.Name           = "LoSFarmerGUI"
+sg.ResetOnSpawn   = false
+sg.IgnoreGuiInset = true
+sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+sg.Parent         = lp:WaitForChild("PlayerGui")
+
+local function mkFrame(p,sz,pos,bg,bgT,r)
+    local f=Instance.new("Frame")
+    f.Size=sz f.Position=pos or UDim2.new(0,0,0,0)
+    f.BackgroundColor3=bg or C(12,4,20) f.BackgroundTransparency=bgT or 0
+    f.BorderSizePixel=0 f.Parent=p
+    if r then Instance.new("UICorner",f).CornerRadius=UDim.new(0,r) end
+    return f
+end
+local function mkLbl(p,text,pos,sz,fs,fc,align,z)
+    local L=Instance.new("TextLabel")
+    L.Text=text L.Size=sz or UDim2.new(1,0,0,18)
+    L.Position=pos or UDim2.new(0,0,0,0)
+    L.TextColor3=fc or C(220,220,255) L.BackgroundTransparency=1
+    L.Font=Enum.Font.GothamBold L.TextSize=fs or 11
+    L.TextXAlignment=align or Enum.TextXAlignment.Left
+    L.BorderSizePixel=0 L.ZIndex=z or 7 L.Parent=p
+    return L
+end
+local function mkBtn(p,text,pos,sz,bg,tc,fs,r)
+    local B=Instance.new("TextButton")
+    B.Size=sz or UDim2.new(1,0,0,28) B.Position=pos or UDim2.new(0,0,0,0)
+    B.Text=text B.BackgroundColor3=bg or C(40,0,80)
+    B.TextColor3=tc or C(255,255,255)
+    B.Font=Enum.Font.GothamBold B.TextSize=fs or 12
+    B.BorderSizePixel=0 B.ZIndex=8 B.Parent=p
+    Instance.new("UICorner",B).CornerRadius=UDim.new(0,r or 8)
+    return B
+end
+local function mkStroke(p,col,t)
+    local s=Instance.new("UIStroke",p) s.Color=col or C(80,0,140) s.Thickness=t or 1.2
+    return s
+end
+local function mkScroll(p,sz,pos)
+    local sc=Instance.new("ScrollingFrame")
+    sc.Size=sz sc.Position=pos or UDim2.new(0,0,0,0)
+    sc.BackgroundTransparency=1 sc.BorderSizePixel=0
+    sc.ScrollBarThickness=3
+    sc.ScrollBarImageColor3=C(120,0,220)
+    sc.CanvasSize=UDim2.new(0,0,0,0)
+    sc.AutomaticCanvasSize=Enum.AutomaticSize.Y
+    sc.Parent=p
+    Instance.new("UIListLayout",sc).Padding=UDim.new(0,4)
+    return sc
+end
+
+-- ─── TABS ────────────────────────────────────────────────────────────────────
+local TABS     = {"FARM","ORBS","ZONES","GLITCHES"}
+local tabColor = {
+    FARM     = C(100,0,200),
+    ORBS     = C(200,120,0),
+    ZONES    = C(0,140,80),
+    GLITCHES = C(200,40,40),
+}
+local currentTab = "FARM"
+
+local PANEL_W = 360
+local PANEL_H = 520
+
+local panel = mkFrame(sg,
+    UDim2.new(0,PANEL_W,0,PANEL_H),
+    UDim2.new(0.5,-PANEL_W/2,0.5,-PANEL_H/2),
+    C(8,3,16),0,14)
+panel.Active=true panel.Draggable=true
+mkStroke(panel,C(100,0,200),1.5)
+
+-- header
+local hdr = mkFrame(panel,UDim2.new(1,0,0,40),UDim2.new(0,0,0,0),C(30,0,60),0,14)
+mkStroke(hdr,C(140,0,255),1)
+mkLbl(hdr,"⚡  LEGENDS OF SPEED  FARMER",UDim2.new(0,12,0,0),UDim2.new(0.82,0,1,0),
+    13,C(210,160,255),Enum.TextXAlignment.Left,9)
+
+local xBtn=mkBtn(hdr,"✕",UDim2.new(1,-32,0.5,-11),UDim2.new(0,24,0,24),C(60,0,80),C(200,100,255),13,6)
+xBtn.MouseButton1Click:Connect(function() panel.Visible=false end)
+
+-- pill
+local pill=mkBtn(sg,"⚡ LoS",UDim2.new(0,10,0.5,-14),UDim2.new(0,72,0,28),C(30,0,60),C(200,140,255),10,8)
+mkStroke(pill,C(100,0,200),1.2)
+pill.MouseButton1Click:Connect(function() panel.Visible=not panel.Visible end)
+
+-- tab strip
+local tabStrip=mkFrame(panel,UDim2.new(1,0,0,32),UDim2.new(0,0,0,40),C(12,4,22),0,0)
+local tabBtns={}
+local TW=math.floor(PANEL_W/#TABS)
+for i,t in ipairs(TABS) do
+    local tb=mkBtn(tabStrip,t,
+        UDim2.new(0,(i-1)*TW+2,0,4),
+        UDim2.new(0,TW-4,0,24),
+        t==currentTab and tabColor[t] or C(20,8,34),
+        C(255,255,255),10,7)
+    tabBtns[t]=tb
+end
+
+-- content area
+local contentArea=mkFrame(panel,UDim2.new(1,0,1,-78),UDim2.new(0,0,0,72),C(10,4,18),0,0)
+
+-- pages
+local pages={}
+for _,t in ipairs(TABS) do
+    local pg=mkFrame(contentArea,UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),C(10,4,18),1,0)
+    pg.Visible=(t==currentTab)
+    pages[t]=pg
+end
+
+local function switchTab(t)
+    currentTab=t
+    for _,tb in pairs(tabBtns) do
+        tb.BackgroundColor3=C(20,8,34)
+    end
+    tabBtns[t].BackgroundColor3=tabColor[t]
+    for _,pg in pairs(pages) do pg.Visible=false end
+    pages[t].Visible=true
+end
+
+for t,tb in pairs(tabBtns) do
+    tb.MouseButton1Click:Connect(function() switchTab(t) end)
+end
+
+-- ─── FARM PAGE ───────────────────────────────────────────────────────────────
+local farmPage = pages["FARM"]
+
+-- stats
+local statsBox=mkFrame(farmPage,UDim2.new(1,-16,0,80),UDim2.new(0,8,0,8),C(14,6,26),0,10)
+mkStroke(statsBox,C(80,0,160),1)
+local rebirthLbl=mkLbl(statsBox,"Rebirths: 0  /  89,020",UDim2.new(0,8,0,6),UDim2.new(1,-16,0,20),
+    14,C(200,140,255))
+local levelLbl=mkLbl(statsBox,"Level: 0  |  Need: 50",UDim2.new(0,8,0,28),UDim2.new(1,-16,0,18),
+    11,C(100,200,255))
+local sessionLbl=mkLbl(statsBox,"Session: +0  |  Rate: 0/hr",UDim2.new(0,8,0,46),UDim2.new(1,-16,0,18),
+    11,C(140,255,140))
+
+-- progress bar
+local barBg=mkFrame(farmPage,UDim2.new(1,-16,0,12),UDim2.new(0,8,0,96),C(24,10,40),0,6)
+local barFill=mkFrame(barBg,UDim2.new(0,0,1,0),UDim2.new(0,0,0,0),C(120,0,220),0,6)
+local pctLbl=mkLbl(farmPage,"0.0000%",UDim2.new(0,8,0,112),UDim2.new(1,-16,0,16),
+    10,C(160,255,200))
+
+-- glitch toggles
+mkLbl(farmPage,"ACTIVE GLITCHES",UDim2.new(0,8,0,132),UDim2.new(1,-16,0,14),9,C(140,100,200))
+
+local function mkToggle(parent, label, y, key, col)
+    local row=mkFrame(parent,UDim2.new(1,-16,0,28),UDim2.new(0,8,0,y),C(16,6,28),0,8)
+    mkStroke(row,col or C(60,0,120),1)
+    mkLbl(row,label,UDim2.new(0,10,0,0),UDim2.new(0.7,0,1,0),10,C(200,180,230))
+    local state=CFG[key]
+    local tb=mkBtn(row,state and "ON" or "OFF",
+        UDim2.new(1,-58,0.5,-11),UDim2.new(0,50,0,22),
+        state and C(60,0,120) or C(30,10,40),
+        state and C(200,150,255) or C(120,100,150),10,6)
+    tb.MouseButton1Click:Connect(function()
+        CFG[key]=not CFG[key]
+        tb.Text=CFG[key] and "ON" or "OFF"
+        tb.BackgroundColor3=CFG[key] and C(60,0,120) or C(30,10,40)
+        tb.TextColor3=CFG[key] and C(200,150,255) or C(120,100,150)
+    end)
+    return row
+end
+
+mkToggle(farmPage,"Hoop Touch Glitch",  148,"hoopGlitch",   C(255,200,60))
+mkToggle(farmPage,"OrbEvent Spam",       180,"orbGlitch",    C(60,200,255))
+mkToggle(farmPage,"Rebirth Loop",        212,"rebirthGlitch",C(180,80,255))
+
+-- start/stop
+local startBtn=mkBtn(farmPage,"▶  START FARM",
+    UDim2.new(0,8,0,250),UDim2.new(0.55,-4,0,34),
+    C(50,0,110),C(220,180,255),13,10)
+mkStroke(startBtn,C(120,0,240),1.5)
+
+local stopBtn=mkBtn(farmPage,"■  STOP",
+    UDim2.new(0.57,0,0,250),UDim2.new(0.43,-8,0,34),
+    C(60,0,20),C(255,120,120),13,10)
+mkStroke(stopBtn,C(180,0,60),1.5)
+
+local statusLbl=mkLbl(farmPage,"◉  Ready — press START",
+    UDim2.new(0,8,0,292),UDim2.new(1,-16,0,16),
+    10,C(160,130,200))
+
+startBtn.MouseButton1Click:Connect(function()
+    startAll()
+    startBtn.BackgroundColor3=C(80,0,160)
+    statusLbl.Text="◉  Running all glitch loops..."
+    statusLbl.TextColor3=C(140,255,140)
+end)
+stopBtn.MouseButton1Click:Connect(function()
+    stopAll()
+    startBtn.BackgroundColor3=C(50,0,110)
+    statusLbl.Text="◉  Stopped."
+    statusLbl.TextColor3=C(255,100,100)
+end)
+
+-- target row
+mkLbl(farmPage,"Target Rebirths",UDim2.new(0,8,0,318),UDim2.new(0.45,0,0,14),9,C(140,100,200))
+local tDm=mkBtn(farmPage,"−",UDim2.new(0,8,0,334),UDim2.new(0,28,0,26),C(30,0,60),C(200,150,255),14,6)
+local tDisp=Instance.new("TextLabel")
+tDisp.Size=UDim2.new(0,80,0,26) tDisp.Position=UDim2.new(0,40,0,334)
+tDisp.Text=tostring(CFG.target) tDisp.BackgroundColor3=C(14,4,28)
+tDisp.TextColor3=C(220,190,255) tDisp.Font=Enum.Font.GothamBold
+tDisp.TextSize=11 tDisp.BorderSizePixel=0 tDisp.ZIndex=8 tDisp.Parent=farmPage
+Instance.new("UICorner",tDisp).CornerRadius=UDim.new(0,5)
+local tDp=mkBtn(farmPage,"+",UDim2.new(0,124,0,334),UDim2.new(0,28,0,26),C(50,0,100),C(200,150,255),14,6)
+tDm.MouseButton1Click:Connect(function() CFG.target=math.max(1,CFG.target-1000) tDisp.Text=tostring(CFG.target) end)
+tDp.MouseButton1Click:Connect(function() CFG.target=CFG.target+1000 tDisp.Text=tostring(CFG.target) end)
+
+-- burst rate row
+mkLbl(farmPage,"Orb Burst Rate",UDim2.new(0.5,0,0,318),UDim2.new(0.45,0,0,14),9,C(140,100,200))
+local bDm=mkBtn(farmPage,"−",UDim2.new(0.5,0,0,334),UDim2.new(0,28,0,26),C(30,0,60),C(200,150,255),14,6)
+local bDisp=Instance.new("TextLabel")
+bDisp.Size=UDim2.new(0,50,0,26) bDisp.Position=UDim2.new(0.5,32,0,334)
+bDisp.Text=tostring(CFG.orbBurst) bDisp.BackgroundColor3=C(14,4,28)
+bDisp.TextColor3=C(220,190,255) bDisp.Font=Enum.Font.GothamBold
+bDisp.TextSize=11 bDisp.BorderSizePixel=0 bDisp.ZIndex=8 bDisp.Parent=farmPage
+Instance.new("UICorner",bDisp).CornerRadius=UDim.new(0,5)
+local bDp=mkBtn(farmPage,"+",UDim2.new(0.5,86,0,334),UDim2.new(0,28,0,26),C(50,0,100),C(200,150,255),14,6)
+bDm.MouseButton1Click:Connect(function() CFG.orbBurst=math.max(1,CFG.orbBurst-5) bDisp.Text=tostring(CFG.orbBurst) end)
+bDp.MouseButton1Click:Connect(function() CFG.orbBurst=math.min(100,CFG.orbBurst+5) bDisp.Text=tostring(CFG.orbBurst) end)
+
+-- ─── ORBS PAGE ───────────────────────────────────────────────────────────────
+local orbPage  = pages["ORBS"]
+local orbScroll= mkScroll(orbPage,UDim2.new(1,-8,1,-50),UDim2.new(0,4,0,4))
+
+-- select all / none
+local allOrbBtn=mkBtn(orbPage,"SELECT ALL",UDim2.new(0,8,1,-40),UDim2.new(0.45,-4,0,30),C(40,0,80),C(200,150,255),11,8)
+local noneOrbBtn=mkBtn(orbPage,"SELECT NONE",UDim2.new(0.5,4,1,-40),UDim2.new(0.5,-12,0,30),C(30,0,40),C(160,110,200),11,8)
+
+allOrbBtn.MouseButton1Click:Connect(function()
+    for _, o in ipairs(ALL_ORBS) do orbEnabled[o.key]=true end
+    -- refresh checkboxes
+    for _, ch in ipairs(orbScroll:GetChildren()) do
+        if ch:IsA("Frame") then
+            local cb=ch:FindFirstChildOfClass("TextButton")
+            if cb then cb.Text="✓" cb.BackgroundColor3=C(60,0,120) end
+        end
+    end
+end)
+noneOrbBtn.MouseButton1Click:Connect(function()
+    for _, o in ipairs(ALL_ORBS) do orbEnabled[o.key]=false end
+    for _, ch in ipairs(orbScroll:GetChildren()) do
+        if ch:IsA("Frame") then
+            local cb=ch:FindFirstChildOfClass("TextButton")
+            if cb then cb.Text="○" cb.BackgroundColor3=C(20,6,34) end
+        end
+    end
+end)
+
+for _, o in ipairs(ALL_ORBS) do
+    local row=mkFrame(orbScroll,UDim2.new(1,-8,0,36),nil,C(14,6,26),0,8)
+    row.LayoutOrder=1
+
+    -- color dot
+    local dot=mkFrame(row,UDim2.new(0,12,0,12),UDim2.new(0,8,0.5,-6),o.color,0,6)
+
+    mkLbl(row,o.name,UDim2.new(0,26,0,0),UDim2.new(0.65,0,1,0),12,C(220,200,255))
+
+    local state=orbEnabled[o.key]
+    local cb=mkBtn(row,state and "✓" or "○",
+        UDim2.new(1,-48,0.5,-13),UDim2.new(0,40,0,26),
+        state and C(60,0,120) or C(20,6,34),
+        state and C(200,150,255) or C(100,80,140),12,7)
+    mkStroke(cb,o.color,1)
+
+    cb.MouseButton1Click:Connect(function()
+        orbEnabled[o.key]=not orbEnabled[o.key]
+        cb.Text=orbEnabled[o.key] and "✓" or "○"
+        cb.BackgroundColor3=orbEnabled[o.key] and C(60,0,120) or C(20,6,34)
+        cb.TextColor3=orbEnabled[o.key] and C(200,150,255) or C(100,80,140)
+    end)
+end
+
+-- ─── ZONES PAGE ──────────────────────────────────────────────────────────────
+local zonePage   = pages["ZONES"]
+local zoneScroll = mkScroll(zonePage,UDim2.new(1,-8,1,-50),UDim2.new(0,4,0,4))
+
+local allZoneBtn =mkBtn(zonePage,"SELECT ALL",UDim2.new(0,8,1,-40),UDim2.new(0.45,-4,0,30),C(0,60,30),C(140,255,180),11,8)
+local noneZoneBtn=mkBtn(zonePage,"SELECT NONE",UDim2.new(0.5,4,1,-40),UDim2.new(0.5,-12,0,30),C(0,30,20),C(80,180,120),11,8)
+
+local zoneCheckboxes={}
+
+allZoneBtn.MouseButton1Click:Connect(function()
+    for _, z in ipairs(ALL_ZONES) do zoneEnabled[z]=true end
+    for _, cb in pairs(zoneCheckboxes) do
+        cb.Text="✓" cb.BackgroundColor3=C(0,60,30)
+    end
+end)
+noneZoneBtn.MouseButton1Click:Connect(function()
+    for _, z in ipairs(ALL_ZONES) do zoneEnabled[z]=false end
+    for _, cb in pairs(zoneCheckboxes) do
+        cb.Text="○" cb.BackgroundColor3=C(10,20,14)
+    end
+end)
+
+local zoneColors={
+    ["City"]            = C(200,200,80),
+    ["Snow City"]       = C(140,200,255),
+    ["Magma City"]      = C(255,100,40),
+    ["Legends Highway"] = C(80,200,255),
+    ["Speed Desert"]    = C(220,180,60),
+    ["Outer Space"]     = C(120,80,220),
+    ["Speed Jungle"]    = C(60,220,100),
+}
+local zoneUnlock={
+    ["City"]            = "Start",
+    ["Snow City"]       = "Level 25 (Mysterious Cave)",
+    ["Magma City"]      = "1 Rebirth (Inferno Cave)",
+    ["Legends Highway"] = "10 Rebirths (Electro Cave)",
+    ["Speed Desert"]    = "5 Rebirths",
+    ["Outer Space"]     = "50 Races",
+    ["Speed Jungle"]    = "50 Rebirths",
+}
+
+for _, z in ipairs(ALL_ZONES) do
+    local col = zoneColors[z] or C(150,150,150)
+    local row=mkFrame(zoneScroll,UDim2.new(1,-8,0,46),nil,C(12,6,22),0,8)
+    mkStroke(row,col,1)
+
+    local dot=mkFrame(row,UDim2.new(0,10,0,10),UDim2.new(0,8,0,8),col,0,5)
+    mkLbl(row,z,UDim2.new(0,24,0,4),UDim2.new(0.7,0,0,18),12,C(220,210,255))
+    mkLbl(row,"Unlock: "..(zoneUnlock[z] or "?"),UDim2.new(0,24,0,22),UDim2.new(0.72,0,0,14),
+        9,C(120,100,170))
+
+    local state=zoneEnabled[z]
+    local cb=mkBtn(row,"✓",UDim2.new(1,-48,0.5,-13),UDim2.new(0,40,0,26),
+        state and C(0,60,30) or C(10,20,14),
+        state and C(140,255,180) or C(80,120,90),12,7)
+    mkStroke(cb,col,1)
+    zoneCheckboxes[z]=cb
+
+    cb.MouseButton1Click:Connect(function()
+        zoneEnabled[z]=not zoneEnabled[z]
+        cb.Text=zoneEnabled[z] and "✓" or "○"
+        cb.BackgroundColor3=zoneEnabled[z] and C(0,60,30) or C(10,20,14)
+        cb.TextColor3=zoneEnabled[z] and C(140,255,180) or C(80,120,90)
+    end)
+end
+
+-- ─── GLITCHES PAGE ───────────────────────────────────────────────────────────
+local glitchPage   = pages["GLITCHES"]
+local glitchScroll = mkScroll(glitchPage,UDim2.new(1,-8,1,-8),UDim2.new(0,4,0,4))
+
+for _, g in ipairs(GLITCH_INFO) do
+    local cardH = g.key and 74 or 64
+    local card=mkFrame(glitchScroll,UDim2.new(1,-8,0,cardH),nil,C(12,4,22),0,10)
+    mkStroke(card,g.color,1.5)
+
+    -- colored left bar
+    local bar=mkFrame(card,UDim2.new(0,4,1,-8),UDim2.new(0,4,0,4),g.color,0,2)
+
+    mkLbl(card,g.name,UDim2.new(0,14,0,4),UDim2.new(1,-70,0,18),12,g.color)
+    mkLbl(card,g.desc,UDim2.new(0,14,0,22),UDim2.new(1,-20,0,cardH-30),
+        9,C(180,160,210),Enum.TextXAlignment.Left)
+
+    if g.key then
+        local state=CFG[g.key]
+        local tb=mkBtn(card,state and "ON" or "OFF",
+            UDim2.new(1,-58,0,6),UDim2.new(0,50,0,22),
+            state and g.color or C(20,8,34),
+            C(255,255,255),10,6)
+        tb.MouseButton1Click:Connect(function()
+            if g.key then
+                CFG[g.key]=not CFG[g.key]
+                tb.Text=CFG[g.key] and "ON" or "OFF"
+                tb.BackgroundColor3=CFG[g.key] and g.color or C(20,8,34)
+            end
+        end)
+    end
+end
+
+-- ─── Stats updater ────────────────────────────────────────────────────────────
+local sessionStart = getRebirths()
+local startTime    = os.time()
+
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        local cur      = getRebirths()
+        local lv       = getLevel()
+        local need     = getRebirthReq()
+        local session  = cur - sessionStart
+        local elapsed  = math.max(1, os.time()-startTime)
+        local rate     = session/elapsed*3600
+        local pct      = math.clamp(cur/CFG.target,0,1)
+
+        rebirthLbl.Text = ("Rebirths: %d  /  %d"):format(cur,CFG.target)
+        levelLbl.Text   = ("Level: %d  |  Need: %d  (formula: 50+%d×25)"):format(lv,need,cur)
+        sessionLbl.Text = ("Session: +%d  |  Rate: %.0f/hr"):format(session,rate)
+        pctLbl.Text     = ("%.4f%%  complete"):format(pct*100)
+        barFill.Size    = UDim2.new(pct,0,1,0)
+        barFill.BackgroundColor3 = Color3.fromHSV(0.78-(pct*0.78),1,1)
+
+        if CFG.running and cur >= CFG.target then
+            stopAll()
+            statusLbl.Text="✅  TARGET REACHED!"
+            statusLbl.TextColor3=C(255,255,80)
+        end
+    end
+end)
+
+-- ─── Done ────────────────────────────────────────────────────────────────────
+pcall(function()
+    StarterGui:SetCore("SendNotification",{
+        Title="LoS Farmer v2",
+        Text="4 tabs: Farm · Orbs · Zones · Glitches",
+        Duration=4,
+    })
+end)
+
+print("[LoS] Loaded. 3 glitch loops ready. "..#ALL_ORBS.." orbs × "..#ALL_ZONES.." zones.")
