@@ -1,0 +1,559 @@
+--[[
+    The Strongest Battlegrounds — Auto Kyoto Combo
+    Character: Hero Hunter (Garou)
+    
+    Combo sequence:
+    Approach Dash → 3 M1 → Mini Uppercut (M1+Jump) →
+    Flowing Water [Q] → Side Dash (Kyoto tech) →
+    Lethal Whirlwind Stream [E] → Whirlwind Dash Tech →
+    Hunter's Grasp [R] → 3 M1 + Downslam (optional ender)
+    
+    Requires: executor with VirtualInputManager access
+    (Delta, Fluxus, Arceus X, Hydrogen, Solara, etc.)
+]]
+
+-- ─── Services ────────────────────────────────────────────────────────────────
+local Players         = game:GetService("Players")
+local RunService      = game:GetService("RunService")
+local UserInputService= game:GetService("UserInputService")
+local TweenService    = game:GetService("TweenService")
+local VIM             = game:GetService("VirtualInputManager")
+
+local Player  = Players.LocalPlayer
+local Camera  = workspace.CurrentCamera
+
+-- ─── Config (tune these if combo breaks) ─────────────────────────────────────
+local CFG = {
+    -- Range
+    DETECT_RANGE    = 80,    -- max stud range to target enemies
+    
+    -- M1 timing (seconds)
+    M1_INTERVAL     = 0.33,  -- gap between each M1 hit
+    M1_HOLD         = 0.05,  -- how long click is held
+    
+    -- Ability timing
+    UPPERCUT_DELAY  = 0.05,  -- Jump fires this many seconds before 4th M1
+    POST_UPPER      = 0.12,  -- settle time after mini uppercut
+    FW_CAST_DELAY   = 0.05,  -- time before Flowing Water fires
+    POST_FW         = 0.18,  -- time after Flowing Water before side dash
+    SIDE_DASH_HOLD  = 0.06,  -- double-tap gap for side dash
+    POST_DASH       = 0.10,  -- settle after dash
+    LWS_CAST_DELAY  = 0.03,  -- time before Lethal Whirlwind fires
+    POST_LWS        = 0.06,  -- time after LWS before Whirlwind Dash Tech
+    WDT_DELAY       = 0.07,  -- Whirlwind Dash Tech gap
+    POST_WDT        = 0.14,  -- settle after WDT
+    HG_CAST_DELAY   = 0.03,  -- time before Hunter's Grasp
+    POST_HG         = 0.20,  -- settle after ender
+    
+    -- Cycle
+    COMBO_COOLDOWN  = 0.5,   -- seconds between combo loops (AUTO mode)
+    APPROACH_DIST   = 12,    -- studs — dash toward target if further than this
+    
+    -- Ender toggle
+    FULL_ENDER      = true,  -- do post-HG M1 downslam ender
+}
+
+-- ─── Key bindings (Hero Hunter default PC layout) ─────────────────────────────
+-- Executors simulate these via VIM even on mobile
+local KEYS = {
+    SKILL_1  = Enum.KeyCode.Q,         -- Flowing Water / Water Stream Cutting Fist
+    SKILL_2  = Enum.KeyCode.E,         -- Lethal Whirlwind Stream
+    SKILL_3  = Enum.KeyCode.R,         -- Hunter's Grasp
+    SKILL_4  = Enum.KeyCode.F,         -- Prey's Peril (not used in base Kyoto)
+    JUMP     = Enum.KeyCode.Space,
+    BLOCK    = Enum.KeyCode.LeftShift,
+    FWD      = Enum.KeyCode.W,         -- forward dash: double-tap
+    BACK     = Enum.KeyCode.S,
+    LEFT     = Enum.KeyCode.A,         -- side dash left: double-tap
+    RIGHT    = Enum.KeyCode.D,         -- side dash right: double-tap
+}
+
+-- ─── State ────────────────────────────────────────────────────────────────────
+local RUNNING      = false   -- auto-loop on/off
+local COMBO_ACTIVE = false   -- currently executing
+local CURRENT_PHASE= "Idle"
+local LOCKED_TARGET= nil     -- sticky target across combo
+local COMBOS_DONE  = 0
+
+-- ─── VIM input helpers ────────────────────────────────────────────────────────
+local function keyDown(kc)   VIM:SendKeyEvent(true,  kc, false, game) end
+local function keyUp(kc)     VIM:SendKeyEvent(false, kc, false, game) end
+
+local function pressKey(kc, holdTime)
+    keyDown(kc)
+    task.wait(holdTime or 0.05)
+    keyUp(kc)
+end
+
+-- Double-tap = dash in TSB
+local function doubleTap(kc, tapHold, tapGap)
+    pressKey(kc, tapHold or 0.04)
+    task.wait(tapGap or 0.07)
+    pressKey(kc, tapHold or 0.04)
+end
+
+-- Simulate M1 click at screen coordinates
+local function clickM1(x, y, hold)
+    VIM:SendMouseButtonEvent(x, y, 0, true,  game, 0)
+    task.wait(hold or CFG.M1_HOLD)
+    VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+end
+
+-- ─── Targeting ────────────────────────────────────────────────────────────────
+local function getMyRoot()
+    local c = Player.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function findNearest()
+    local myRoot = getMyRoot()
+    if not myRoot then return nil end
+    local best, bestDist = nil, CFG.DETECT_RANGE
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= Player and p.Character then
+            local pRoot = p.Character:FindFirstChild("HumanoidRootPart")
+            local pHum  = p.Character:FindFirstChild("Humanoid")
+            if pRoot and pHum and pHum.Health > 0 then
+                local d = (pRoot.Position - myRoot.Position).Magnitude
+                if d < bestDist then bestDist = d; best = p end
+            end
+        end
+    end
+    return best
+end
+
+local function targetRoot(target)
+    if not target or not target.Character then return nil end
+    return target.Character:FindFirstChild("HumanoidRootPart")
+end
+
+-- Face character + camera toward target
+local function faceTarget(target)
+    local myRoot = getMyRoot()
+    local tRoot  = targetRoot(target)
+    if not myRoot or not tRoot then return end
+    local dir = Vector3.new(tRoot.Position.X - myRoot.Position.X, 0, tRoot.Position.Z - myRoot.Position.Z).Unit
+    myRoot.CFrame = CFrame.new(myRoot.Position, myRoot.Position + dir)
+    Camera.CFrame  = CFrame.new(Camera.CFrame.Position, tRoot.Position)
+end
+
+-- Get screen position of target (for M1 click)
+local function targetScreenPos(target)
+    local tRoot = targetRoot(target)
+    local vp    = Camera.ViewportSize
+    local cx, cy = vp.X / 2, vp.Y / 2
+    if not tRoot then return cx, cy end
+    local sp, onScreen = Camera:WorldToScreenPoint(tRoot.Position)
+    if onScreen then return sp.X, sp.Y end
+    return cx, cy
+end
+
+-- ─── Approach toward target ───────────────────────────────────────────────────
+local function approachTarget(target)
+    local myRoot = getMyRoot()
+    local tRoot  = targetRoot(target)
+    if not myRoot or not tRoot then return end
+    local dist = (tRoot.Position - myRoot.Position).Magnitude
+    if dist > CFG.APPROACH_DIST then
+        faceTarget(target)
+        doubleTap(KEYS.FWD, 0.05, 0.07)
+        task.wait(0.25)
+    end
+end
+
+-- ─── KYOTO COMBO EXECUTOR ─────────────────────────────────────────────────────
+local phaseLabel = nil  -- set after GUI is created, updated here
+
+local function setPhase(txt)
+    CURRENT_PHASE = txt
+    if phaseLabel then phaseLabel.Text = "Phase: " .. txt end
+end
+
+local function kyotoCombo()
+    if COMBO_ACTIVE then return end
+    COMBO_ACTIVE = true
+
+    -- Find / sticky target
+    local target = LOCKED_TARGET or findNearest()
+    if not target or not target.Character then
+        COMBO_ACTIVE = false; setPhase("No target"); return
+    end
+    LOCKED_TARGET = target  -- lock for duration of combo
+
+    local tRoot = targetRoot(target)
+    if not tRoot then COMBO_ACTIVE = false; return end
+
+    -- ── Phase 0: Approach ────────────────────────────────────────────────────
+    setPhase("0 · Approach")
+    approachTarget(target)
+    faceTarget(target)
+    local sx, sy = targetScreenPos(target)
+
+    -- ── Phase 1: 3x M1 ───────────────────────────────────────────────────────
+    setPhase("1 · M1 × 3")
+    for i = 1, 3 do
+        faceTarget(target)
+        sx, sy = targetScreenPos(target)
+        clickM1(sx, sy)
+        task.wait(CFG.M1_INTERVAL)
+    end
+
+    -- ── Phase 2: Mini Uppercut (4th M1 + Jump) ───────────────────────────────
+    -- Jump fires slightly before 4th M1 to trigger mini uppercut hitbox
+    setPhase("2 · Mini Uppercut")
+    faceTarget(target)
+    sx, sy = targetScreenPos(target)
+    task.spawn(function()
+        task.wait(CFG.UPPERCUT_DELAY)
+        clickM1(sx, sy)
+    end)
+    pressKey(KEYS.JUMP, 0.05)
+    task.wait(CFG.POST_UPPER)
+    -- Enemy is now launched upward via Martial Artist passive
+
+    -- ── Phase 3: Flowing Water (Skill Q) ─────────────────────────────────────
+    -- Unblockable rush — catches airborne target
+    setPhase("3 · Flowing Water [Q]")
+    faceTarget(target)
+    task.wait(CFG.FW_CAST_DELAY)
+    pressKey(KEYS.SKILL_1, 0.06)
+    task.wait(CFG.POST_FW)
+
+    -- ── Phase 4: Kyoto Tech — Side Dash ──────────────────────────────────────
+    -- ShiftLock OFF needed; side-dash reposition
+    -- Dash direction: right (D) — flips to catch enemy as they fall
+    setPhase("4 · Kyoto Side Dash")
+    doubleTap(KEYS.RIGHT, CFG.SIDE_DASH_HOLD, 0.06)
+    task.wait(CFG.POST_DASH)
+    faceTarget(target)
+
+    -- ── Phase 5: Lethal Whirlwind Stream (Skill E) ───────────────────────────
+    -- Catches enemy mid-air after Flowing Water bounce
+    -- 1→2 order: LWS finisher = 21% kill verdict (better than 2→1)
+    setPhase("5 · Lethal Whirlwind [E]")
+    task.wait(CFG.LWS_CAST_DELAY)
+    pressKey(KEYS.SKILL_2, 0.06)
+    task.wait(CFG.POST_LWS)
+
+    -- ── Phase 5b: Whirlwind Dash Tech ────────────────────────────────────────
+    -- Front dash in arc IMMEDIATELY after LWS — reduces knockback, keeps enemy close
+    setPhase("5b · Whirlwind Dash Tech")
+    doubleTap(KEYS.FWD, 0.04, CFG.WDT_DELAY)
+    task.wait(CFG.POST_WDT)
+    faceTarget(target)
+
+    -- ── Phase 6: Hunter's Grasp (Skill R) — Combo Ender ─────────────────────
+    setPhase("6 · Hunter's Grasp [R]")
+    task.wait(CFG.HG_CAST_DELAY)
+    pressKey(KEYS.SKILL_3, 0.06)
+    task.wait(CFG.POST_HG)
+
+    -- ── Phase 7 (optional): Post-HG M1 + Downslam ───────────────────────────
+    if CFG.FULL_ENDER then
+        setPhase("7 · Ender M1s + Downslam")
+        for i = 1, 3 do
+            faceTarget(target)
+            sx, sy = targetScreenPos(target)
+            clickM1(sx, sy)
+            task.wait(CFG.M1_INTERVAL)
+        end
+        -- Downslam: Jump + look-down + M1
+        task.spawn(function()
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(sx, sy + 120, 0, true,  game, 0)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(sx, sy + 120, 0, false, game, 0)
+        end)
+        pressKey(KEYS.JUMP, 0.12)
+        task.wait(0.35)
+    end
+
+    COMBOS_DONE = COMBOS_DONE + 1
+    setPhase("✓ Done  (#" .. COMBOS_DONE .. ")")
+    COMBO_ACTIVE  = false
+    LOCKED_TARGET = nil
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  GUI
+-- ════════════════════════════════════════════════════════════════════════════
+local C = Color3.fromRGB
+
+local function mk(cls, props)
+    local i = Instance.new(cls)
+    for k, v in pairs(props) do i[k] = v end
+    return i
+end
+
+local function corner(parent, r)
+    local c = Instance.new("UICorner", parent)
+    c.CornerRadius = UDim.new(0, r or 10)
+end
+
+local function lbl(parent, text, pos, size, fs, fc, xa)
+    local L = mk("TextLabel", {
+        Text=text, Size=size or UDim2.new(1,-16,0,20),
+        Position=pos or UDim2.new(0,8,0,0),
+        TextColor3=fc or C(200,200,200),
+        BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+        TextSize=fs or 12,
+        TextXAlignment=xa or Enum.TextXAlignment.Left,
+        BorderSizePixel=0, Parent=parent,
+    })
+    return L
+end
+
+local function btn(parent, text, pos, size, bg, tc, fs)
+    local B = mk("TextButton", {
+        Text=text, Size=size or UDim2.new(0.45,0,0,34),
+        Position=pos, BackgroundColor3=bg or C(60,0,120),
+        TextColor3=tc or C(255,255,255),
+        Font=Enum.Font.GothamBold, TextSize=fs or 13,
+        BorderSizePixel=0, Parent=parent,
+    })
+    corner(B, 8)
+    return B
+end
+
+local gui = mk("ScreenGui", {
+    Name="TSBKyoto", ResetOnSpawn=false,
+    ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
+    Parent=Player:WaitForChild("PlayerGui"),
+})
+
+-- Main panel
+local panel = mk("Frame", {
+    Size=UDim2.new(0,310,0,280),
+    Position=UDim2.new(0,10,0.5,-140),
+    BackgroundColor3=C(6,6,12), BorderSizePixel=0,
+    Parent=gui,
+})
+corner(panel, 14)
+panel.ClipsDescendants = true
+
+-- Header
+local header = mk("Frame", {
+    Size=UDim2.new(1,0,0,36), BackgroundColor3=C(25,0,70),
+    BorderSizePixel=0, Parent=panel,
+})
+corner(header, 14)
+lbl(header, "⚔  TSB · AUTO KYOTO COMBO",
+    UDim2.new(0,12,0,0), UDim2.new(1,-50,1,0),
+    13, C(200,120,255))
+
+local minimized = false
+local minBtn = btn(header, "−",
+    UDim2.new(1,-34,0.5,-14), UDim2.new(0,28,0,28),
+    C(80,0,160), C(255,255,255), 15)
+minBtn.ZIndex = 10
+
+-- Content frame (hidden when minimized)
+local content = mk("Frame", {
+    Size=UDim2.new(1,0,1,-36), Position=UDim2.new(0,0,0,36),
+    BackgroundTransparency=1, BorderSizePixel=0, Parent=panel,
+})
+
+-- ── Target display ────────────────────────────────────────────────────────────
+local targetLbl = lbl(content, "⊙  Target: Scanning...",
+    UDim2.new(0,8,0,8), UDim2.new(1,-16,0,20),
+    12, C(255,210,60))
+
+local distLbl = lbl(content, "Distance: --",
+    UDim2.new(0,8,0,28), UDim2.new(1,-16,0,18),
+    11, C(160,160,200))
+
+-- ── Phase display ─────────────────────────────────────────────────────────────
+local phaseBg = mk("Frame", {
+    Size=UDim2.new(1,-16,0,28), Position=UDim2.new(0,8,0,52),
+    BackgroundColor3=C(15,5,30), BorderSizePixel=0, Parent=content,
+})
+corner(phaseBg, 6)
+phaseLabel = lbl(phaseBg, "Phase: Idle",
+    UDim2.new(0,8,0,0), UDim2.new(1,-16,1,0),
+    12, C(100,220,255))
+
+-- ── Combo counter ─────────────────────────────────────────────────────────────
+local countLbl = lbl(content, "Combos: 0  |  Status: OFF",
+    UDim2.new(0,8,0,86), UDim2.new(1,-16,0,18),
+    12, C(255,80,80))
+
+-- ── Timing sliders (labels only — user adjusts via +/- btns) ────────────────
+local function stepRow(parent, labelTxt, yPos, getF, setF, step)
+    lbl(parent, labelTxt,
+        UDim2.new(0,8,0,yPos), UDim2.new(0.55,0,0,16), 10, C(160,160,180))
+    local val = lbl(parent, tostring(getF()),
+        UDim2.new(0.6,0,0,yPos), UDim2.new(0.18,0,0,16), 10, C(255,220,120),
+        Enum.TextXAlignment.Center)
+    local dBtn = btn(parent, "−",
+        UDim2.new(0.80,0,0,yPos-2), UDim2.new(0.09,0,0,18), C(80,20,0), C(255,255,255), 11)
+    local uBtn = btn(parent, "+",
+        UDim2.new(0.90,0,0,yPos-2), UDim2.new(0.09,0,0,18), C(0,80,20), C(255,255,255), 11)
+    dBtn.MouseButton1Click:Connect(function()
+        setF(math.max(0.01, getF()-step))
+        val.Text = string.format("%.2f", getF())
+    end)
+    uBtn.MouseButton1Click:Connect(function()
+        setF(getF()+step)
+        val.Text = string.format("%.2f", getF())
+    end)
+end
+
+local sep = mk("Frame", {
+    Size=UDim2.new(0.9,0,0,1), Position=UDim2.new(0.05,0,0,108),
+    BackgroundColor3=C(40,20,80), BorderSizePixel=0, Parent=content,
+})
+
+lbl(content, "─ TIMING TUNING ─",
+    UDim2.new(0,8,0,114), UDim2.new(1,-16,0,14),
+    10, C(100,80,140))
+
+stepRow(content, "M1 Interval",   130,
+    function() return CFG.M1_INTERVAL end,
+    function(v) CFG.M1_INTERVAL = v end, 0.02)
+
+stepRow(content, "Post Uppercut",  150,
+    function() return CFG.POST_UPPER end,
+    function(v) CFG.POST_UPPER = v end, 0.02)
+
+stepRow(content, "Post FW → Dash", 170,
+    function() return CFG.POST_FW end,
+    function(v) CFG.POST_FW = v end, 0.02)
+
+stepRow(content, "Post Dash → LWS", 190,
+    function() return CFG.POST_DASH end,
+    function(v) CFG.POST_DASH = v end, 0.02)
+
+stepRow(content, "Post LWS → WDT", 210,
+    function() return CFG.POST_LWS end,
+    function(v) CFG.POST_LWS = v end, 0.01)
+
+-- ── Main control buttons ───────────────────────────────────────────────────────
+local autoBtn = btn(content, "▶ AUTO: OFF",
+    UDim2.new(0.04,0,0,232), UDim2.new(0.44,0,0,34),
+    C(30,100,30), C(255,255,255), 12)
+
+local onceBtn = btn(content, "⚡ ONCE",
+    UDim2.new(0.52,0,0,232), UDim2.new(0.44,0,0,34),
+    C(80,0,160), C(255,255,255), 12)
+
+-- Full ender toggle
+local enderBtn = btn(content, "Ender: ON",
+    UDim2.new(0.04,0,0,271), UDim2.new(0.44,0,0,26),
+    C(0,60,120), C(255,255,255), 11)
+
+-- Side dash direction
+local dashDir = "RIGHT"
+local dashBtn = btn(content, "Dash: RIGHT",
+    UDim2.new(0.52,0,0,271), UDim2.new(0.44,0,0,26),
+    C(60,40,0), C(255,255,255), 11)
+
+enderBtn.MouseButton1Click:Connect(function()
+    CFG.FULL_ENDER = not CFG.FULL_ENDER
+    enderBtn.Text = "Ender: " .. (CFG.FULL_ENDER and "ON" or "OFF")
+    enderBtn.BackgroundColor3 = CFG.FULL_ENDER and C(0,60,120) or C(80,0,0)
+end)
+
+dashBtn.MouseButton1Click:Connect(function()
+    dashDir = dashDir == "RIGHT" and "LEFT" or "RIGHT"
+    dashBtn.Text = "Dash: " .. dashDir
+end)
+
+-- ── Button logic ──────────────────────────────────────────────────────────────
+autoBtn.MouseButton1Click:Connect(function()
+    RUNNING = not RUNNING
+    if RUNNING then
+        autoBtn.Text = "⏸ AUTO: ON"
+        autoBtn.BackgroundColor3 = C(180,30,30)
+        countLbl.TextColor3 = C(80,255,80)
+    else
+        autoBtn.Text = "▶ AUTO: OFF"
+        autoBtn.BackgroundColor3 = C(30,100,30)
+        countLbl.TextColor3 = C(255,80,80)
+        setPhase("Idle")
+    end
+end)
+
+onceBtn.MouseButton1Click:Connect(function()
+    if not COMBO_ACTIVE then
+        task.spawn(kyotoCombo)
+    end
+end)
+
+-- ── Minimize ──────────────────────────────────────────────────────────────────
+minBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    content.Visible = not minimized
+    minBtn.Text = minimized and "+" or "−"
+    panel.Size = minimized and UDim2.new(0,310,0,36) or UDim2.new(0,310,0,280)
+end)
+
+-- ── Panel drag ────────────────────────────────────────────────────────────────
+local dragging=false; local dStart; local pStart
+header.InputBegan:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.Touch
+    or i.UserInputType==Enum.UserInputType.MouseButton1 then
+        dragging=true; dStart=i.Position; pStart=panel.Position
+    end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if not dragging then return end
+    local d = i.Position - dStart
+    panel.Position = UDim2.new(pStart.X.Scale, pStart.X.Offset+d.X,
+                                pStart.Y.Scale, pStart.Y.Offset+d.Y)
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.Touch
+    or i.UserInputType==Enum.UserInputType.MouseButton1 then
+        dragging=false
+    end
+end)
+
+-- ─── Heartbeat: scanner + status + auto loop ─────────────────────────────────
+local scanClock = 0
+RunService.Heartbeat:Connect(function(dt)
+    scanClock = scanClock + dt
+    if scanClock < 0.2 then return end
+    scanClock = 0
+
+    -- Update side dash key from dashDir
+    -- (read at combo-time, not stored in CFG)
+
+    local target = findNearest()
+    if target then
+        local tRoot = targetRoot(target)
+        local myRoot = getMyRoot()
+        local dist = (tRoot and myRoot)
+            and math.floor((tRoot.Position - myRoot.Position).Magnitude)
+            or 0
+        targetLbl.Text = "⊙  " .. (target.DisplayName or target.Name)
+        distLbl.Text   = ("Distance: %d studs  |  Combos: %d"):format(dist, COMBOS_DONE)
+        targetLbl.TextColor3 = C(80, 255, 120)
+    else
+        targetLbl.Text = "⊙  No target in range"
+        targetLbl.TextColor3 = C(255, 80, 80)
+        distLbl.Text   = ("Distance: --  |  Combos: %d"):format(COMBOS_DONE)
+    end
+
+    if RUNNING then
+        countLbl.Text = ("Auto: ON  |  Combos: %d"):format(COMBOS_DONE)
+    else
+        countLbl.Text = ("Auto: OFF  |  Combos: %d"):format(COMBOS_DONE)
+    end
+
+    -- Auto combo trigger
+    if RUNNING and not COMBO_ACTIVE and target then
+        -- Dynamic dash direction
+        -- (patch the kyotoCombo's dash key based on dashDir)
+        task.spawn(function()
+            if COMBO_ACTIVE then return end
+            -- override dash key momentarily
+            local savedDash = CFG._dashKey
+            CFG._dashKey = dashDir == "LEFT" and KEYS.LEFT or KEYS.RIGHT
+            kyotoCombo()
+        end)
+    end
+end)
+
+print("[TSB Kyoto] Loaded. Hero Hunter auto-combo ready.")
+print("[TSB Kyoto] Q=FlowingWater  E=LethalWhirlwind  R=HunterGrasp")
+print("[TSB Kyoto] Sequence: 3M1 → Uppercut → FW[Q] → SideDash → LWS[E] → WDT → HG[R]")
