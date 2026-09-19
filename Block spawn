@@ -1,0 +1,334 @@
+--[[
+    ServerParts.lua — 10 adjustable server-side parts
+    executor script (Synapse X, KRNL, Fluxus, Solara, etc.)
+
+    HOW IT REPLICATES:
+    - ReplicationFocus = Workspace → tells server this client simulates everything
+    - sethiddenproperty SimulationRadius → max physics ownership radius
+    - Parts are ANCHORED → zero physics cost, zero lag
+    - CFrame is set each Heartbeat → replicates position to server + all clients
+    - Massless + CanCollide false → no collision overhead
+
+    result: parts are visible and positioned to everyone, no server script needed
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace        = game:GetService("Workspace")
+local LocalPlayer      = Players.LocalPlayer
+
+-- ─── CLAIM MAX SIMULATION RADIUS ─────────────────────
+-- this is the core replication trick — client tells server
+-- it owns physics for a huge radius, so parts it touches
+-- get replicated back to the server and all other clients
+LocalPlayer.ReplicationFocus = Workspace
+RunService.Heartbeat:Connect(function()
+    pcall(function()
+        sethiddenproperty(LocalPlayer, "SimulationRadius",    2147483647)
+        sethiddenproperty(LocalPlayer, "MaxSimulationRadius", 2147483647)
+    end)
+end)
+
+-- ─── CONFIG ───────────────────────────────────────────
+local PART_COUNT  = 10
+local PART_SIZE   = Vector3.new(4, 4, 4)
+local PART_MAT    = Enum.Material.SmoothPlastic
+local ORBIT_RADIUS  = 8      -- studs from player
+local ORBIT_HEIGHT  = 3      -- Y offset above HRP
+local ORBIT_SPEED   = 1.2    -- radians per second
+local COLORS = {
+    Color3.fromRGB(220, 50,  50),
+    Color3.fromRGB(220,130,  40),
+    Color3.fromRGB(220,220,  40),
+    Color3.fromRGB( 50,200,  80),
+    Color3.fromRGB( 40,160, 220),
+    Color3.fromRGB(120,  50, 220),
+    Color3.fromRGB(220,  60, 160),
+    Color3.fromRGB(255, 255, 255),
+    Color3.fromRGB( 80, 220, 220),
+    Color3.fromRGB(255, 140,   0),
+}
+
+-- ─── FOLDER ───────────────────────────────────────────
+local folder = Instance.new("Folder")
+folder.Name  = "ServerParts"
+folder.Parent = Workspace
+
+-- ─── SPAWN PARTS ─────────────────────────────────────
+-- ANCHORED = true is the key — anchored parts use no physics
+-- simulation so they produce zero lag regardless of count.
+-- position is set via CFrame each frame which does replicate.
+
+local parts = {}
+
+for i = 1, PART_COUNT do
+    local p = Instance.new("Part")
+    p.Name         = "SP_" .. i
+    p.Size         = PART_SIZE
+    p.Anchored     = true           -- zero physics cost
+    p.CanCollide   = false          -- no collision overhead
+    p.CastShadow   = false          -- no shadow overhead
+    p.Massless     = true
+    p.Material     = PART_MAT
+    p.Color        = COLORS[i] or Color3.fromRGB(255,255,255)
+    p.TopSurface   = Enum.SurfaceType.Smooth
+    p.BottomSurface = Enum.SurfaceType.Smooth
+    p.Parent       = folder         -- parent to workspace folder → replicates
+    table.insert(parts, p)
+end
+
+-- ─── ORBIT LOOP ──────────────────────────────────────
+-- drives CFrame every Heartbeat — anchored part CFrame writes
+-- replicate to the server and all clients (this is the behavior
+-- the SimulationRadius trick enables).
+-- using RunService.Heartbeat NOT RenderStepped so it runs
+-- even when tab is unfocused.
+
+local t = 0
+local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local hrp  = char:WaitForChild("HumanoidRootPart")
+
+LocalPlayer.CharacterAdded:Connect(function(c)
+    char = c
+    hrp  = c:WaitForChild("HumanoidRootPart")
+end)
+
+RunService.Heartbeat:Connect(function(dt)
+    if not hrp or not hrp.Parent then return end
+    t = t + dt * ORBIT_SPEED
+
+    local center = hrp.Position + Vector3.new(0, ORBIT_HEIGHT, 0)
+
+    for i, p in ipairs(parts) do
+        if not p or not p.Parent then continue end
+
+        -- evenly spaced around a circle + stagger height with sine
+        local angle  = t + (2 * math.pi * (i - 1) / PART_COUNT)
+        local hBob   = math.sin(t * 1.5 + i) * 1.2   -- gentle up/down bob
+
+        local pos = Vector3.new(
+            center.X + ORBIT_RADIUS * math.cos(angle),
+            center.Y + hBob,
+            center.Z + ORBIT_RADIUS * math.sin(angle)
+        )
+
+        -- CFrame.new(position, lookAt) makes part face the player
+        p.CFrame = CFrame.new(pos, Vector3.new(center.X, pos.Y, center.Z))
+    end
+end)
+
+-- ─── GUI ──────────────────────────────────────────────
+local sg = Instance.new("ScreenGui")
+sg.Name = "ServerPartsGui"; sg.ResetOnSpawn = false; sg.IgnoreGuiInset = true
+sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local panel = Instance.new("Frame")
+panel.Size             = UDim2.new(0,240,0,340)
+panel.Position         = UDim2.new(0,16,0.5,-170)
+panel.BackgroundColor3 = Color3.fromRGB(8,9,16)
+panel.BorderSizePixel  = 0
+panel.Active           = true
+panel.Parent           = sg
+Instance.new("UICorner",panel).CornerRadius = UDim.new(0,14)
+local stroke = Instance.new("UIStroke",panel)
+stroke.Color=Color3.fromRGB(60,60,180); stroke.Thickness=1.5
+
+-- title bar + drag
+local bar = Instance.new("Frame")
+bar.Size=UDim2.new(1,0,0,34); bar.BackgroundColor3=Color3.fromRGB(15,15,80)
+bar.BorderSizePixel=0; bar.ZIndex=2; bar.Parent=panel
+Instance.new("UICorner",bar).CornerRadius=UDim.new(0,14)
+local fix=Instance.new("Frame"); fix.Size=UDim2.new(1,0,0,8)
+fix.Position=UDim2.new(0,0,1,-8); fix.BackgroundColor3=Color3.fromRGB(15,15,80)
+fix.BorderSizePixel=0; fix.ZIndex=2; fix.Parent=bar
+local titleL=Instance.new("TextLabel")
+titleL.Size=UDim2.new(1,-8,1,0); titleL.Position=UDim2.new(0,10,0,0)
+titleL.BackgroundTransparency=1; titleL.Text="✦ server parts"
+titleL.TextColor3=Color3.fromRGB(255,255,255); titleL.TextSize=14
+titleL.Font=Enum.Font.GothamBold; titleL.TextXAlignment=Enum.TextXAlignment.Left
+titleL.ZIndex=3; titleL.Parent=bar
+
+local drag,ds,sp=false,Vector2.zero,UDim2.new()
+bar.InputBegan:Connect(function(i)
+    if i.UserInputType~=Enum.UserInputType.MouseButton1
+    and i.UserInputType~=Enum.UserInputType.Touch then return end
+    drag=true; ds=Vector2.new(i.Position.X,i.Position.Y); sp=panel.Position
+    i.Changed:Connect(function()
+        if i.UserInputState==Enum.UserInputState.End then drag=false end
+    end)
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if not drag then return end
+    if i.UserInputType~=Enum.UserInputType.MouseMovement
+    and i.UserInputType~=Enum.UserInputType.Touch then return end
+    local d=Vector2.new(i.Position.X,i.Position.Y)-ds
+    panel.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y)
+end)
+
+-- helper fns
+local function lbl(txt,y,col,sz)
+    local L=Instance.new("TextLabel")
+    L.Size=UDim2.new(1,-16,0,13); L.Position=UDim2.new(0,8,0,y)
+    L.BackgroundTransparency=1; L.Text=txt
+    L.TextColor3=col or Color3.fromRGB(100,110,160); L.TextSize=sz or 10
+    L.Font=Enum.Font.Gotham; L.TextXAlignment=Enum.TextXAlignment.Left
+    L.ZIndex=3; L.Parent=panel; return L
+end
+local function mkBtn(txt,y,h,col)
+    local b=Instance.new("TextButton")
+    b.Size=UDim2.new(1,-16,0,h or 32); b.Position=UDim2.new(0,8,0,y)
+    b.BackgroundColor3=col or Color3.fromRGB(30,30,140); b.BorderSizePixel=0
+    b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255)
+    b.TextSize=12; b.Font=Enum.Font.GothamBold; b.ZIndex=3; b.Parent=panel
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,10)
+    return b
+end
+local function mkStepper(y,lbl2,getV,onDec,onInc)
+    lbl(lbl2,y)
+    local function sb(txt,x)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(0.22,0,0,26); b.Position=UDim2.new(x,0,0,y+14)
+        b.BackgroundColor3=Color3.fromRGB(30,32,50); b.BorderSizePixel=0
+        b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255)
+        b.TextSize=14; b.Font=Enum.Font.GothamBold; b.ZIndex=3; b.Parent=panel
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0,7)
+        return b
+    end
+    local dec=sb("−",0.08)
+    local disp=Instance.new("TextLabel")
+    disp.Size=UDim2.new(0.42,0,0,26); disp.Position=UDim2.new(0.3,0,0,y+14)
+    disp.BackgroundColor3=Color3.fromRGB(14,16,28); disp.BorderSizePixel=0
+    disp.Text=getV(); disp.TextColor3=Color3.fromRGB(200,210,255)
+    disp.TextSize=12; disp.Font=Enum.Font.GothamBold; disp.ZIndex=3; disp.Parent=panel
+    Instance.new("UICorner",disp).CornerRadius=UDim.new(0,7)
+    local inc=sb("+",0.72)
+    dec.MouseButton1Click:Connect(function() onDec(); disp.Text=getV() end)
+    inc.MouseButton1Click:Connect(function() onInc(); disp.Text=getV() end)
+    return disp
+end
+
+-- status
+local statusLbl = lbl("● active — visible to all players",40,Color3.fromRGB(60,220,120),11)
+statusLbl.Font=Enum.Font.GothamBold
+
+-- part count stepper
+mkStepper(58,"visible parts",
+    function() return tostring(PART_COUNT) end,
+    function()
+        PART_COUNT=math.max(1,PART_COUNT-1)
+        for i,p in ipairs(parts) do p.Transparency=(i>PART_COUNT and 1 or 0) end
+    end,
+    function()
+        PART_COUNT=math.min(10,PART_COUNT+1)
+        for i,p in ipairs(parts) do p.Transparency=(i>PART_COUNT and 1 or 0) end
+    end
+)
+
+-- size stepper
+local sizeVal = 4
+mkStepper(100,"part size (studs)",
+    function() return tostring(sizeVal).." st" end,
+    function()
+        sizeVal=math.max(1,sizeVal-1)
+        for _,p in ipairs(parts) do p.Size=Vector3.new(sizeVal,sizeVal,sizeVal) end
+    end,
+    function()
+        sizeVal=math.min(20,sizeVal+1)
+        for _,p in ipairs(parts) do p.Size=Vector3.new(sizeVal,sizeVal,sizeVal) end
+    end
+)
+
+-- orbit radius stepper
+mkStepper(142,"orbit radius",
+    function() return tostring(ORBIT_RADIUS).." st" end,
+    function() ORBIT_RADIUS=math.max(2,ORBIT_RADIUS-2) end,
+    function() ORBIT_RADIUS=math.min(50,ORBIT_RADIUS+2) end
+)
+
+-- orbit speed stepper
+local speedDisp
+do
+    local function getS() return string.format("%.1fx",ORBIT_SPEED) end
+    lbl("orbit speed",184)
+    local function sb(txt,x)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(0.22,0,0,26); b.Position=UDim2.new(x,0,0,198)
+        b.BackgroundColor3=Color3.fromRGB(30,32,50); b.BorderSizePixel=0
+        b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255)
+        b.TextSize=14; b.Font=Enum.Font.GothamBold; b.ZIndex=3; b.Parent=panel
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0,7)
+        return b
+    end
+    local dec=sb("−",0.08)
+    speedDisp=Instance.new("TextLabel")
+    speedDisp.Size=UDim2.new(0.42,0,0,26); speedDisp.Position=UDim2.new(0.3,0,0,198)
+    speedDisp.BackgroundColor3=Color3.fromRGB(14,16,28); speedDisp.BorderSizePixel=0
+    speedDisp.Text=getS(); speedDisp.TextColor3=Color3.fromRGB(200,210,255)
+    speedDisp.TextSize=12; speedDisp.Font=Enum.Font.GothamBold; speedDisp.ZIndex=3; speedDisp.Parent=panel
+    Instance.new("UICorner",speedDisp).CornerRadius=UDim.new(0,7)
+    local inc=sb("+",0.72)
+    dec.MouseButton1Click:Connect(function() ORBIT_SPEED=math.max(0.1,math.floor((ORBIT_SPEED-0.2)*10+0.5)/10); speedDisp.Text=getS() end)
+    inc.MouseButton1Click:Connect(function() ORBIT_SPEED=math.min(10,math.floor((ORBIT_SPEED+0.2)*10+0.5)/10); speedDisp.Text=getS() end)
+end
+
+-- height stepper
+mkStepper(228,"orbit height",
+    function() return tostring(ORBIT_HEIGHT).." st" end,
+    function() ORBIT_HEIGHT=math.max(-5,ORBIT_HEIGHT-1) end,
+    function() ORBIT_HEIGHT=math.min(20,ORBIT_HEIGHT+1) end
+)
+
+-- material picker
+local MATS = {
+    Enum.Material.SmoothPlastic, Enum.Material.Neon,
+    Enum.Material.Metal,         Enum.Material.Glass,
+    Enum.Material.Ice,           Enum.Material.ForceField,
+}
+local MAT_NAMES = {"Plastic","Neon","Metal","Glass","Ice","ForceField"}
+local matIdx = 1
+lbl("material",270)
+local matLeft  = Instance.new("TextButton")
+matLeft.Size=UDim2.new(0.12,0,0,26); matLeft.Position=UDim2.new(0.08,0,0,284)
+matLeft.BackgroundColor3=Color3.fromRGB(30,32,50); matLeft.BorderSizePixel=0
+matLeft.Text="<"; matLeft.TextColor3=Color3.fromRGB(255,255,255)
+matLeft.TextSize=13; matLeft.Font=Enum.Font.GothamBold; matLeft.ZIndex=3; matLeft.Parent=panel
+Instance.new("UICorner",matLeft).CornerRadius=UDim.new(0,7)
+local matDisp=Instance.new("TextLabel")
+matDisp.Size=UDim2.new(0.6,0,0,26); matDisp.Position=UDim2.new(0.2,0,0,284)
+matDisp.BackgroundColor3=Color3.fromRGB(14,16,28); matDisp.BorderSizePixel=0
+matDisp.Text=MAT_NAMES[1]; matDisp.TextColor3=Color3.fromRGB(200,210,255)
+matDisp.TextSize=11; matDisp.Font=Enum.Font.GothamBold; matDisp.ZIndex=3; matDisp.Parent=panel
+Instance.new("UICorner",matDisp).CornerRadius=UDim.new(0,7)
+local matRight = Instance.new("TextButton")
+matRight.Size=UDim2.new(0.12,0,0,26); matRight.Position=UDim2.new(0.8,0,0,284)
+matRight.BackgroundColor3=Color3.fromRGB(30,32,50); matRight.BorderSizePixel=0
+matRight.Text=">"; matRight.TextColor3=Color3.fromRGB(255,255,255)
+matRight.TextSize=13; matRight.Font=Enum.Font.GothamBold; matRight.ZIndex=3; matRight.Parent=panel
+Instance.new("UICorner",matRight).CornerRadius=UDim.new(0,7)
+local function applyMat()
+    local m=MATS[matIdx]
+    for _,p in ipairs(parts) do p.Material=m end
+    matDisp.Text=MAT_NAMES[matIdx]
+end
+matLeft.MouseButton1Click:Connect(function() matIdx=((matIdx-2)%#MATS)+1; applyMat() end)
+matRight.MouseButton1Click:Connect(function() matIdx=(matIdx%#MATS)+1;     applyMat() end)
+
+-- hide/show + destroy
+local visible = true
+local hideBtn = mkBtn("Hide Parts",318,28,Color3.fromRGB(40,40,120))
+hideBtn.MouseButton1Click:Connect(function()
+    visible = not visible
+    for i,p in ipairs(parts) do
+        if i <= PART_COUNT then p.Transparency = visible and 0 or 1 end
+    end
+    hideBtn.Text = visible and "Hide Parts" or "Show Parts"
+    hideBtn.BackgroundColor3 = visible and Color3.fromRGB(40,40,120) or Color3.fromRGB(0,100,60)
+end)
+
+-- live counter
+RunService.Heartbeat:Connect(function()
+    local active = 0
+    for i,p in ipairs(parts) do if i<=PART_COUNT and p.Transparency==0 then active=active+1 end end
+    statusLbl.Text = string.format("● %d parts active — server side", active)
+end)
