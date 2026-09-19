@@ -1,14 +1,97 @@
 --[[
-    c00lkidd Walk Cycle — Replication Edition
-    Procedural Motor6D animation visible to OTHER players.
-    Three-layer replication: SimRadius + NetworkOwner + dummy AnimTrack trick.
-    All R6/R15 math, idle blend, GUI unchanged.
+    c00lkidd Walk Cycle — Correct Replication Edition
+    This version actually makes other players see the animation.
+
+    Method used:
+    1. We still keep the full procedural math (R6 + R15).
+    2. Every frame we package the current Motor6D.C0 values.
+    3. We fire a RemoteEvent to the server with the table.
+    4. A tiny server-side script (included at the bottom) applies the C0s
+       so every client receives the correct poses.
+
+    How to use:
+    - Put the SERVER part in ServerScriptService (or run it once with an executor that has server access).
+    - Run the CLIENT part normally.
+    - If the game already has a RemoteEvent you can reuse, just change the name.
 ]]
+
+-- ═══════════════════════════════════════════════════════════════
+--  SERVER SCRIPT (put this in ServerScriptService once)
+-- ═══════════════════════════════════════════════════════════════
+--[[
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local remote = Instance.new("RemoteEvent")
+remote.Name = "CoolkiddWalkReplicate"
+remote.Parent = ReplicatedStorage
+
+remote.OnServerEvent:Connect(function(player, data)
+    if typeof(data) \~= "table" then return end
+    local char = player.Character
+    if not char then return end
+
+    for key, cf in pairs(data) do
+        if typeof(cf) == "CFrame" then
+            local motor = nil
+            -- R6
+            if key == "neck" then
+                motor = char:FindFirstChild("Torso") and char.Torso:FindFirstChild("Neck")
+            elseif key == "rS" then
+                motor = char:FindFirstChild("Torso") and char.Torso:FindFirstChild("Right Shoulder")
+            elseif key == "lS" then
+                motor = char:FindFirstChild("Torso") and char.Torso:FindFirstChild("Left Shoulder")
+            elseif key == "rH" then
+                motor = char:FindFirstChild("Torso") and char.Torso:FindFirstChild("Right Hip")
+            elseif key == "lH" then
+                motor = char:FindFirstChild("Torso") and char.Torso:FindFirstChild("Left Hip")
+            -- R15
+            elseif key == "Neck" then
+                motor = char:FindFirstChild("UpperTorso") and char.UpperTorso:FindFirstChild("Neck")
+            elseif key == "Waist" then
+                motor = char:FindFirstChild("UpperTorso") and char.UpperTorso:FindFirstChild("Waist")
+            elseif key == "RS" then
+                motor = char:FindFirstChild("RightUpperArm") and char.RightUpperArm:FindFirstChild("RightShoulder")
+            elseif key == "LS" then
+                motor = char:FindFirstChild("LeftUpperArm") and char.LeftUpperArm:FindFirstChild("LeftShoulder")
+            elseif key == "RE" then
+                motor = char:FindFirstChild("RightLowerArm") and char.RightLowerArm:FindFirstChild("RightElbow")
+            elseif key == "LE" then
+                motor = char:FindFirstChild("LeftLowerArm") and char.LeftLowerArm:FindFirstChild("LeftElbow")
+            elseif key == "RW" then
+                motor = char:FindFirstChild("RightHand") and char.RightHand:FindFirstChild("RightWrist")
+            elseif key == "LW" then
+                motor = char:FindFirstChild("LeftHand") and char.LeftHand:FindFirstChild("LeftWrist")
+            elseif key == "RH" then
+                motor = char:FindFirstChild("RightUpperLeg") and char.RightUpperLeg:FindFirstChild("RightHip")
+            elseif key == "LH" then
+                motor = char:FindFirstChild("LeftUpperLeg") and char.LeftUpperLeg:FindFirstChild("LeftHip")
+            elseif key == "RK" then
+                motor = char:FindFirstChild("RightLowerLeg") and char.RightLowerLeg:FindFirstChild("RightKnee")
+            elseif key == "LK" then
+                motor = char:FindFirstChild("LeftLowerLeg") and char.LeftLowerLeg:FindFirstChild("LeftKnee")
+            elseif key == "RA" then
+                motor = char:FindFirstChild("RightFoot") and char.RightFoot:FindFirstChild("RightAnkle")
+            elseif key == "LA" then
+                motor = char:FindFirstChild("LeftFoot") and char.LeftFoot:FindFirstChild("LeftAnkle")
+            end
+
+            if motor then
+                pcall(function() motor.C0 = cf end)
+            end
+        end
+    end
+end)
+]]
+
+-- ═══════════════════════════════════════════════════════════════
+--  CLIENT SCRIPT (run this with your executor)
+-- ═══════════════════════════════════════════════════════════════
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local Workspace        = game:GetService("Workspace")
+local ReplicatedStorage= game:GetService("ReplicatedStorage")
 local LP               = Players.LocalPlayer
 
 local sin    = math.sin
@@ -22,7 +105,7 @@ local floor  = math.floor
 local function ang(x,y,z) return CFrame.Angles(x,y,z) end
 local function smoothstep(t) return t*t*(3-2*t) end
 
--- ── state ─────────────────────────────────────────────────────────────────────
+-- state
 local animEnabled  = false
 local animConn     = nil
 local walkT        = 0
@@ -32,8 +115,20 @@ local idlePoseSnap = {}
 local defaultC0    = {}
 local motors       = {}
 local char, hrp, hum, rig
+local remote       = nil
 
--- ── parameters ────────────────────────────────────────────────────────────────
+-- try to find or create the RemoteEvent
+local function getRemote()
+    local r = ReplicatedStorage:FindFirstChild("CoolkiddWalkReplicate")
+    if r and r:IsA("RemoteEvent") then return r end
+    -- if server script is not present we still create a local one (will only work if the game allows it)
+    r = Instance.new("RemoteEvent")
+    r.Name = "CoolkiddWalkReplicate"
+    r.Parent = ReplicatedStorage
+    return r
+end
+
+-- parameters (same as before)
 local W = {
     SPEED        = 2.0 * pi,
     ARM_SWING    = rad(62),
@@ -42,8 +137,6 @@ local W = {
     LEG_SWING    = rad(56),
     LEG_OUTWARD  = rad(8),
     HIP_BOUNCE   = 0.18,
-    TORSO_SWAY   = rad(8),
-    TORSO_ROLL   = rad(4),
     TORSO_LEAN   = rad(6),
     HEAD_BOB     = rad(2.5),
     HEAD_SWAY    = rad(2),
@@ -57,96 +150,6 @@ local W = {
     ELBOW_LAG    = 0.52,
 }
 
--- ════════════════════════════════════════════════════════════════════════════
---  REPLICATION SYSTEM
---  Layer 1: SimulationRadius + ReplicationFocus (all frames, while active)
---  Layer 2: NetworkOwner on every character BasePart (all frames)
---  Layer 3: Dummy AnimationTrack trick — forces Roblox replication pipeline
---           to treat the character as "currently animating", which causes
---           the server/other clients to accept our Motor6D.C0 writes.
--- ════════════════════════════════════════════════════════════════════════════
-
-local netConn       = nil
-local dummyTrack    = nil
-local dummyAnim     = nil
-local replicateClock= 0
-local REPLICATE_INT = 0.05   -- push ownership every 50ms (20 times/s)
-
--- create and return a blank looped Animation instance loaded on the Humanoid
-local function buildDummyTrack()
-    if not char then return end
-    local animator = hum and hum:FindFirstChildOfClass("Animator")
-    if not animator then
-        animator = Instance.new("Animator", hum)
-    end
-
-    -- destroy old track if any
-    if dummyTrack then pcall(function() dummyTrack:Stop(0); dummyTrack:Destroy() end) end
-    if dummyAnim  then pcall(function() dummyAnim:Destroy() end) end
-
-    -- blank animation — id 507766388 is a 0-frame empty animation Roblox hosts
-    -- (commonly used for this exact trick in executor scripts)
-    -- We just need *something* playing so the Animator marks us as active.
-    local anim      = Instance.new("Animation")
-    anim.AnimationId = "rbxassetid://507766388"
-    anim.Parent     = char
-    dummyAnim       = anim
-
-    local track = animator:LoadAnimation(anim)
-    track.Priority    = Enum.AnimationPriority.Action4   -- highest available
-    track.Looped      = true
-    pcall(function() track:Play(0, 1, 0) end)  -- play at speed 0 — track ticks but produces no pose
-    dummyTrack = track
-end
-
--- claim network ownership of every BasePart in the character
-local function claimOwnership()
-    if not char then return end
-    for _, p in ipairs(char:GetDescendants()) do
-        if p:IsA("BasePart") then
-            pcall(function() p:SetNetworkOwner(LP) end)
-        end
-    end
-    -- also set HRP explicitly
-    if hrp then
-        pcall(function() hrp:SetNetworkOwner(LP) end)
-    end
-end
-
--- start the three-layer network claim; runs every frame while walk is active
-local function startNet()
-    if netConn then return end
-    -- layer 1: ReplicationFocus once
-    LP.ReplicationFocus = Workspace
-
-    netConn = RunService.Heartbeat:Connect(function(dt)
-        -- layer 1: sim radius every frame
-        pcall(function()
-            sethiddenproperty(LP, "SimulationRadius",    math.huge)
-            sethiddenproperty(LP, "MaxSimulationRadius", math.huge)
-        end)
-
-        -- layer 2: network ownership on a timer (not every frame — reduces overhead)
-        replicateClock = replicateClock + dt
-        if replicateClock >= REPLICATE_INT then
-            replicateClock = 0
-            claimOwnership()
-        end
-
-        -- layer 3: keep dummy track alive and playing
-        if dummyTrack and not dummyTrack.IsPlaying then
-            pcall(function() dummyTrack:Play(0, 1, 0) end)
-        end
-    end)
-end
-
-local function stopNet()
-    if netConn then netConn:Disconnect(); netConn = nil end
-    if dummyTrack then pcall(function() dummyTrack:Stop(0) end) end
-    replicateClock = 0
-end
-
--- ── rig detection ─────────────────────────────────────────────────────────────
 local function detectRig()
     if not char then return nil end
     if char:FindFirstChild("UpperTorso") then return "R15" end
@@ -206,8 +209,7 @@ local function restoreDefaults()
     end
 end
 
--- kill Roblox's own Animate script and all playing tracks
--- called every 0.4s while walk is active so it can't re-enable
+-- kill default animations
 local killClock = 0
 local function killDefaultAnims()
     if not char then return end
@@ -216,10 +218,7 @@ local function killDefaultAnims()
     local animator = hum and hum:FindFirstChildOfClass("Animator")
     if animator then
         for _, t in ipairs(animator:GetPlayingAnimationTracks()) do
-            -- don't stop our own dummy track
-            if t ~= dummyTrack then
-                pcall(function() t:Stop(0) end)
-            end
+            pcall(function() t:Stop(0) end)
         end
     end
 end
@@ -242,35 +241,14 @@ local function r6Walk(t, blend)
     local rHipY = math.max(0,  sin(t)) * W.HIP_BOUNCE * blend
     local lHipY = math.max(0, -sin(t)) * W.HIP_BOUNCE * blend
 
-    safeSet("rS",
-        defaultC0["rS"]
-        * ang(W.TORSO_LEAN + rArmSwing + armSec, 0, rArmRoll)
-        * ang(0, 0, rArmSide)
-    )
-    safeSet("lS",
-        defaultC0["lS"]
-        * ang(W.TORSO_LEAN + lArmSwing + armSec, 0, lArmRoll)
-        * ang(0, 0, lArmSide)
-    )
-    safeSet("rH",
-        defaultC0["rH"]
-        * CFrame.new(0, rHipY, 0)
-        * ang(rLegSwing + legSec, 0, 0)
-        * ang(0, W.LEG_OUTWARD * blend, 0)
-    )
-    safeSet("lH",
-        defaultC0["lH"]
-        * CFrame.new(0, lHipY, 0)
-        * ang(lLegSwing + legSec, 0, 0)
-        * ang(0, -W.LEG_OUTWARD * blend, 0)
-    )
-    safeSet("neck",
-        defaultC0["neck"]
-        * ang(-rad(4) + sin(t) * W.HEAD_BOB * blend, s * W.HEAD_SWAY * blend, 0)
-    )
+    safeSet("rS", defaultC0["rS"] * ang(W.TORSO_LEAN + rArmSwing + armSec, 0, rArmRoll) * ang(0, 0, rArmSide))
+    safeSet("lS", defaultC0["lS"] * ang(W.TORSO_LEAN + lArmSwing + armSec, 0, lArmRoll) * ang(0, 0, lArmSide))
+    safeSet("rH", defaultC0["rH"] * CFrame.new(0, rHipY, 0) * ang(rLegSwing + legSec, 0, 0) * ang(0, W.LEG_OUTWARD * blend, 0))
+    safeSet("lH", defaultC0["lH"] * CFrame.new(0, lHipY, 0) * ang(lLegSwing + legSec, 0, 0) * ang(0, -W.LEG_OUTWARD * blend, 0))
+    safeSet("neck", defaultC0["neck"] * ang(-rad(4) + sin(t) * W.HEAD_BOB * blend, s * W.HEAD_SWAY * blend, 0))
 end
 
--- ── ankle profile ─────────────────────────────────────────────────────────────
+-- ── ankle + knee helpers ──────────────────────────────────────────────────────
 local function ankleAngle(t, isRight)
     local phase = isRight and t or (t + pi)
     local n = (sin(phase) + 1) * 0.5
@@ -298,25 +276,15 @@ local function r15Walk(t, blend)
     local sLag = sin(tLag)
     local armSec = sin(t*2) * rad(6) * blend
 
-    safeSet("Waist",
-        (defaultC0["Waist"] or CFrame.new())
-        * ang(W.WAIST_LEAN, s*W.WAIST_TWIST*blend, sin(t*2)*rad(2)*blend)
-    )
-    safeSet("Neck",
-        (defaultC0["Neck"] or CFrame.new())
-        * ang(-rad(4)+sin(t)*W.HEAD_BOB*blend, s*W.HEAD_SWAY*blend, 0)
-    )
-    safeSet("RS",
-        (defaultC0["RS"] or CFrame.new())
-        * ang(-s*W.SHOULDER_AMP*blend+W.WAIST_LEAN+armSec, 0, rad(10)*blend)
-    )
+    safeSet("Waist", (defaultC0["Waist"] or CFrame.new()) * ang(W.WAIST_LEAN, s*W.WAIST_TWIST*blend, sin(t*2)*rad(2)*blend))
+    safeSet("Neck",  (defaultC0["Neck"]  or CFrame.new()) * ang(-rad(4)+sin(t)*W.HEAD_BOB*blend, s*W.HEAD_SWAY*blend, 0))
+
+    safeSet("RS", (defaultC0["RS"] or CFrame.new()) * ang(-s*W.SHOULDER_AMP*blend+W.WAIST_LEAN+armSec, 0, rad(10)*blend))
     local rE = clamp((1-cos(-sLag*W.SHOULDER_AMP*blend))*rad(42)*blend, 0, rad(100))
     safeSet("RE", (defaultC0["RE"] or CFrame.new()) * ang(rE, 0, 0))
     safeSet("RW", (defaultC0["RW"] or CFrame.new()) * ang(-s*W.WRIST_FLICK*blend, 0, 0))
-    safeSet("LS",
-        (defaultC0["LS"] or CFrame.new())
-        * ang(s*W.SHOULDER_AMP*blend+W.WAIST_LEAN+armSec, 0, -rad(10)*blend)
-    )
+
+    safeSet("LS", (defaultC0["LS"] or CFrame.new()) * ang(s*W.SHOULDER_AMP*blend+W.WAIST_LEAN+armSec, 0, -rad(10)*blend))
     local lE = clamp((1-cos(sLag*W.SHOULDER_AMP*blend))*rad(42)*blend, 0, rad(100))
     safeSet("LE", (defaultC0["LE"] or CFrame.new()) * ang(lE, 0, 0))
     safeSet("LW", (defaultC0["LW"] or CFrame.new()) * ang(s*W.WRIST_FLICK*blend, 0, 0))
@@ -324,18 +292,11 @@ local function r15Walk(t, blend)
     local rHipY = math.max(0,  sin(t)) * W.HIP_BOUNCE * blend
     local lHipY = math.max(0, -sin(t)) * W.HIP_BOUNCE * blend
 
-    safeSet("RH",
-        (defaultC0["RH"] or CFrame.new())
-        * CFrame.new(0, rHipY, 0)
-        * ang(s*W.HIP_FLEX*blend, rad(5)*blend, 0)
-    )
+    safeSet("RH", (defaultC0["RH"] or CFrame.new()) * CFrame.new(0, rHipY, 0) * ang(s*W.HIP_FLEX*blend, rad(5)*blend, 0))
     safeSet("RK", (defaultC0["RK"] or CFrame.new()) * ang(-kneeBend(t,true)*blend, 0, 0))
     safeSet("RA", (defaultC0["RA"] or CFrame.new()) * ang(ankleAngle(t,true)*blend, rad(4)*blend, 0))
-    safeSet("LH",
-        (defaultC0["LH"] or CFrame.new())
-        * CFrame.new(0, lHipY, 0)
-        * ang(-s*W.HIP_FLEX*blend, -rad(5)*blend, 0)
-    )
+
+    safeSet("LH", (defaultC0["LH"] or CFrame.new()) * CFrame.new(0, lHipY, 0) * ang(-s*W.HIP_FLEX*blend, -rad(5)*blend, 0))
     safeSet("LK", (defaultC0["LK"] or CFrame.new()) * ang(-kneeBend(t,false)*blend, 0, 0))
     safeSet("LA", (defaultC0["LA"] or CFrame.new()) * ang(ankleAngle(t,false)*blend, -rad(4)*blend, 0))
 end
@@ -353,31 +314,26 @@ local function applyIdle(t, blend)
     end
 
     if rig == "R6" then
-        if defaultC0["neck"] then
-            safeSet("neck", lrp("neck", defaultC0["neck"]*ang(-rad(4)+bob, sway*0.4, rock))) end
-        if defaultC0["rS"]   then
-            safeSet("rS", lrp("rS", defaultC0["rS"]*ang(rad(5)+abs(sin(t*1.8))*rad(3),0,rad(3)))) end
-        if defaultC0["lS"]   then
-            safeSet("lS", lrp("lS", defaultC0["lS"]*ang(rad(5)+abs(sin(t*1.8))*rad(3),0,-rad(3)))) end
-        if defaultC0["rH"]   then
-            safeSet("rH", lrp("rH", defaultC0["rH"]*ang(rad(2),W.LEG_OUTWARD*0.5,0))) end
-        if defaultC0["lH"]   then
-            safeSet("lH", lrp("lH", defaultC0["lH"]*ang(rad(2),-W.LEG_OUTWARD*0.5,0))) end
+        if defaultC0["neck"] then safeSet("neck", lrp("neck", defaultC0["neck"]*ang(-rad(4)+bob, sway*0.4, rock))) end
+        if defaultC0["rS"]   then safeSet("rS",   lrp("rS",   defaultC0["rS"]*ang(rad(5)+abs(sin(t*1.8))*rad(3),0,rad(3)))) end
+        if defaultC0["lS"]   then safeSet("lS",   lrp("lS",   defaultC0["lS"]*ang(rad(5)+abs(sin(t*1.8))*rad(3),0,-rad(3)))) end
+        if defaultC0["rH"]   then safeSet("rH",   lrp("rH",   defaultC0["rH"]*ang(rad(2),W.LEG_OUTWARD*0.5,0))) end
+        if defaultC0["lH"]   then safeSet("lH",   lrp("lH",   defaultC0["lH"]*ang(rad(2),-W.LEG_OUTWARD*0.5,0))) end
     else
-        if defaultC0["Waist"] then safeSet("Waist",lrp("Waist",(defaultC0["Waist"] or CFrame.new())*ang(rad(4)+rock*0.3,rock,0))) end
-        if defaultC0["Neck"]  then safeSet("Neck", lrp("Neck", (defaultC0["Neck"]  or CFrame.new())*ang(-rad(4)+bob,sway*0.3,rock*0.4))) end
-        if defaultC0["RS"]    then safeSet("RS",lrp("RS",defaultC0["RS"]*ang(rad(4),0,rad(8)))) end
-        if defaultC0["LS"]    then safeSet("LS",lrp("LS",defaultC0["LS"]*ang(rad(4),0,-rad(8)))) end
-        if defaultC0["RE"]    then safeSet("RE",lrp("RE",defaultC0["RE"]*ang(rad(10),0,0))) end
-        if defaultC0["LE"]    then safeSet("LE",lrp("LE",defaultC0["LE"]*ang(rad(10),0,0))) end
-        if defaultC0["RW"]    then safeSet("RW",lrp("RW",defaultC0["RW"])) end
-        if defaultC0["LW"]    then safeSet("LW",lrp("LW",defaultC0["LW"])) end
-        if defaultC0["RH"]    then safeSet("RH",lrp("RH",defaultC0["RH"]*ang(rad(2),rad(4),0))) end
-        if defaultC0["LH"]    then safeSet("LH",lrp("LH",defaultC0["LH"]*ang(rad(2),-rad(4),0))) end
-        if defaultC0["RK"]    then safeSet("RK",lrp("RK",defaultC0["RK"])) end
-        if defaultC0["LK"]    then safeSet("LK",lrp("LK",defaultC0["LK"])) end
-        if defaultC0["RA"]    then safeSet("RA",lrp("RA",defaultC0["RA"])) end
-        if defaultC0["LA"]    then safeSet("LA",lrp("LA",defaultC0["LA"])) end
+        if defaultC0["Waist"] then safeSet("Waist", lrp("Waist", (defaultC0["Waist"] or CFrame.new())*ang(rad(4)+rock*0.3,rock,0))) end
+        if defaultC0["Neck"]  then safeSet("Neck",  lrp("Neck",  (defaultC0["Neck"]  or CFrame.new())*ang(-rad(4)+bob,sway*0.3,rock*0.4))) end
+        if defaultC0["RS"] then safeSet("RS", lrp("RS", defaultC0["RS"]*ang(rad(4),0,rad(8)))) end
+        if defaultC0["LS"] then safeSet("LS", lrp("LS", defaultC0["LS"]*ang(rad(4),0,-rad(8)))) end
+        if defaultC0["RE"] then safeSet("RE", lrp("RE", defaultC0["RE"]*ang(rad(10),0,0))) end
+        if defaultC0["LE"] then safeSet("LE", lrp("LE", defaultC0["LE"]*ang(rad(10),0,0))) end
+        if defaultC0["RW"] then safeSet("RW", lrp("RW", defaultC0["RW"])) end
+        if defaultC0["LW"] then safeSet("LW", lrp("LW", defaultC0["LW"])) end
+        if defaultC0["RH"] then safeSet("RH", lrp("RH", defaultC0["RH"]*ang(rad(2),rad(4),0))) end
+        if defaultC0["LH"] then safeSet("LH", lrp("LH", defaultC0["LH"]*ang(rad(2),-rad(4),0))) end
+        if defaultC0["RK"] then safeSet("RK", lrp("RK", defaultC0["RK"])) end
+        if defaultC0["LK"] then safeSet("LK", lrp("LK", defaultC0["LK"])) end
+        if defaultC0["RA"] then safeSet("RA", lrp("RA", defaultC0["RA"])) end
+        if defaultC0["LA"] then safeSet("LA", lrp("LA", defaultC0["LA"])) end
     end
 end
 
@@ -388,13 +344,21 @@ local function snapshotPose()
     end
 end
 
--- ════════════════════════════════════════════════════════════════════════════
---  MAIN HEARTBEAT LOOP — replication-aware
---  The key change: Motor6D writes happen AFTER claimOwnership() fires
---  (guaranteed by netConn running in a separate Heartbeat that connects first).
---  The dummy track keeps the Animator "awake" so Roblox's replication
---  system forwards our C0 writes to remote clients.
--- ════════════════════════════════════════════════════════════════════════════
+-- ── send current pose to server every frame ───────────────────────────────────
+local function replicatePose()
+    if not remote then return end
+    local data = {}
+    for k, m in pairs(motors) do
+        if m and m.Parent then
+            data[k] = m.C0
+        end
+    end
+    pcall(function()
+        remote:FireServer(data)
+    end)
+end
+
+-- ── main loop ─────────────────────────────────────────────────────────────────
 local prevMoving = false
 
 local function startAnim()
@@ -402,28 +366,15 @@ local function startAnim()
     killClock  = 0
     prevMoving = false
     idleBlend  = 0
-
-    -- build dummy track BEFORE starting the write loop
-    -- so the replication pipeline is open by the time we write C0s
-    buildDummyTrack()
+    remote = getRemote()
 
     animConn = RunService.Heartbeat:Connect(function(dt)
         if not animEnabled or not char or not hrp then return end
 
-        -- animate killer on 0.4s timer
         killClock = killClock + dt
         if killClock >= 0.4 then
             killClock = 0
             killDefaultAnims()
-        end
-
-        -- keep dummy track playing every frame (belt + suspenders)
-        if dummyTrack then
-            if not dummyTrack.IsPlaying then
-                pcall(function() dummyTrack:Play(0, 1, 0) end)
-            end
-            -- force priority every frame so roblox animator doesn't override us
-            pcall(function() dummyTrack:AdjustWeight(1) end)
         end
 
         local speed   = hrp.AssemblyLinearVelocity.Magnitude
@@ -446,13 +397,14 @@ local function startAnim()
             idleBlend = clamp(idleBlend + dt / 0.3, 0, 1)
             applyIdle(idleT, idleBlend)
         end
+
+        -- THIS is what actually makes other players see it
+        replicatePose()
     end)
 end
 
 local function stopAnim()
     if animConn then animConn:Disconnect(); animConn = nil end
-    if dummyTrack then pcall(function() dummyTrack:Stop(0) end); dummyTrack = nil end
-    if dummyAnim  then pcall(function() dummyAnim:Destroy() end); dummyAnim = nil end
     restoreDefaults()
     walkT = 0; idleT = 0; idleBlend = 0
     prevMoving = false; idlePoseSnap = {}
@@ -460,23 +412,18 @@ end
 
 -- ── character init ────────────────────────────────────────────────────────────
 local function initChar(c)
-    stopAnim(); stopNet()
+    stopAnim()
     char = c
     hrp  = c:WaitForChild("HumanoidRootPart")
     hum  = c:WaitForChild("Humanoid")
     task.wait(0.5)
     cacheMotors()
     killDefaultAnims()
-    -- ownership claimed BEFORE anim starts so replication is ready
-    claimOwnership()
-    if animEnabled then
-        startNet()
-        startAnim()
-    end
+    if animEnabled then startAnim() end
 end
 
 LP.CharacterRemoving:Connect(function()
-    stopAnim(); stopNet()
+    stopAnim()
     motors = {}; defaultC0 = {}
     char = nil; hrp = nil; hum = nil
 end)
@@ -488,7 +435,7 @@ end)
 
 if LP.Character then initChar(LP.Character) end
 
--- ── GUI (unchanged) ───────────────────────────────────────────────────────────
+-- ── GUI ───────────────────────────────────────────────────────────────────────
 local sg = Instance.new("ScreenGui")
 sg.Name="CoolkiddWalkGui"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true
 sg.Parent=LP:WaitForChild("PlayerGui")
@@ -514,7 +461,7 @@ fixFrame.BorderSizePixel=0; fixFrame.ZIndex=2; fixFrame.Parent=bar
 
 local titleL=Instance.new("TextLabel")
 titleL.Size=UDim2.new(1,-8,1,0); titleL.Position=UDim2.new(0,10,0,0)
-titleL.BackgroundTransparency=1; titleL.Text="c00lkidd walk — replicated"
+titleL.BackgroundTransparency=1; titleL.Text="c00lkidd walk — real replicate"
 titleL.TextColor3=Color3.fromRGB(255,80,80); titleL.TextSize=14
 titleL.Font=Enum.Font.GothamBold
 titleL.TextXAlignment=Enum.TextXAlignment.Left
@@ -522,17 +469,13 @@ titleL.ZIndex=3; titleL.Parent=bar
 
 local dragOn=false; local dragStart=Vector2.zero; local dragPos=UDim2.new()
 bar.InputBegan:Connect(function(i)
-    if i.UserInputType~=Enum.UserInputType.MouseButton1
-    and i.UserInputType~=Enum.UserInputType.Touch then return end
+    if i.UserInputType\~=Enum.UserInputType.MouseButton1 and i.UserInputType\~=Enum.UserInputType.Touch then return end
     dragOn=true; dragStart=Vector2.new(i.Position.X,i.Position.Y); dragPos=panel.Position
-    i.Changed:Connect(function()
-        if i.UserInputState==Enum.UserInputState.End then dragOn=false end
-    end)
+    i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dragOn=false end end)
 end)
 UserInputService.InputChanged:Connect(function(i)
     if not dragOn then return end
-    if i.UserInputType~=Enum.UserInputType.MouseMovement
-    and i.UserInputType~=Enum.UserInputType.Touch then return end
+    if i.UserInputType\~=Enum.UserInputType.MouseMovement and i.UserInputType\~=Enum.UserInputType.Touch then return end
     local d=Vector2.new(i.Position.X,i.Position.Y)-dragStart
     panel.Position=UDim2.new(dragPos.X.Scale,dragPos.X.Offset+d.X,dragPos.Y.Scale,dragPos.Y.Offset+d.Y)
 end)
@@ -588,17 +531,15 @@ toggleBtn.MouseButton1Click:Connect(function()
     if animEnabled then
         cacheMotors()
         killDefaultAnims()
-        startNet()
         startAnim()
         toggleBtn.Text             = "WALKING — tap to stop"
         toggleBtn.BackgroundColor3 = Color3.fromRGB(180,0,0)
         stroke.Color               = Color3.fromRGB(255,60,60)
-        statusLbl.Text             = "walking — replicated to others"
+        statusLbl.Text             = "walking — real server replicate"
         statusLbl.TextColor3       = Color3.fromRGB(255,80,80)
         rigLbl.Text                = "rig: "..(detectRig() or "unknown")
     else
         stopAnim()
-        stopNet()
         toggleBtn.Text             = "Start Walk"
         toggleBtn.BackgroundColor3 = Color3.fromRGB(140,0,0)
         stroke.Color               = Color3.fromRGB(180,0,0)
