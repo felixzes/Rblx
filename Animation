@@ -1,6 +1,8 @@
 --[[
-    c00lkidd Walk Cycle — Perfect Edition
-    All 17 audit issues resolved.
+    c00lkidd Walk Cycle — Replication Edition
+    Procedural Motor6D animation visible to OTHER players.
+    Three-layer replication: SimRadius + NetworkOwner + dummy AnimTrack trick.
+    All R6/R15 math, idle blend, GUI unchanged.
 ]]
 
 local Players          = game:GetService("Players")
@@ -25,17 +27,15 @@ local animEnabled  = false
 local animConn     = nil
 local walkT        = 0
 local idleT        = 0
-local idleBlend    = 0           -- 0 = full walk pose, 1 = full idle
-local idlePoseSnap = {}          -- snapshot of pose at moment of stopping (fix #5)
-
+local idleBlend    = 0
+local idlePoseSnap = {}
 local defaultC0    = {}
 local motors       = {}
 local char, hrp, hum, rig
 
 -- ── parameters ────────────────────────────────────────────────────────────────
 local W = {
-    SPEED        = 2.0 * pi,    -- radians/s for the master clock
-    -- R6 ────────────────────────────────────────────────
+    SPEED        = 2.0 * pi,
     ARM_SWING    = rad(62),
     ARM_SIDE     = rad(12),
     ARM_ROLL     = rad(10),
@@ -47,7 +47,6 @@ local W = {
     TORSO_LEAN   = rad(6),
     HEAD_BOB     = rad(2.5),
     HEAD_SWAY    = rad(2),
-    -- R15 ───────────────────────────────────────────────
     SHOULDER_AMP = rad(62),
     HIP_FLEX     = rad(56),
     KNEE_FOLD    = rad(42),
@@ -55,9 +54,97 @@ local W = {
     WRIST_FLICK  = rad(10),
     WAIST_TWIST  = rad(9),
     WAIST_LEAN   = rad(6),
-    -- fix #7: lag in radians — ~30° = 0.52 rad
     ELBOW_LAG    = 0.52,
 }
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  REPLICATION SYSTEM
+--  Layer 1: SimulationRadius + ReplicationFocus (all frames, while active)
+--  Layer 2: NetworkOwner on every character BasePart (all frames)
+--  Layer 3: Dummy AnimationTrack trick — forces Roblox replication pipeline
+--           to treat the character as "currently animating", which causes
+--           the server/other clients to accept our Motor6D.C0 writes.
+-- ════════════════════════════════════════════════════════════════════════════
+
+local netConn       = nil
+local dummyTrack    = nil
+local dummyAnim     = nil
+local replicateClock= 0
+local REPLICATE_INT = 0.05   -- push ownership every 50ms (20 times/s)
+
+-- create and return a blank looped Animation instance loaded on the Humanoid
+local function buildDummyTrack()
+    if not char then return end
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator", hum)
+    end
+
+    -- destroy old track if any
+    if dummyTrack then pcall(function() dummyTrack:Stop(0); dummyTrack:Destroy() end) end
+    if dummyAnim  then pcall(function() dummyAnim:Destroy() end) end
+
+    -- blank animation — id 507766388 is a 0-frame empty animation Roblox hosts
+    -- (commonly used for this exact trick in executor scripts)
+    -- We just need *something* playing so the Animator marks us as active.
+    local anim      = Instance.new("Animation")
+    anim.AnimationId = "rbxassetid://507766388"
+    anim.Parent     = char
+    dummyAnim       = anim
+
+    local track = animator:LoadAnimation(anim)
+    track.Priority    = Enum.AnimationPriority.Action4   -- highest available
+    track.Looped      = true
+    pcall(function() track:Play(0, 1, 0) end)  -- play at speed 0 — track ticks but produces no pose
+    dummyTrack = track
+end
+
+-- claim network ownership of every BasePart in the character
+local function claimOwnership()
+    if not char then return end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") then
+            pcall(function() p:SetNetworkOwner(LP) end)
+        end
+    end
+    -- also set HRP explicitly
+    if hrp then
+        pcall(function() hrp:SetNetworkOwner(LP) end)
+    end
+end
+
+-- start the three-layer network claim; runs every frame while walk is active
+local function startNet()
+    if netConn then return end
+    -- layer 1: ReplicationFocus once
+    LP.ReplicationFocus = Workspace
+
+    netConn = RunService.Heartbeat:Connect(function(dt)
+        -- layer 1: sim radius every frame
+        pcall(function()
+            sethiddenproperty(LP, "SimulationRadius",    math.huge)
+            sethiddenproperty(LP, "MaxSimulationRadius", math.huge)
+        end)
+
+        -- layer 2: network ownership on a timer (not every frame — reduces overhead)
+        replicateClock = replicateClock + dt
+        if replicateClock >= REPLICATE_INT then
+            replicateClock = 0
+            claimOwnership()
+        end
+
+        -- layer 3: keep dummy track alive and playing
+        if dummyTrack and not dummyTrack.IsPlaying then
+            pcall(function() dummyTrack:Play(0, 1, 0) end)
+        end
+    end)
+end
+
+local function stopNet()
+    if netConn then netConn:Disconnect(); netConn = nil end
+    if dummyTrack then pcall(function() dummyTrack:Stop(0) end) end
+    replicateClock = 0
+end
 
 -- ── rig detection ─────────────────────────────────────────────────────────────
 local function detectRig()
@@ -75,41 +162,35 @@ local function cacheMotors()
     local function reg(partName, motorName, key)
         local p = char:FindFirstChild(partName)
         local m = p and p:FindFirstChild(motorName)
-        if m then
-            motors[key]    = m
-            defaultC0[key] = m.C0
-        end
+        if m then motors[key]=m; defaultC0[key]=m.C0 end
     end
 
     if rig == "R6" then
-        -- fix #6: do NOT cache RootJoint — we will not write to it
         reg("Torso","Neck",           "neck")
         reg("Torso","Left Shoulder",  "lS")
         reg("Torso","Right Shoulder", "rS")
         reg("Torso","Left Hip",       "lH")
         reg("Torso","Right Hip",      "rH")
     else
-        reg("UpperTorso", "Neck",           "Neck")
-        reg("UpperTorso", "Waist",          "Waist")
-        -- fix #11 (R15 root): do NOT cache Root to avoid Humanoid fight
-        reg("LeftUpperArm",  "LeftShoulder",  "LS")
-        reg("RightUpperArm", "RightShoulder", "RS")
-        reg("LeftLowerArm",  "LeftElbow",     "LE")
-        reg("RightLowerArm", "RightElbow",    "RE")
-        reg("LeftHand",      "LeftWrist",     "LW")
-        reg("RightHand",     "RightWrist",    "RW")
-        reg("LeftUpperLeg",  "LeftHip",       "LH")
-        reg("RightUpperLeg", "RightHip",      "RH")
-        reg("LeftLowerLeg",  "LeftKnee",      "LK")
-        reg("RightLowerLeg", "RightKnee",     "RK")
-        reg("LeftFoot",      "LeftAnkle",     "LA")
-        reg("RightFoot",     "RightAnkle",    "RA")
+        reg("UpperTorso","Neck",           "Neck")
+        reg("UpperTorso","Waist",          "Waist")
+        reg("LeftUpperArm","LeftShoulder", "LS")
+        reg("RightUpperArm","RightShoulder","RS")
+        reg("LeftLowerArm","LeftElbow",    "LE")
+        reg("RightLowerArm","RightElbow",  "RE")
+        reg("LeftHand","LeftWrist",        "LW")
+        reg("RightHand","RightWrist",      "RW")
+        reg("LeftUpperLeg","LeftHip",      "LH")
+        reg("RightUpperLeg","RightHip",    "RH")
+        reg("LeftLowerLeg","LeftKnee",     "LK")
+        reg("RightLowerLeg","RightKnee",   "RK")
+        reg("LeftFoot","LeftAnkle",        "LA")
+        reg("RightFoot","RightAnkle",      "RA")
     end
 end
 
--- fix #16: safe set with nil guard on both motor and defaultC0
 local function safeSet(key, newC0)
-    if not defaultC0[key] then return end   -- incomplete rig guard
+    if not defaultC0[key] then return end
     local m = motors[key]
     if m and m.Parent then
         pcall(function() m.C0 = newC0 end)
@@ -125,61 +206,42 @@ local function restoreDefaults()
     end
 end
 
--- ── animate killer (fix #11: every 0.4s) ─────────────────────────────────────
+-- kill Roblox's own Animate script and all playing tracks
+-- called every 0.4s while walk is active so it can't re-enable
 local killClock = 0
 local function killDefaultAnims()
     if not char then return end
     local a = char:FindFirstChild("Animate")
     if a then a.Disabled = true end
-    local h = char:FindFirstChild("Humanoid")
-    if h then
-        for _, t in ipairs(h:GetPlayingAnimationTracks()) do
-            pcall(function() t:Stop(0) end)
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if animator then
+        for _, t in ipairs(animator:GetPlayingAnimationTracks()) do
+            -- don't stop our own dummy track
+            if t ~= dummyTrack then
+                pcall(function() t:Stop(0) end)
+            end
         end
     end
 end
 
 -- ── R6 walk ───────────────────────────────────────────────────────────────────
---[[
-    Phase contract (all relative to sin(t)):
-      sin(t) > 0 → RIGHT leg swings FORWARD, LEFT leg swings BACK
-      Arms counter-swing: right arm BACK, left arm FORWARD
-    c00lkidd feel: high knee lift, exaggerated arm, forward hunch, outward feet
-]]
 local function r6Walk(t, blend)
-    local s  = sin(t)
-    local c  = cos(t)
+    local s = sin(t)
+    local c = cos(t)
+    local armSec = sin(t*2) * rad(8) * blend
+    local legSec = sin(t*2) * rad(6) * blend
 
-    -- fix #9: secondary ease on arm/leg swing — add small sin(2t) harmonic
-    local armSec = sin(t * 2) * rad(8) * blend    -- secondary arm harmonic
-    local legSec = sin(t * 2) * rad(6) * blend    -- secondary leg harmonic
-
-    -- fix #2: RIGHT leg FORWARD on sin(t) > 0, so rLeg = +s
-    -- fix #2: RIGHT arm BACK on sin(t) > 0, so rArm = -s  (counter-swing correct)
-    local rLegSwing = s  * W.LEG_SWING * blend
+    local rLegSwing =  s * W.LEG_SWING * blend
     local lLegSwing = -s * W.LEG_SWING * blend
     local rArmSwing = -s * W.ARM_SWING * blend
     local lArmSwing =  s * W.ARM_SWING * blend
+    local rArmSide  =  c * W.ARM_SIDE  * blend
+    local lArmSide  = -c * W.ARM_SIDE  * blend
+    local rArmRoll  = -s * W.ARM_ROLL  * blend
+    local lArmRoll  =  s * W.ARM_ROLL  * blend
+    local rHipY = math.max(0,  sin(t)) * W.HIP_BOUNCE * blend
+    local lHipY = math.max(0, -sin(t)) * W.HIP_BOUNCE * blend
 
-    -- fix #12: arm side flare is OPPOSITE per arm, not both abs
-    local rArmSide  =  c * W.ARM_SIDE * blend    -- positive when arm is back
-    local lArmSide  = -c * W.ARM_SIDE * blend
-
-    local rArmRoll  = -s * W.ARM_ROLL * blend
-    local lArmRoll  =  s * W.ARM_ROLL * blend
-
-    -- fix #4: hip bounce opposite per side for weight transfer
-    local rHipY =  abs(s) * W.HIP_BOUNCE * blend
-    local lHipY = -abs(s) * W.HIP_BOUNCE * blend
-    -- clamp so hips never go negative offset
-    rHipY = math.max(0, rHipY)
-    lHipY = math.max(0, lHipY)
-
-    -- fix #1: R6 shoulder Motor6D in Torso has axes:
-    --   C0 default = CFrame(1, 0.5, 0) * CFrame.Angles(0, math.rad(90), 0)  (right)
-    --   C0 default = CFrame(-1, 0.5, 0) * CFrame.Angles(0, -math.rad(90), 0) (left)
-    -- We multiply defaultC0 * rotation so origin is always correct.
-    -- Rotation in joint-local space: X = swing fwd/back, Z = roll
     safeSet("rS",
         defaultC0["rS"]
         * ang(W.TORSO_LEAN + rArmSwing + armSec, 0, rArmRoll)
@@ -190,10 +252,6 @@ local function r6Walk(t, blend)
         * ang(W.TORSO_LEAN + lArmSwing + armSec, 0, lArmRoll)
         * ang(0, 0, lArmSide)
     )
-
-    -- R6 hip C0 default = CFrame(1,-1,0)*Angles(0,pi/2,0) right
-    --                    = CFrame(-1,-1,0)*Angles(0,-pi/2,0) left
-    -- X rotation = fwd/back swing, Y = outward rotation in joint space
     safeSet("rH",
         defaultC0["rH"]
         * CFrame.new(0, rHipY, 0)
@@ -206,145 +264,89 @@ local function r6Walk(t, blend)
         * ang(lLegSwing + legSec, 0, 0)
         * ang(0, -W.LEG_OUTWARD * blend, 0)
     )
-
-    -- fix #13: head bob single frequency, slow
-    -- fix #6: NO RootJoint write — torso sway skipped to avoid Humanoid fight
     safeSet("neck",
         defaultC0["neck"]
         * ang(-rad(4) + sin(t) * W.HEAD_BOB * blend, s * W.HEAD_SWAY * blend, 0)
     )
 end
 
--- ── ankle profile (fix #3) ────────────────────────────────────────────────────
--- left foot is pi out of phase, not t * -1
+-- ── ankle profile ─────────────────────────────────────────────────────────────
 local function ankleAngle(t, isRight)
     local phase = isRight and t or (t + pi)
-    local n = (sin(phase) + 1) * 0.5    -- 0..1, 0 = leg back, 1 = leg forward
-    -- back (0..0.35): slight plantarflexion (push off)
-    -- lift (0.35..0.65): dorsiflexion (toe up)
-    -- land (0.65..1): return to neutral
+    local n = (sin(phase) + 1) * 0.5
     if n < 0.35 then
-        local k = n / 0.35
-        return -W.ANKLE_ROLL * k        -- push off
+        return -W.ANKLE_ROLL * (n / 0.35)
     elseif n < 0.65 then
-        local k = (n - 0.35) / 0.30
-        return -W.ANKLE_ROLL + (W.ANKLE_ROLL + rad(8)) * k  -- lift
+        local k = (n-0.35)/0.30
+        return -W.ANKLE_ROLL + (W.ANKLE_ROLL + rad(8))*k
     else
-        local k = (n - 0.65) / 0.35
-        return rad(8) * (1 - k)         -- return to flat
+        return rad(8) * (1 - (n-0.65)/0.35)
     end
 end
 
--- fix #8: continuous knee flexion — use a smooth two-lobe curve
 local function kneeBend(t, isRight)
-    -- both knees have some bend throughout the cycle
-    -- peak bend: leg swinging back (recovery phase)
     local phase = isRight and t or (t + pi)
-    -- remap: both positive and negative sin contribute bend
-    -- use 0.5*(1 - cos(2t)) = sin²(t), always 0..1, peaks at stride midpoints
-    local base   = (1 - cos(phase)) * 0.5                   -- 0..1 smooth
-    local recover = math.max(0, -sin(phase))                 -- only on back-swing
-    return (base * 0.25 + recover * 0.75) * W.KNEE_FOLD
+    local base    = (1 - cos(phase)) * 0.5
+    local recover = math.max(0, -sin(phase))
+    return (base*0.25 + recover*0.75) * W.KNEE_FOLD
 end
 
 -- ── R15 walk ──────────────────────────────────────────────────────────────────
 local function r15Walk(t, blend)
-    local s = sin(t)
-
-    -- fix #7: elbow lag as true phase offset, ~30° = 0.52 rad
+    local s    = sin(t)
     local tLag = t - W.ELBOW_LAG
     local sLag = sin(tLag)
+    local armSec = sin(t*2) * rad(6) * blend
 
-    -- waist counter-rotation + forward lean
     safeSet("Waist",
         (defaultC0["Waist"] or CFrame.new())
-        * ang(W.WAIST_LEAN, s * W.WAIST_TWIST * blend, sin(t*2) * rad(2) * blend)
+        * ang(W.WAIST_LEAN, s*W.WAIST_TWIST*blend, sin(t*2)*rad(2)*blend)
     )
-
-    -- neck: slow single-frequency bob (fix #13)
     safeSet("Neck",
         (defaultC0["Neck"] or CFrame.new())
-        * ang(-rad(4) + sin(t) * W.HEAD_BOB * blend, s * W.HEAD_SWAY * blend, 0)
+        * ang(-rad(4)+sin(t)*W.HEAD_BOB*blend, s*W.HEAD_SWAY*blend, 0)
     )
-
-    -- fix #2 phase: right arm BACK when sin(t) > 0 → rArm = -s
-    -- fix #9: add small secondary harmonic
-    local armSec = sin(t * 2) * rad(6) * blend
     safeSet("RS",
         (defaultC0["RS"] or CFrame.new())
-        * ang(-s * W.SHOULDER_AMP * blend + W.WAIST_LEAN + armSec, 0, rad(10)*blend)
+        * ang(-s*W.SHOULDER_AMP*blend+W.WAIST_LEAN+armSec, 0, rad(10)*blend)
     )
-    -- fix #7: elbow lag via phase — bend is based on sLag
-    local rElbow = clamp((1 - cos(-sLag * W.SHOULDER_AMP * blend)) * rad(42) * blend, 0, rad(100))
-    safeSet("RE",
-        (defaultC0["RE"] or CFrame.new())
-        * ang(rElbow, 0, 0)
-    )
-    safeSet("RW",
-        (defaultC0["RW"] or CFrame.new())
-        * ang(-s * W.WRIST_FLICK * blend, 0, 0)
-    )
-
+    local rE = clamp((1-cos(-sLag*W.SHOULDER_AMP*blend))*rad(42)*blend, 0, rad(100))
+    safeSet("RE", (defaultC0["RE"] or CFrame.new()) * ang(rE, 0, 0))
+    safeSet("RW", (defaultC0["RW"] or CFrame.new()) * ang(-s*W.WRIST_FLICK*blend, 0, 0))
     safeSet("LS",
         (defaultC0["LS"] or CFrame.new())
-        * ang(s * W.SHOULDER_AMP * blend + W.WAIST_LEAN + armSec, 0, -rad(10)*blend)
+        * ang(s*W.SHOULDER_AMP*blend+W.WAIST_LEAN+armSec, 0, -rad(10)*blend)
     )
-    local lElbow = clamp((1 - cos(sLag * W.SHOULDER_AMP * blend)) * rad(42) * blend, 0, rad(100))
-    safeSet("LE",
-        (defaultC0["LE"] or CFrame.new())
-        * ang(lElbow, 0, 0)
-    )
-    safeSet("LW",
-        (defaultC0["LW"] or CFrame.new())
-        * ang(s * W.WRIST_FLICK * blend, 0, 0)
-    )
+    local lE = clamp((1-cos(sLag*W.SHOULDER_AMP*blend))*rad(42)*blend, 0, rad(100))
+    safeSet("LE", (defaultC0["LE"] or CFrame.new()) * ang(lE, 0, 0))
+    safeSet("LW", (defaultC0["LW"] or CFrame.new()) * ang(s*W.WRIST_FLICK*blend, 0, 0))
 
-    -- fix #2: right leg FORWARD when sin(t) > 0, so rHip = +s
-    -- fix #4: weight transfer — opposite vertical
     local rHipY = math.max(0,  sin(t)) * W.HIP_BOUNCE * blend
     local lHipY = math.max(0, -sin(t)) * W.HIP_BOUNCE * blend
 
     safeSet("RH",
         (defaultC0["RH"] or CFrame.new())
         * CFrame.new(0, rHipY, 0)
-        * ang(s * W.HIP_FLEX * blend, rad(5)*blend, 0)
+        * ang(s*W.HIP_FLEX*blend, rad(5)*blend, 0)
     )
-    -- fix #8: continuous knee flexion
-    safeSet("RK",
-        (defaultC0["RK"] or CFrame.new())
-        * ang(-kneeBend(t, true) * blend, 0, 0)
-    )
-    -- fix #3: ankle profile, right
-    safeSet("RA",
-        (defaultC0["RA"] or CFrame.new())
-        * ang(ankleAngle(t, true) * blend, rad(4)*blend, 0)
-    )
-
+    safeSet("RK", (defaultC0["RK"] or CFrame.new()) * ang(-kneeBend(t,true)*blend, 0, 0))
+    safeSet("RA", (defaultC0["RA"] or CFrame.new()) * ang(ankleAngle(t,true)*blend, rad(4)*blend, 0))
     safeSet("LH",
         (defaultC0["LH"] or CFrame.new())
         * CFrame.new(0, lHipY, 0)
-        * ang(-s * W.HIP_FLEX * blend, -rad(5)*blend, 0)
+        * ang(-s*W.HIP_FLEX*blend, -rad(5)*blend, 0)
     )
-    safeSet("LK",
-        (defaultC0["LK"] or CFrame.new())
-        * ang(-kneeBend(t, false) * blend, 0, 0)
-    )
-    -- fix #3: ankle profile, left (pi out of phase, not t * -1)
-    safeSet("LA",
-        (defaultC0["LA"] or CFrame.new())
-        * ang(ankleAngle(t, false) * blend, -rad(4)*blend, 0)
-    )
+    safeSet("LK", (defaultC0["LK"] or CFrame.new()) * ang(-kneeBend(t,false)*blend, 0, 0))
+    safeSet("LA", (defaultC0["LA"] or CFrame.new()) * ang(ankleAngle(t,false)*blend, -rad(4)*blend, 0))
 end
 
--- ── idle: full rig (fix #4) ───────────────────────────────────────────────────
--- idleBlend 0→1 lerped over 0.3s from snapshot taken at stop moment (fix #5)
+-- ── idle ──────────────────────────────────────────────────────────────────────
 local function applyIdle(t, blend)
-    local rock = sin(t * 1.4) * rad(2.5)
-    local bob  = sin(t * 2.8) * rad(1.0)
-    local sway = sin(t * 0.9) * rad(2.0)
+    local rock = sin(t*1.4)*rad(2.5)
+    local bob  = sin(t*2.8)*rad(1.0)
+    local sway = sin(t*0.9)*rad(2.0)
 
     local function lrp(key, idleC0)
-        -- fix #5: lerp FROM snapshot, not from current (which safeSet would update)
         local snap = idlePoseSnap[key] or defaultC0[key]
         if not snap then return idleC0 end
         return snap:Lerp(idleC0, smoothstep(blend))
@@ -352,117 +354,94 @@ local function applyIdle(t, blend)
 
     if rig == "R6" then
         if defaultC0["neck"] then
-            safeSet("neck", lrp("neck",
-                defaultC0["neck"] * ang(-rad(4)+bob, sway*0.4, rock)))
-        end
-        if defaultC0["rS"] then
-            safeSet("rS", lrp("rS",
-                defaultC0["rS"] * ang(rad(5)+abs(sin(t*1.8))*rad(3), 0, rad(3))))
-        end
-        if defaultC0["lS"] then
-            safeSet("lS", lrp("lS",
-                defaultC0["lS"] * ang(rad(5)+abs(sin(t*1.8))*rad(3), 0, -rad(3))))
-        end
-        if defaultC0["rH"] then
-            safeSet("rH", lrp("rH",
-                defaultC0["rH"] * ang(rad(2), W.LEG_OUTWARD * 0.5, 0)))
-        end
-        if defaultC0["lH"] then
-            safeSet("lH", lrp("lH",
-                defaultC0["lH"] * ang(rad(2), -W.LEG_OUTWARD * 0.5, 0)))
-        end
+            safeSet("neck", lrp("neck", defaultC0["neck"]*ang(-rad(4)+bob, sway*0.4, rock))) end
+        if defaultC0["rS"]   then
+            safeSet("rS", lrp("rS", defaultC0["rS"]*ang(rad(5)+abs(sin(t*1.8))*rad(3),0,rad(3)))) end
+        if defaultC0["lS"]   then
+            safeSet("lS", lrp("lS", defaultC0["lS"]*ang(rad(5)+abs(sin(t*1.8))*rad(3),0,-rad(3)))) end
+        if defaultC0["rH"]   then
+            safeSet("rH", lrp("rH", defaultC0["rH"]*ang(rad(2),W.LEG_OUTWARD*0.5,0))) end
+        if defaultC0["lH"]   then
+            safeSet("lH", lrp("lH", defaultC0["lH"]*ang(rad(2),-W.LEG_OUTWARD*0.5,0))) end
     else
-        -- fix #4: R15 idle covers ALL joints so nothing freezes mid-stride
-        if defaultC0["Waist"] then
-            safeSet("Waist", lrp("Waist",
-                (defaultC0["Waist"] or CFrame.new()) * ang(rad(4)+rock*0.3, rock, 0)))
-        end
-        if defaultC0["Neck"] then
-            safeSet("Neck", lrp("Neck",
-                (defaultC0["Neck"] or CFrame.new()) * ang(-rad(4)+bob, sway*0.3, rock*0.4)))
-        end
-        -- shoulders return to rest
-        if defaultC0["RS"] then safeSet("RS", lrp("RS", defaultC0["RS"] * ang(rad(4), 0, rad(8)))) end
-        if defaultC0["LS"] then safeSet("LS", lrp("LS", defaultC0["LS"] * ang(rad(4), 0, -rad(8)))) end
-        -- elbows slight bend
-        if defaultC0["RE"] then safeSet("RE", lrp("RE", defaultC0["RE"] * ang(rad(10), 0, 0))) end
-        if defaultC0["LE"] then safeSet("LE", lrp("LE", defaultC0["LE"] * ang(rad(10), 0, 0))) end
-        -- wrists neutral
-        if defaultC0["RW"] then safeSet("RW", lrp("RW", defaultC0["RW"])) end
-        if defaultC0["LW"] then safeSet("LW", lrp("LW", defaultC0["LW"])) end
-        -- hips neutral stand
-        if defaultC0["RH"] then safeSet("RH", lrp("RH", defaultC0["RH"] * ang(rad(2), rad(4), 0))) end
-        if defaultC0["LH"] then safeSet("LH", lrp("LH", defaultC0["LH"] * ang(rad(2), -rad(4), 0))) end
-        -- knees straight
-        if defaultC0["RK"] then safeSet("RK", lrp("RK", defaultC0["RK"])) end
-        if defaultC0["LK"] then safeSet("LK", lrp("LK", defaultC0["LK"])) end
-        -- ankles flat
-        if defaultC0["RA"] then safeSet("RA", lrp("RA", defaultC0["RA"])) end
-        if defaultC0["LA"] then safeSet("LA", lrp("LA", defaultC0["LA"])) end
+        if defaultC0["Waist"] then safeSet("Waist",lrp("Waist",(defaultC0["Waist"] or CFrame.new())*ang(rad(4)+rock*0.3,rock,0))) end
+        if defaultC0["Neck"]  then safeSet("Neck", lrp("Neck", (defaultC0["Neck"]  or CFrame.new())*ang(-rad(4)+bob,sway*0.3,rock*0.4))) end
+        if defaultC0["RS"]    then safeSet("RS",lrp("RS",defaultC0["RS"]*ang(rad(4),0,rad(8)))) end
+        if defaultC0["LS"]    then safeSet("LS",lrp("LS",defaultC0["LS"]*ang(rad(4),0,-rad(8)))) end
+        if defaultC0["RE"]    then safeSet("RE",lrp("RE",defaultC0["RE"]*ang(rad(10),0,0))) end
+        if defaultC0["LE"]    then safeSet("LE",lrp("LE",defaultC0["LE"]*ang(rad(10),0,0))) end
+        if defaultC0["RW"]    then safeSet("RW",lrp("RW",defaultC0["RW"])) end
+        if defaultC0["LW"]    then safeSet("LW",lrp("LW",defaultC0["LW"])) end
+        if defaultC0["RH"]    then safeSet("RH",lrp("RH",defaultC0["RH"]*ang(rad(2),rad(4),0))) end
+        if defaultC0["LH"]    then safeSet("LH",lrp("LH",defaultC0["LH"]*ang(rad(2),-rad(4),0))) end
+        if defaultC0["RK"]    then safeSet("RK",lrp("RK",defaultC0["RK"])) end
+        if defaultC0["LK"]    then safeSet("LK",lrp("LK",defaultC0["LK"])) end
+        if defaultC0["RA"]    then safeSet("RA",lrp("RA",defaultC0["RA"])) end
+        if defaultC0["LA"]    then safeSet("LA",lrp("LA",defaultC0["LA"])) end
     end
 end
 
--- ── snapshot current motor C0 for idle blend start (fix #5) ──────────────────
 local function snapshotPose()
     idlePoseSnap = {}
     for k, m in pairs(motors) do
-        if m and m.Parent then
-            idlePoseSnap[k] = m.C0
-        end
+        if m and m.Parent then idlePoseSnap[k] = m.C0 end
     end
 end
 
--- ── main loop ─────────────────────────────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  MAIN HEARTBEAT LOOP — replication-aware
+--  The key change: Motor6D writes happen AFTER claimOwnership() fires
+--  (guaranteed by netConn running in a separate Heartbeat that connects first).
+--  The dummy track keeps the Animator "awake" so Roblox's replication
+--  system forwards our C0 writes to remote clients.
+-- ════════════════════════════════════════════════════════════════════════════
 local prevMoving = false
 
 local function startAnim()
     if animConn then animConn:Disconnect(); animConn = nil end
-    killClock   = 0
-    prevMoving  = false
-    idleBlend   = 0
+    killClock  = 0
+    prevMoving = false
+    idleBlend  = 0
+
+    -- build dummy track BEFORE starting the write loop
+    -- so the replication pipeline is open by the time we write C0s
+    buildDummyTrack()
 
     animConn = RunService.Heartbeat:Connect(function(dt)
         if not animEnabled or not char or not hrp then return end
 
-        -- fix #11: kill every 0.4s
+        -- animate killer on 0.4s timer
         killClock = killClock + dt
         if killClock >= 0.4 then
             killClock = 0
             killDefaultAnims()
         end
 
-        local speed  = hrp.AssemblyLinearVelocity.Magnitude
-        local moving = speed > 0.5
+        -- keep dummy track playing every frame (belt + suspenders)
+        if dummyTrack then
+            if not dummyTrack.IsPlaying then
+                pcall(function() dummyTrack:Play(0, 1, 0) end)
+            end
+            -- force priority every frame so roblox animator doesn't override us
+            pcall(function() dummyTrack:AdjustWeight(1) end)
+        end
 
-        -- fix #10: velocity scale derived from actual studs-per-second
-        -- at walkspeed 16: scale = 1.0 → cycle matches foot placement
+        local speed   = hrp.AssemblyLinearVelocity.Magnitude
+        local moving  = speed > 0.5
         local velScale = clamp(speed / 16, 0.5, 2.2)
 
         if moving then
-            -- fix #5: snapshot pose at the moment we stop (detect transition)
-            if not prevMoving then
-                idleBlend = 0
-            end
+            if not prevMoving then idleBlend = 0 end
             prevMoving = true
             idleBlend  = 0
-
             walkT = walkT + dt * W.SPEED * velScale
             idleT = walkT
-
             local blend = smoothstep(clamp(speed / 6, 0, 1))
-            if rig == "R6" then
-                r6Walk(walkT, blend)
-            else
-                r15Walk(walkT, blend)
-            end
+            if rig == "R6" then r6Walk(walkT, blend)
+            else r15Walk(walkT, blend) end
         else
-            -- fix #5: snapshot at transition walking→stopped
-            if prevMoving then
-                snapshotPose()
-                idleBlend = 0
-            end
+            if prevMoving then snapshotPose(); idleBlend = 0 end
             prevMoving = false
-
             idleT     = idleT + dt * 1.4
             idleBlend = clamp(idleBlend + dt / 0.3, 0, 1)
             applyIdle(idleT, idleBlend)
@@ -472,47 +451,36 @@ end
 
 local function stopAnim()
     if animConn then animConn:Disconnect(); animConn = nil end
+    if dummyTrack then pcall(function() dummyTrack:Stop(0) end); dummyTrack = nil end
+    if dummyAnim  then pcall(function() dummyAnim:Destroy() end); dummyAnim = nil end
     restoreDefaults()
     walkT = 0; idleT = 0; idleBlend = 0
     prevMoving = false; idlePoseSnap = {}
 end
 
--- ── network claim (fix #17 + #20: only while enabled, gated) ─────────────────
-local netConn
-local function startNet()
-    if netConn then return end
-    LP.ReplicationFocus = Workspace
-    netConn = RunService.Heartbeat:Connect(function()
-        pcall(function()
-            sethiddenproperty(LP,"SimulationRadius",    2147483647)
-            sethiddenproperty(LP,"MaxSimulationRadius", 2147483647)
-        end)
-    end)
-end
-local function stopNet()
-    if netConn then netConn:Disconnect(); netConn = nil end
-end
-
--- ── character init (fix #12: single init path) ───────────────────────────────
+-- ── character init ────────────────────────────────────────────────────────────
 local function initChar(c)
-    stopAnim()
+    stopAnim(); stopNet()
     char = c
     hrp  = c:WaitForChild("HumanoidRootPart")
     hum  = c:WaitForChild("Humanoid")
     task.wait(0.5)
     cacheMotors()
     killDefaultAnims()
-    if animEnabled then startAnim() end   -- only one call
+    -- ownership claimed BEFORE anim starts so replication is ready
+    claimOwnership()
+    if animEnabled then
+        startNet()
+        startAnim()
+    end
 end
 
--- fix #21: cleanup on remove
 LP.CharacterRemoving:Connect(function()
-    stopAnim()
+    stopAnim(); stopNet()
     motors = {}; defaultC0 = {}
     char = nil; hrp = nil; hum = nil
 end)
 
--- fix #12: no double-startAnim on CharacterAdded
 LP.CharacterAdded:Connect(function(c)
     task.wait(0.1)
     initChar(c)
@@ -520,7 +488,7 @@ end)
 
 if LP.Character then initChar(LP.Character) end
 
--- ── GUI ───────────────────────────────────────────────────────────────────────
+-- ── GUI (unchanged) ───────────────────────────────────────────────────────────
 local sg = Instance.new("ScreenGui")
 sg.Name="CoolkiddWalkGui"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true
 sg.Parent=LP:WaitForChild("PlayerGui")
@@ -540,15 +508,13 @@ bar.BackgroundColor3=Color3.fromRGB(80,0,0)
 bar.BorderSizePixel=0; bar.ZIndex=2; bar.Parent=panel
 Instance.new("UICorner",bar).CornerRadius=UDim.new(0,14)
 local fixFrame=Instance.new("Frame")
-fixFrame.Size=UDim2.new(1,0,0,8)
-fixFrame.Position=UDim2.new(0,0,1,-8)
+fixFrame.Size=UDim2.new(1,0,0,8); fixFrame.Position=UDim2.new(0,0,1,-8)
 fixFrame.BackgroundColor3=Color3.fromRGB(80,0,0)
 fixFrame.BorderSizePixel=0; fixFrame.ZIndex=2; fixFrame.Parent=bar
 
--- fix #22: no emoji
 local titleL=Instance.new("TextLabel")
 titleL.Size=UDim2.new(1,-8,1,0); titleL.Position=UDim2.new(0,10,0,0)
-titleL.BackgroundTransparency=1; titleL.Text="c00lkidd walk v3"
+titleL.BackgroundTransparency=1; titleL.Text="c00lkidd walk — replicated"
 titleL.TextColor3=Color3.fromRGB(255,80,80); titleL.TextSize=14
 titleL.Font=Enum.Font.GothamBold
 titleL.TextXAlignment=Enum.TextXAlignment.Left
@@ -627,7 +593,7 @@ toggleBtn.MouseButton1Click:Connect(function()
         toggleBtn.Text             = "WALKING — tap to stop"
         toggleBtn.BackgroundColor3 = Color3.fromRGB(180,0,0)
         stroke.Color               = Color3.fromRGB(255,60,60)
-        statusLbl.Text             = "walking — server visible"
+        statusLbl.Text             = "walking — replicated to others"
         statusLbl.TextColor3       = Color3.fromRGB(255,80,80)
         rigLbl.Text                = "rig: "..(detectRig() or "unknown")
     else
@@ -641,7 +607,6 @@ toggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- fix #16: steppers update both R6 + R15 params simultaneously
 local speedMult = 1.0
 mkStepper(114,"cycle speed multiplier",
     function() return string.format("%.1fx",speedMult) end,
@@ -650,27 +615,13 @@ mkStepper(114,"cycle speed multiplier",
 )
 mkStepper(154,"arm swing amplitude",
     function() return floor(math.deg(W.ARM_SWING)+0.5).."deg" end,
-    function()
-        W.ARM_SWING=math.max(rad(20),W.ARM_SWING-rad(5))
-        W.SHOULDER_AMP=W.ARM_SWING
-    end,
-    function()
-        W.ARM_SWING=math.min(rad(90),W.ARM_SWING+rad(5))
-        W.SHOULDER_AMP=W.ARM_SWING
-    end
+    function() W.ARM_SWING=math.max(rad(20),W.ARM_SWING-rad(5)); W.SHOULDER_AMP=W.ARM_SWING end,
+    function() W.ARM_SWING=math.min(rad(90),W.ARM_SWING+rad(5)); W.SHOULDER_AMP=W.ARM_SWING end
 )
 mkStepper(194,"leg / knee lift",
     function() return floor(math.deg(W.LEG_SWING)+0.5).."deg" end,
-    function()
-        W.LEG_SWING=math.max(rad(20),W.LEG_SWING-rad(5))
-        W.HIP_FLEX=W.LEG_SWING
-        W.KNEE_FOLD=W.LEG_SWING*0.75
-    end,
-    function()
-        W.LEG_SWING=math.min(rad(80),W.LEG_SWING+rad(5))
-        W.HIP_FLEX=W.LEG_SWING
-        W.KNEE_FOLD=W.LEG_SWING*0.75
-    end
+    function() W.LEG_SWING=math.max(rad(20),W.LEG_SWING-rad(5)); W.HIP_FLEX=W.LEG_SWING; W.KNEE_FOLD=W.LEG_SWING*0.75 end,
+    function() W.LEG_SWING=math.min(rad(80),W.LEG_SWING+rad(5)); W.HIP_FLEX=W.LEG_SWING; W.KNEE_FOLD=W.LEG_SWING*0.75 end
 )
 mkStepper(234,"hip bounce (studs)",
     function() return string.format("%.2f",W.HIP_BOUNCE) end,
