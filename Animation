@@ -1,1355 +1,1011 @@
 --[[
-    ╔══════════════════════════════════════════════════════════╗
-    ║           MUSCLE MASTER HUB  v2.6                        ║
-    ║   Premium Muscle Legends Script Hub                      ║
-    ║                                                          ║
-    ║  Research data baked in:                                 ║
-    ║  • Full glitchable rebirths list (fandom wiki verified)  ║
-    ║  • 18,980 = Muscle King Rock optimal (+95/punch Unique)  ║
-    ║  • Formula: (rebirths+20) × rock_value = XP/punch        ║
-    ║  • Unique pet +5 per level × 19 levels = +95 max         ║
-    ║  • Muscle King Rock: punch OUTSIDE the ring only         ║
-    ║  • 2026 updates patched some XP glitch paths             ║
-    ║  • rebirthRemote:InvokeServer("rebirthRequest")          ║
-    ║  • Remotes.EquipPet:FireServer(pet)                      ║
-    ╚══════════════════════════════════════════════════════════╝
+    Devil's Blade — 8-Sword Trail Formation · Advanced Shape
+    Engine  : Roblox (executor environment)
+    Version : 3.1 — Trail Mode added
+
+    Trail Mode additions:
+      • One finger drags lead sword (X+Z free, Y locked)
+      • 7 swords trail via ring-buffer history (snake/ribbon)
+      • Cubic-ease return animation on finger release
+      • Cancel-safe: new touch mid-return restarts cleanly
+      • Joystick + individual drag preserved when Trail OFF
+      • TRAIL_LAG stepper in sidebar (4–40 frames)
+
+    Original:
+      Swords  : 8, spaced 4 studs apart (camera-relative left)
+      Shape   : 500-point anatomical silhouette (pommel → tip)
+      Controls: GUI — count 1-8, per-sword yaw/pitch, joystick
+      Notes   : Requires sethiddenproperty, getgenv.
 ]]
 
 -- ─── Services ────────────────────────────────────────────────────────────────
-local Players         = game:GetService("Players")
-local RunService      = game:GetService("RunService")
-local UserInputService= game:GetService("UserInputService")
-local TweenService    = game:GetService("TweenService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace       = game:GetService("Workspace")
-local VirtualUser     = game:GetService("VirtualUser")
-local StarterGui      = game:GetService("StarterGui")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local SoundService     = game:GetService("SoundService")
+local StarterGui       = game:GetService("StarterGui")
+local Workspace        = game:GetService("Workspace")
+local TweenService     = game:GetService("TweenService")
+local LocalPlayer      = Players.LocalPlayer
 
-local Player          = Players.LocalPlayer
-local Mouse           = Player:GetMouse()
+local character        = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local humanoid         = character:WaitForChild("Humanoid")
 
--- ─── Glitchable Rebirths (complete wiki list) ─────────────────────────────────
-local GLITCH_REBIRTHS = {
-    0,2,4,6,8,10,12,14,16,20,22,24,28,30,32,36,40,46,48,50,52,56,58,60,
-    64,68,70,76,80,84,90,92,94,100,110,120,130,136,140,150,160,180,200,
-    220,230,260,280,292,310,320,330,360,380,400,430,460,480,500,530,580,
-    630,660,680,700,730,760,780,830,880,890,930,980,1030,1080,1120,1180,
-    1280,1300,1340,1380,1480,1630,1680,1730,1780,1800,1880,1930,1980,
-    2080,2180,2230,2380,2580,2780,2830,2980,3280,3380,3480,3580,3780,
-    3880,3980,4480,5080,5480,5680,5980,6580,6780,7780,9080,9480,10480,
-    11980,13580,15280,17080,18980
-}
-
--- ─── Teleport positions (Muscle Legends map) ─────────────────────────────────
-local TELEPORTS = {
-    ["Muscle King Rock"]  = CFrame.new(-119, 18, -471),
-    ["Beach/Green Rock"]  = CFrame.new(-30,  5,  -195),
-    ["Jungle Rock"]       = CFrame.new(240,  8,  -80),
-    ["Legend Gym Rock"]   = CFrame.new(-280, 22, -820),
-    ["Frost Zone"]        = CFrame.new(600,  15, -400),
-    ["Mythical Zone"]     = CFrame.new(-500, 25, 300),
-    ["Eternal Zone"]      = CFrame.new(900,  30, 600),
-    ["Ancient Jungle"]    = CFrame.new(350,  12, 450),
-    ["Spawn"]             = CFrame.new(0,    5,  0),
-}
-
--- ─── Config (persisted via writefile/readfile) ────────────────────────────────
-local CFG = {
-    -- Pet Glitch
-    AutoPetGlitch    = false,
-    UseCurrentMethod = true,
-    UseOldMethod     = false,
-    TargetRebirth    = 18980,
-    SelectedPetName  = "Auto (Best)",
-    PetLevelLock     = true,
-
-    -- Training
-    AutoPunch        = false,
-    AutoPushup       = false,
-    AutoSitup        = false,
-    AutoWeight       = false,
-    AutoHandstand    = false,
-    FastPunch        = false,
-    PunchSpeed       = 5,
-    LockPosition     = false,
-    BestTool         = true,
-    TrainSpeed       = 1,
-
-    -- Rebirth
-    AutoRebirth      = false,
-    InfiniteRebirth  = false,
-    RebirthAtStrength= 1000,
-    FastRebirth      = true,
-    RebirthProtect   = false,
-    SaveStrength     = false,
-
-    -- Size
-    AutoSize         = false,
-    TargetSize       = "Huge",
-
-    -- Settings
-    WalkSpeed        = 16,
-    JumpPower        = 50,
-    Noclip           = false,
-    InfiniteJump     = false,
-    AntiAFK          = true,
-}
-
-local CONFIG_PATH = "MuscleMasterHub_cfg.json"
-
-local function saveConfig()
-    if writefile then
+-- ─── Network bypass ──────────────────────────────────────────────────────────
+if not getgenv().Network then
+    getgenv().Network = {
+        BaseParts = {},
+        Velocity  = Vector3.new(14.46, 14.46, 14.46),
+    }
+    local N = getgenv().Network
+    N.RetainPart = function(p)
+        if typeof(p) ~= "Instance" then return end
+        if not p:IsA("BasePart")   then return end
+        if not p:IsDescendantOf(Workspace) then return end
+        if table.find(N.BaseParts, p) then return end
+        table.insert(N.BaseParts, p)
+        p.CustomPhysicalProperties = PhysicalProperties.new(0,0,0,0,0)
+        p.CanCollide = false
+    end
+    LocalPlayer.ReplicationFocus = Workspace
+    RunService.Heartbeat:Connect(function()
         pcall(function()
-            writefile(CONFIG_PATH, game:GetService("HttpService"):JSONEncode(CFG))
+            sethiddenproperty(LocalPlayer, "SimulationRadius",    100000)
+            sethiddenproperty(LocalPlayer, "MaxSimulationRadius", 100000)
         end)
-    end
-end
-
-local function loadConfig()
-    if readfile and isfile and isfile(CONFIG_PATH) then
-        pcall(function()
-            local data = game:GetService("HttpService"):JSONDecode(readfile(CONFIG_PATH))
-            for k, v in pairs(data) do CFG[k] = v end
-        end)
-    end
-end
-
-loadConfig()
-
--- ─── Helpers ─────────────────────────────────────────────────────────────────
-local function getChar()  return Player.Character end
-local function getHRP()
-    local c = getChar(); return c and c:FindFirstChild("HumanoidRootPart")
-end
-local function getHum()
-    local c = getChar(); return c and c:FindFirstChild("Humanoid")
-end
-local function getStat(name)
-    local ls = Player:FindFirstChild("leaderstats")
-    if not ls then return 0 end
-    local v = ls:FindFirstChild(name)
-    return v and v.Value or 0
-end
-local function formatNum(n)
-    if n >= 1e12 then return string.format("%.2fT", n/1e12)
-    elseif n >= 1e9 then return string.format("%.2fB", n/1e9)
-    elseif n >= 1e6 then return string.format("%.2fM", n/1e6)
-    elseif n >= 1e3 then return string.format("%.1fK", n/1e3)
-    else return tostring(n) end
-end
-local function isGlitchable(r)
-    for _, v in ipairs(GLITCH_REBIRTHS) do if v == r then return true end end
-    return false
-end
-local function nextGlitchable(current)
-    for _, v in ipairs(GLITCH_REBIRTHS) do if v > current then return v end end
-    return 18980
-end
-
--- Equip a tool from backpack by name
-local function equipTool(name)
-    local char = getChar(); if not char then return end
-    -- Already equipped?
-    if char:FindFirstChild(name) then return end
-    local bp = Player.Backpack
-    if not bp then return end
-    for _, t in pairs(bp:GetChildren()) do
-        if t:IsA("Tool") and t.Name == name then
-            t.Parent = char; return
-        end
-    end
-end
-
--- Find highest multiplier tool available
-local TOOL_PRIORITY = {"Mythical Bench","Eternal Dumbbell","Legendary Barbell",
-    "Mythical Dumbbell","Weight","Bench","Dumbbell","Barbell"}
-local PUNCH_TOOLS   = {"Legendary Gloves","Epic Gloves","Rare Gloves","Gloves","Punch"}
-local PUSH_TOOLS    = {"Pushups"}
-local SIT_TOOLS     = {"Situps"}
-local HAND_TOOLS    = {"Handstand"}
-
-local function getBestTool(list)
-    local bp = Player.Backpack; local char = getChar()
-    for _, name in ipairs(list) do
-        if (bp and bp:FindFirstChild(name)) or (char and char:FindFirstChild(name)) then
-            return name
-        end
-    end
-    return list[#list]
-end
-
--- ─── Remote references ────────────────────────────────────────────────────────
-local rEvents  = ReplicatedStorage:FindFirstChild("rEvents")
-local Remotes  = ReplicatedStorage:FindFirstChild("Remotes")
-
-local function getRemote(folder, name)
-    if not folder then return nil end
-    return folder:FindFirstChild(name)
-end
-
--- ─── Anti-AFK ─────────────────────────────────────────────────────────────────
-Player.Idled:Connect(function()
-    if CFG.AntiAFK then
-        VirtualUser:Button2Down(Vector2.new(0,0), Workspace.CurrentCamera.CFrame)
-        task.wait(1)
-        VirtualUser:Button2Up(Vector2.new(0,0), Workspace.CurrentCamera.CFrame)
-    end
-end)
-
--- ─── Noclip loop ─────────────────────────────────────────────────────────────
-RunService.Stepped:Connect(function()
-    if CFG.Noclip then
-        local c = getChar(); if not c then return end
-        for _, p in pairs(c:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = false end
-        end
-    end
-end)
-
--- ─── Infinite jump ────────────────────────────────────────────────────────────
-UserInputService.JumpRequest:Connect(function()
-    if CFG.InfiniteJump then
-        local h = getHum(); if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════════════════
---  FEATURE LOOPS
--- ═══════════════════════════════════════════════════════════════════════════════
-
--- Runtime state
-local lockedPos       = nil
-local glitchStats     = 0
-local glitchXP        = 0
-local rebirthCount    = 0
-local sessionStart    = os.time()
-local nextRebirthETA  = 0
-
--- ─── Auto Punch ───────────────────────────────────────────────────────────────
-local punchConn
-local function startAutoPunch()
-    if punchConn then punchConn:Disconnect() end
-    punchConn = RunService.Heartbeat:Connect(function()
-        if not CFG.AutoPunch then return end
-        local toolName = CFG.BestTool and getBestTool(PUNCH_TOOLS) or "Punch"
-        equipTool(toolName)
-        local char = getChar(); if not char then return end
-        local tool = char:FindFirstChild(toolName)
-        if not tool then return end
-        if lockedPos and CFG.LockPosition then
-            local hrp = getHRP()
-            if hrp then hrp.CFrame = lockedPos end
-        end
-        local handle = tool:FindFirstChild("Handle")
-        if handle then
-            local hitbox = Workspace:FindFirstChild("PunchingRock")
-                or Workspace:FindFirstChild("GreenRock")
-                or Workspace:FindFirstChild("Rock")
-            if hitbox then
-                pcall(function()
-                    firetouchinterest(handle, hitbox, 0)
-                    task.wait(1 / math.max(CFG.PunchSpeed, 1))
-                    firetouchinterest(handle, hitbox, 1)
-                end)
-            else
-                pcall(function() tool:Activate() end)
-                task.wait(1 / math.max(CFG.PunchSpeed, 1))
+        for _, p in pairs(N.BaseParts) do
+            if p and p.Parent and p:IsDescendantOf(Workspace) then
+                p.Velocity = N.Velocity
             end
         end
     end)
 end
 
--- ─── Auto Training (generic tool activator) ──────────────────────────────────
-local trainConns = {}
-local function startTraining(key, toolNames, interval)
-    if trainConns[key] then trainConns[key]:Disconnect() end
-    trainConns[key] = RunService.Heartbeat:Connect(function()
-        if not CFG[key] then return end
-        local toolName = toolNames[1]
-        equipTool(toolName)
-        local char = getChar(); if not char then return end
-        local tool = char:FindFirstChild(toolName)
-        if not tool then return end
-        pcall(function() tool:Activate() end)
-        -- Find nearest training pad and firetouchinterest
-        local hrp = getHRP(); if not hrp then return end
-        for _, obj in pairs(Workspace:GetDescendants()) do
-            if obj:IsA("BasePart") and (
-                obj.Name == "TrainingPad" or obj.Name == "PushupPad" or
-                obj.Name == "SitupPad"   or obj.Name == "WeightPad" or
-                obj.Name == "HandstandPad") then
-                local dist = (obj.Position - hrp.Position).Magnitude
-                if dist < 25 then
-                    pcall(function()
-                        firetouchinterest(hrp, obj, 0)
-                        firetouchinterest(hrp, obj, 1)
-                    end)
-                end
-            end
-        end
-        task.wait(interval or (1 / math.max(CFG.TrainSpeed, 1)))
-    end)
+-- ─── Sound helper ────────────────────────────────────────────────────────────
+local function playSound(id)
+    local s = Instance.new("Sound")
+    s.SoundId = "rbxassetid://" .. tostring(id)
+    s.Parent  = SoundService
+    s:Play()
+    s.Ended:Connect(function() s:Destroy() end)
+end
+playSound("2865227271")
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  500-POINT ANATOMICAL TARGET TABLE
+-- ════════════════════════════════════════════════════════════════════════════
+local TARGETS = {}
+local PHI = (1 + math.sqrt(5)) / 2
+
+local function ring(i, n, r, flatZ)
+    local a = 2 * math.pi * (i - 1) / n
+    return r * math.cos(a), r * math.sin(a) * (flatZ or 1)
+end
+local function sunflower(i, n, R, flatZ)
+    local r = R * math.sqrt(i / n)
+    local a = 2 * math.pi * i / (PHI * PHI)
+    return r * math.cos(a), r * math.sin(a) * (flatZ or 1)
+end
+local function bez3(t, p0, p1, p2, p3)
+    local u = 1 - t
+    return u^3*p0 + 3*u^2*t*p1 + 3*u*t^2*p2 + t^3*p3
+end
+local function jit(i, salt)
+    return ((i * 1619 + salt * 1013) % 1000) / 500 - 1
 end
 
-local function refreshTrainingLoops()
-    startAutoPunch()
-    startTraining("AutoPushup",   PUSH_TOOLS,  0.35)
-    startTraining("AutoSitup",    SIT_TOOLS,   0.35)
-    startTraining("AutoWeight",   TOOL_PRIORITY,0.4)
-    startTraining("AutoHandstand",HAND_TOOLS,  0.4)
+for i = 1, 24 do local x,z=ring(i,24,10.5,0.30); table.insert(TARGETS,{x=x,y=-57+(i%4)*0.6,z=z}) end
+for i = 1, 18 do local x,z=ring(i,18,7.0,0.30);  table.insert(TARGETS,{x=x,y=-56+(i%3)*0.7,z=z}) end
+for i = 1, 20 do local x,z=sunflower(i,20,6.2,0.28); table.insert(TARGETS,{x=x,y=-55.5+(i%4)*0.5,z=z}) end
+for i = 1, 8  do local x,z=sunflower(i,8,2.8,0.18);  table.insert(TARGETS,{x=x,y=-55+i*0.1,z=z}) end
+for i = 1, 32 do
+    local lt=(i-1)/31; local y=-50+lt*8; local r=2.4+math.sin(lt*math.pi*5)*0.9
+    local a=2*math.pi*i/PHI
+    table.insert(TARGETS,{x=r*math.cos(a),y=y,z=r*math.sin(a)*0.42})
 end
-refreshTrainingLoops()
-
--- ─── Auto Rebirth ─────────────────────────────────────────────────────────────
-local rebirthConn
-local function doRebirth()
-    local remote = (rEvents and rEvents:FindFirstChild("rebirthRemote"))
-    if not remote then return false end
-    local ok = pcall(function()
-        remote:InvokeServer("rebirthRequest")
-    end)
-    if ok then
-        rebirthCount = rebirthCount + 1
-        task.wait(0.5)
-        -- Teleport back to best gym
-        local hrp = getHRP()
-        if hrp then
-            hrp.CFrame = TELEPORTS["Muscle King Rock"]
-        end
-    end
-    return ok
+for i = 1, 16 do
+    local lt=(i-1)/15
+    table.insert(TARGETS,{x=-11+lt*22,y=-40+(i%3)*0.7,z=jit(i,1)*1.6})
 end
+for i = 1, 22 do
+    local t=(i-1)/21; local thick=(1-t)*3.8+0.5
+    table.insert(TARGETS,{x=bez3(t,-11,-20,-25,-24)+jit(i,3)*thick*0.4,y=bez3(t,-40,-39,-37,-34),z=jit(i,2)*thick*0.5})
+end
+for i = 1, 22 do
+    local t=(i-1)/21; local thick=(1-t)*3.8+0.5
+    table.insert(TARGETS,{x=bez3(t,11,20,25,24)+jit(i,5)*thick*0.4,y=bez3(t,-40,-39,-37,-34),z=jit(i,4)*thick*0.5})
+end
+for i=1,8 do local a=2*math.pi*(i-1)/8; table.insert(TARGETS,{x=-24+math.cos(a)*2.8,y=-34+math.sin(a)*2.2,z=jit(i,6)*0.9}) end
+for i=1,8 do local a=2*math.pi*(i-1)/8; table.insert(TARGETS,{x=24+math.cos(a)*2.8,y=-34+math.sin(a)*2.2,z=jit(i,7)*0.9}) end
+for i=1,10 do local lt=(i-1)/9; local thick=(1-lt)*2.8+0.3
+    table.insert(TARGETS,{x=bez3(lt,-9,-14,-16,-13),y=bez3(lt,-40,-43,-47,-49),z=jit(i,8)*thick*0.4}) end
+for i=1,10 do local lt=(i-1)/9; local thick=(1-lt)*2.8+0.3
+    table.insert(TARGETS,{x=bez3(lt,9,14,16,13),y=bez3(lt,-40,-43,-47,-49),z=jit(i,9)*thick*0.4}) end
+for i=1,4 do table.insert(TARGETS,{x=-3.6,y=-38-(i-1)/3*6,z=jit(i,10)*0.3}) end
+for i=1,4 do table.insert(TARGETS,{x= 3.6,y=-38-(i-1)/3*6,z=jit(i,11)*0.3}) end
 
-rebirthConn = RunService.Heartbeat:Connect(function()
-    if not CFG.AutoRebirth then return end
-    if CFG.RebirthProtect then return end
-
-    local strength  = getStat("Strength") or getStat("Muscle") or 0
-    local rebirths  = getStat("Rebirths") or 0
-    local threshold = CFG.InfiniteRebirth and 1 or CFG.RebirthAtStrength
-
-    if strength >= threshold then
-        if CFG.SaveStrength then
-            -- Wait until strength is slightly above threshold
-            if strength < threshold * 1.05 then return end
-        end
-        task.spawn(doRebirth)
-        task.wait(2)
+local BLADE_ROOT_Y=-14; local BLADE_TIP_Y=60; local BLADE_MAX_HW=13.5; local BLADE_MAX_HD=2.2
+local function bladeProfile(y)
+    if y<=BLADE_ROOT_Y then return BLADE_MAX_HW,BLADE_MAX_HD end
+    if y>=BLADE_TIP_Y  then return 0,0 end
+    local bodyEnd=54
+    if y<=bodyEnd then
+        local t=(y-BLADE_ROOT_Y)/(bodyEnd-BLADE_ROOT_Y)
+        return math.max(0,BLADE_MAX_HW*(1-t^1.6)),math.max(0,BLADE_MAX_HD*(1-t^1.3))
     end
-end)
-
--- ─── Auto Pet Glitch ──────────────────────────────────────────────────────────
---[[
-    Pet Glitch Mechanic (wiki-verified):
-    Formula: (rebirths + 20) × rock_value = XP per punch
-    Must equal cumulative XP for levels 1–N of the pet.
-    Pet must be Level 1 with 0 XP before starting.
-    Muscle King Rock: punch OUTSIDE the ring!
-    
-    2026 patch note: Pure XP manipulation via remote is patched.
-    Current method: firetouchinterest on rock while pet is equipped.
-    Old method: direct XP remote fire (patched in late 2025).
-]]
-
-local glitchConn
-local glitchActive    = false
-local currentGlitchPet= nil
-
-local function findBestGlitchPet()
-    local pets = Player:FindFirstChild("Pets")
-    if not pets then return nil end
-    local priority = {"Unique","Epic","Rare","Uncommon","Basic"}
-    for _, rarity in ipairs(priority) do
-        for _, pet in pairs(pets:GetChildren()) do
-            if pet:FindFirstChild("Rarity") and pet.Rarity.Value == rarity then
-                local lvl = pet:FindFirstChild("Level")
-                local xp  = pet:FindFirstChild("XP") or pet:FindFirstChild("Exp")
-                if lvl and lvl.Value <= 1 and (not xp or xp.Value == 0) then
-                    return pet
-                end
-            end
-        end
-    end
-    return nil
+    local t=(y-bodyEnd)/(BLADE_TIP_Y-bodyEnd)
+    return BLADE_MAX_HW*(1-t)*0.08,BLADE_MAX_HD*(1-t)*0.18
 end
 
-local function equipPetObj(pet)
-    if not pet then return end
-    local equipRemote = Remotes and Remotes:FindFirstChild("EquipPet")
-    if equipRemote then
-        pcall(function() equipRemote:FireServer(pet) end)
-    end
+for i=1,16 do local lt=(i-1)/15; local y=-22+lt*8; local hw,hd=bladeProfile(y)
+    local a=2*math.pi*i/PHI; local r=math.sqrt((i-0.5)/16)
+    table.insert(TARGETS,{x=r*hw*math.cos(a),y=y,z=r*hd*math.sin(a)}) end
+for i=1,8 do local a=2*math.pi*(i-1)/8; local hw,hd=bladeProfile(-14)
+    table.insert(TARGETS,{x=hw*math.cos(a),y=-14+(i%3)*0.4,z=hd*math.sin(a)}) end
+for i=1,64 do
+    local lt=(i-1)/63; local y=-14+lt*42; local hw,hd=bladeProfile(y)
+    local m=i%10; local x,z
+    if m<4 then local s=(i%2==0)and 1 or -1; x=s*(hw*0.93+jit(i,12)*0.9); z=jit(i,13)*hd*0.45
+    elseif m<7 then x=jit(i,14)*hw*0.80; z=(i%2==0 and 1 or -1)*(hd*0.88+jit(i,15)*0.15)
+    elseif m<9 then local a=2*math.pi*i/PHI; local r=math.sqrt(((i-1)%16+0.5)/16); x=r*hw*math.cos(a); z=r*hd*math.sin(a)
+    else x=jit(i,16)*hw*0.18; z=jit(i,17)*0.20 end
+    table.insert(TARGETS,{x=x,y=y,z=z}) end
+for i=1,14 do local lt=(i-1)/13; local y=-14+lt*46; local hw,_=bladeProfile(y)
+    table.insert(TARGETS,{x=jit(i,18)*hw*0.20,y=y,z=jit(i,19)*0.18}) end
+for i=1,40 do
+    local lt=(i-1)/39; local y=28+lt*16; local hw,hd=bladeProfile(y)
+    local m=i%8; local x,z
+    if m<3 then local s=(i%2==0)and 1 or -1; x=s*(hw*0.92+jit(i,20)*0.6); z=jit(i,21)*hd*0.4
+    elseif m<6 then x=jit(i,22)*hw*0.75; z=(i%2==0 and 1 or -1)*(hd*0.85+jit(i,23)*0.12)
+    else local a=2*math.pi*i/PHI; local r=math.sqrt(((i-1)%12+0.5)/12); x=r*hw*math.cos(a); z=r*hd*math.sin(a) end
+    table.insert(TARGETS,{x=x,y=y,z=z}) end
+for i=1,32 do
+    local lt=(i-1)/31; local y=44+lt*10; local hw,hd=bladeProfile(y)
+    hw=math.max(hw,0.05); local m=i%6; local x,z
+    if m<2 then local s=(i%2==0)and 1 or -1; x=s*(hw*0.94+jit(i,24)*0.4); z=jit(i,25)*hd*0.35
+    elseif m<4 then x=jit(i,26)*hw*0.70; z=(i%2==0 and 1 or -1)*(hd*0.82+jit(i,27)*0.10)
+    else local a=2*math.pi*i/PHI; local r=math.sqrt(((i-1)%8+0.5)/8); x=r*hw*math.cos(a); z=r*hd*math.sin(a) end
+    table.insert(TARGETS,{x=x,y=y,z=z}) end
+for i=1,14 do local lt=(i-1)/13; local y=44+lt*12; local hw,hd=bladeProfile(y)
+    table.insert(TARGETS,{x=jit(i,28)*hw*0.55,y=y,z=hd*0.70+jit(i,29)*hd*0.25}) end
+for i=1,16 do local lt=(i-1)/15; local y=54+lt*4; local hw,hd=bladeProfile(y)
+    hw=math.max(hw,0.03); local a=2*math.pi*i/PHI; local r=math.sqrt((i-0.5)/16)
+    table.insert(TARGETS,{x=r*hw*math.cos(a),y=y,z=r*hd*math.sin(a)}) end
+for i=1,8 do local lt=(i-1)/7; local y=58+lt*2; local hw=0.5*(1-lt); local a=2*math.pi*i/PHI
+    table.insert(TARGETS,{x=hw*math.cos(a),y=y,z=hw*math.sin(a)*0.15}) end
+
+while #TARGETS < 500 do table.insert(TARGETS,{x=0,y=60,z=0}) end
+for i=#TARGETS,501,-1 do TARGETS[i]=nil end
+local function getSlot(i) return TARGETS[((i-1)%500)+1] end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  SWORD SYSTEM
+-- ════════════════════════════════════════════════════════════════════════════
+local SWORD_COUNT      = 8
+local BASE_LEFT_STUDS  = 45
+local SWORD_SPACING    = 4
+
+local partOwner        = {}
+local partCounter      = 0
+local activeSwordCount = 0
+local swords           = {}
+
+local function tagName(si, kind) return ("DB_%d_%s"):format(si, kind) end
+
+local function getFollowPos(si)
+    if not humanoidRootPart then return Vector3.new(0,0,0) end
+    local cam  = Workspace.CurrentCamera
+    local look = cam and cam.CFrame.LookVector or humanoidRootPart.CFrame.LookVector
+    look = Vector3.new(look.X, 0, look.Z).Unit
+    local left = Vector3.new(-look.Z, 0, look.X)
+    local dist = BASE_LEFT_STUDS + (si - 1) * SWORD_SPACING
+    return humanoidRootPart.Position + left * dist
 end
 
-local function findRockPart(rockNames)
-    for _, name in ipairs(rockNames) do
-        local obj = Workspace:FindFirstChild(name, true)
-        if obj and obj:IsA("BasePart") then return obj end
+local function isEligible(p)
+    if not p:IsA("BasePart") then return false end
+    if p.Anchored then return false end
+    if not p:IsDescendantOf(Workspace) then return false end
+    for _, sw in ipairs(swords) do
+        if sw.folder and p:IsDescendantOf(sw.folder) then return false end
     end
-    -- Scan all baseParts for rock-like names
-    for _, obj in pairs(Workspace:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            local n = obj.Name:lower()
-            if n:find("rock") or n:find("punch") or n:find("muscle") then
-                return obj
-            end
-        end
+    if LocalPlayer.Character and p:IsDescendantOf(LocalPlayer.Character) then return false end
+    local a = p.Parent
+    while a and a ~= Workspace do
+        if a:FindFirstChild("Humanoid") or a:FindFirstChild("Head") then return false end
+        a = a.Parent
     end
-    return nil
-end
-
-local CURRENT_ROCKS = {"MuscleKingRock","MuscleRock","KingRock","PunchRock","Rock"}
-local OLD_ROCKS     = {"GreenRock","JungleRock","BeachRock","SmallRock"}
-
-local function petGlitchLoop()
-    local currentRebirths = getStat("Rebirths") or 0
-    if not isGlitchable(currentRebirths) then
-        -- Warn in status
-        return false
-    end
-
-    local pet = CFG.SelectedPetName == "Auto (Best)" and findBestGlitchPet() or nil
-    if not pet then return false end
-
-    equipPetObj(pet)
-    currentGlitchPet = pet
-    task.wait(0.5)
-
-    -- Teleport to rock (outside ring for Muscle King)
-    local hrp = getHRP(); if not hrp then return false end
-    hrp.CFrame = TELEPORTS["Muscle King Rock"]
-    task.wait(0.5)
-
-    -- Find rock
-    local rockList = CFG.UseOldMethod and OLD_ROCKS or CURRENT_ROCKS
-    local rock     = findRockPart(rockList)
-    if not rock then return false end
-
-    -- Punch rock loop
-    local punchCount = 0
-    local lastXP     = 0
-
-    while CFG.AutoPetGlitch and glitchActive do
-        -- XP lock check — stop if pet about to level 20
-        if pet:FindFirstChild("Level") and pet.Level.Value >= 19 then
-            -- Pet maxed or about to max — stop glitch to preserve
-            if CFG.PetLevelLock then
-                break
-            end
-        end
-
-        pcall(function()
-            firetouchinterest(hrp, rock, 0)
-            task.wait(0.02)
-            firetouchinterest(hrp, rock, 1)
-        end)
-
-        punchCount = punchCount + 1
-        local currentXP = (pet:FindFirstChild("XP") or pet:FindFirstChild("Exp"))
-        if currentXP then
-            local xpGain = currentXP.Value - lastXP
-            if xpGain > 0 then
-                glitchStats = glitchStats + xpGain -- approximate
-                glitchXP    = currentXP.Value
-            end
-            lastXP = currentXP.Value
-        end
-
-        task.wait(0.05)
-    end
-
     return true
 end
 
-glitchConn = RunService.Heartbeat:Connect(function()
-    if not CFG.AutoPetGlitch or glitchActive then return end
-    glitchActive = true
-    task.spawn(function()
-        petGlitchLoop()
-        task.wait(1)
-        glitchActive = false
-    end)
+local function cleanPart(p, si)
+    if not p or not p.Parent then return end
+    for _, name in ipairs({tagName(si,"Att"),tagName(si,"AP"),tagName(si,"AO"),tagName(si,"AncAtt")}) do
+        local c = p:FindFirstChild(name); if c then c:Destroy() end
+    end
+end
+
+local function forcePart(p, sw)
+    local si = sw.slotIndex
+    for _, x in next, p:GetChildren() do
+        if x:IsA("BodyAngularVelocity") or x:IsA("BodyForce") or x:IsA("BodyGyro")
+        or x:IsA("BodyPosition") or x:IsA("BodyThrust") or x:IsA("BodyVelocity")
+        or x:IsA("RocketPropulsion") then x:Destroy() end
+    end
+    cleanPart(p, si)
+    p.CanCollide = false
+    local att    = Instance.new("Attachment", p); att.Name = tagName(si,"Att")
+    local ancAtt = Instance.new("Attachment", sw.anchor)
+    ancAtt.Name  = tagName(si,"AncAtt").."_"..tostring(p:GetDebugId())
+    local ap       = Instance.new("AlignPosition", p); ap.Name=tagName(si,"AP")
+    ap.MaxForce    = math.huge; ap.MaxVelocity = math.huge; ap.Responsiveness = 200
+    ap.Attachment0 = att; ap.Attachment1 = ancAtt
+    local ao              = Instance.new("AlignOrientation", p); ao.Name=tagName(si,"AO")
+    ao.MaxAngularVelocity = math.huge; ao.MaxTorque = math.huge; ao.Responsiveness = 200
+    ao.Attachment0 = att; ao.Attachment1 = ancAtt
+    sw._anchorAtts[p] = ancAtt
+end
+
+local function createSword(slotIndex)
+    local sw           = {}
+    sw.slotIndex       = slotIndex
+    sw.enabled         = false
+    sw.fingerActive    = false
+    sw.fingerTouch     = nil
+    sw.yaw             = 0
+    sw.pitch           = 0
+    sw.parts           = {}
+    sw.centerPos       = humanoidRootPart and humanoidRootPart.Position or Vector3.new()
+    sw._anchorAtts     = {}
+    -- Trail return state
+    sw._returning      = false
+    sw._returnStart    = Vector3.new()
+    sw._returnT        = 0
+    sw.folder  = Instance.new("Folder", Workspace); sw.folder.Name = "DevilsBlade_SW"..slotIndex
+    sw.anchor  = Instance.new("Part", sw.folder)
+    sw.anchor.Anchored=true; sw.anchor.CanCollide=false; sw.anchor.Transparency=1
+    sw.anchor.Size=Vector3.new(1,1,1); sw.anchor.Position=sw.centerPos
+    sw.rot = function(x,y,z)
+        local cy,sy=math.cos(sw.yaw),math.sin(sw.yaw)
+        local cp,sp=math.cos(sw.pitch),math.sin(sw.pitch)
+        local rx=cy*x-sy*z; local rz=sy*x+cy*z
+        return rx,cp*y-sp*rz,sp*y+cp*rz
+    end
+    sw.removePart = function(p)
+        local idx=table.find(sw.parts,p); if idx then table.remove(sw.parts,idx) end
+        if partOwner[p]==slotIndex then partOwner[p]=nil end
+        cleanPart(p,slotIndex)
+        if sw._anchorAtts[p] then sw._anchorAtts[p]:Destroy(); sw._anchorAtts[p]=nil end
+    end
+    sw.addPart = function(p)
+        if not sw.enabled then return end
+        if not isEligible(p) then return end
+        if table.find(sw.parts,p) then return end
+        local owner=partOwner[p]
+        if owner==nil then
+            if activeSwordCount==0 then return end
+            partCounter=partCounter+1
+            local assigned=((partCounter-1)%activeSwordCount)+1
+            partOwner[p]=assigned; owner=assigned
+        end
+        if owner~=slotIndex then return end
+        if getgenv().Network then getgenv().Network.RetainPart(p) end
+        forcePart(p,sw); table.insert(sw.parts,p)
+    end
+    return sw
+end
+
+for i=1,SWORD_COUNT do table.insert(swords,createSword(i)) end
+
+local function resetPartitions()
+    for _,sw in ipairs(swords) do
+        for _,p in ipairs(sw.parts) do
+            cleanPart(p,sw.slotIndex)
+            if sw._anchorAtts[p] then sw._anchorAtts[p]:Destroy(); sw._anchorAtts[p]=nil end
+        end
+        sw.parts={}
+        for _,ch in ipairs(sw.anchor:GetChildren()) do if ch:IsA("Attachment") then ch:Destroy() end end
+        sw._anchorAtts={}
+    end
+    partOwner={}; partCounter=0
+    if activeSwordCount==0 then return end
+    local pool={}
+    for _,p in ipairs(Workspace:GetDescendants()) do if isEligible(p) then table.insert(pool,p) end end
+    for i,p in ipairs(pool) do
+        local assigned=((i-1)%activeSwordCount)+1; partOwner[p]=assigned; partCounter=i
+        local sw=swords[assigned]
+        if sw.enabled then
+            if getgenv().Network then getgenv().Network.RetainPart(p) end
+            forcePart(p,sw); table.insert(sw.parts,p)
+        end
+    end
+end
+
+local function globalAdd(p)
+    if activeSwordCount==0 then return end
+    if partOwner[p] then
+        local sw=swords[partOwner[p]]
+        if sw and sw.enabled and not table.find(sw.parts,p) and isEligible(p) then
+            forcePart(p,sw); table.insert(sw.parts,p) end; return end
+    if not isEligible(p) then return end
+    partCounter=partCounter+1; local assigned=((partCounter-1)%activeSwordCount)+1
+    partOwner[p]=assigned; local sw=swords[assigned]
+    if sw and sw.enabled then
+        if getgenv().Network then getgenv().Network.RetainPart(p) end
+        forcePart(p,sw); table.insert(sw.parts,p) end
+end
+
+local function globalRemove(p)
+    local si=partOwner[p]; if si then local sw=swords[si]; if sw then sw.removePart(p) end end
+    partOwner[p]=nil
+end
+
+Workspace.DescendantAdded:Connect(function(p) task.defer(function() globalAdd(p) end) end)
+Workspace.DescendantRemoving:Connect(globalRemove)
+
+local _sweepClock=0
+RunService.Heartbeat:Connect(function(dt)
+    _sweepClock=_sweepClock+dt; if _sweepClock<2 then return end; _sweepClock=0
+    for _,p in ipairs(Workspace:GetDescendants()) do
+        if p:IsA("BasePart") and not p.Anchored and not partOwner[p] then globalAdd(p) end
+    end
 end)
 
--- ─── Auto Set Size ────────────────────────────────────────────────────────────
-local SIZE_PRESETS = {
-    Normal  = 1.0,
-    Big     = 1.8,
-    Huge    = 3.2,
-    Max     = 6.0,
-}
-
-local function applySize(preset)
-    local scale = SIZE_PRESETS[preset] or 1.0
-    local hum   = getHum(); if not hum then return end
-    -- BodyDepthScale, BodyHeightScale, BodyWidthScale, HeadScale
-    for _, desc in pairs(hum:GetDescendants()) do
-        if desc:IsA("NumberValue") then
-            if desc.Name:find("Scale") then
-                desc.Value = scale
+-- ─── Shape engine ────────────────────────────────────────────────────────────
+RunService.Heartbeat:Connect(function()
+    for _,sw in ipairs(swords) do
+        if not sw.enabled then continue end
+        local ancPos=sw.anchor.Position; local i=0
+        for _,part in ipairs(sw.parts) do
+            if part.Parent and not part.Anchored then
+                i=i+1; local s=getSlot(i); local rx,ry,rz=sw.rot(s.x,s.y,s.z)
+                local target=ancPos+Vector3.new(rx,ry,rz)
+                local ancAtt=sw._anchorAtts[part]
+                if ancAtt then ancAtt.WorldPosition=target end
             end
         end
     end
-    -- Also try BodyTypeScale for bigger effect
-    local bts = hum:FindFirstChild("BodyTypeScale")
-    if bts then bts.Value = math.min(scale, 1.0) end
-    local ws  = hum:FindFirstChild("BodyWidthScale")
-    if ws then ws.Value = scale end
-    local hs  = hum:FindFirstChild("BodyHeightScale")
-    if hs then hs.Value = scale end
-    -- Try via SetAttribute or remote if available
-    local sizeRemote = Remotes and Remotes:FindFirstChild("SetSize")
-    if sizeRemote then
-        pcall(function() sizeRemote:FireServer(scale) end)
+end)
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  TRAIL MODE — STATE & ENGINE
+-- ════════════════════════════════════════════════════════════════════════════
+
+local TRAIL_MODE        = false
+local TRAIL_LAG         = 18      -- history frames between each sword (adjustable)
+local TRAIL_HISTORY_SZ  = 400     -- total frames kept in ring buffer
+local TRAIL_RETURN_DUR  = 0.55    -- seconds for return animation
+
+-- Ring buffer: stores lead sword world positions
+local posHistory = {}
+local histIdx    = 0
+
+-- Trail touch tracking
+local trailTouchId  = nil   -- InputObject tracking the one controlling finger
+local trailLockedY  = 0     -- Y height locked when touch began
+
+-- Return animation state
+local isReturning   = false
+
+-- Initialise / reset history to a given position
+local function initHistory(pos)
+    pos = pos or (humanoidRootPart and humanoidRootPart.Position or Vector3.new())
+    for i = 1, TRAIL_HISTORY_SZ do posHistory[i] = pos end
+    histIdx = 0
+end
+initHistory()
+
+-- Sample position N frames back from current head
+local function historyAt(framesBack)
+    local idx = histIdx - framesBack
+    -- Lua modulo can be negative: normalise into [1, TRAIL_HISTORY_SZ]
+    idx = ((idx - 1) % TRAIL_HISTORY_SZ) + 1
+    return posHistory[idx]
+end
+
+-- Push a new lead position into the ring buffer
+local function pushHistory(pos)
+    histIdx = (histIdx % TRAIL_HISTORY_SZ) + 1
+    posHistory[histIdx] = pos
+end
+
+-- Cancel any in-progress return animation (called when touch restarts)
+local function cancelReturn()
+    isReturning = false
+    for _, sw in ipairs(swords) do
+        sw._returning = false
+        sw._returnT   = 0
     end
 end
 
--- Keep size after rebirth
-Player.CharacterAdded:Connect(function()
-    task.wait(1)
-    if CFG.AutoSize then applySize(CFG.TargetSize) end
-    if CFG.WalkSpeed  ~= 16 then
-        local h = getHum(); if h then h.WalkSpeed = CFG.WalkSpeed end
+-- Kick off the smooth return to formation
+local function startReturn()
+    -- Snapshot where each sword is right now as the animation start
+    for _, sw in ipairs(swords) do
+        sw._returnStart = sw.centerPos
+        sw._returnT     = 0
+        sw._returning   = true
     end
-    if CFG.JumpPower ~= 50 then
-        local h = getHum(); if h then h.JumpPower = CFG.JumpPower end
+    isReturning = true
+end
+
+-- ─── Trail follow & return engine (RenderStepped for silky feel) ─────────────
+RunService.RenderStepped:Connect(function(dt)
+    if not TRAIL_MODE then return end
+
+    -- ── RETURN ANIMATION ─────────────────────────────────────────────────────
+    if isReturning then
+        local allDone = true
+        for i, sw in ipairs(swords) do
+            if not sw.enabled then continue end
+            if sw._returning then
+                sw._returnT = math.min(sw._returnT + dt / TRAIL_RETURN_DUR, 1)
+                -- Cubic ease-out: feels like swords decelerate as they arrive
+                local t    = sw._returnT
+                local ease = 1 - (1 - t) ^ 3
+                local dest = getFollowPos(i)
+                local pos  = sw._returnStart:Lerp(dest, ease)
+                sw.centerPos       = pos
+                sw.anchor.Position = pos
+                if t >= 1 then
+                    sw._returning      = false
+                    sw.centerPos       = dest
+                    sw.anchor.Position = dest
+                else
+                    allDone = false
+                end
+            end
+        end
+        if allDone then isReturning = false end
+        return  -- don't run trail positioning during return
     end
-    refreshTrainingLoops()
+
+    -- ── ACTIVE TRAIL (finger is down) ────────────────────────────────────────
+    if not trailTouchId then return end
+
+    for i, sw in ipairs(swords) do
+        if not sw.enabled then continue end
+        -- Sword 1 reads the head of the buffer (latest position)
+        -- Sword N reads (N-1)*TRAIL_LAG frames behind, capped to buffer size
+        local framesBack   = math.min((i - 1) * TRAIL_LAG, TRAIL_HISTORY_SZ - 1)
+        local trailPos     = historyAt(framesBack)
+        sw.centerPos       = trailPos
+        sw.anchor.Position = trailPos
+    end
 end)
 
--- ═══════════════════════════════════════════════════════════════════════════════
---  GUI CONSTRUCTION
--- ═══════════════════════════════════════════════════════════════════════════════
+-- ─── Normal follow engine (only runs when trail mode is OFF) ─────────────────
+RunService.Heartbeat:Connect(function()
+    if TRAIL_MODE then return end   -- trail handles its own positioning
+    for _, sw in ipairs(swords) do
+        if sw.enabled and not sw.fingerActive then
+            sw.centerPos       = getFollowPos(sw.slotIndex)
+            sw.anchor.Position = sw.centerPos
+        end
+    end
+end)
 
-local C = Color3.fromRGB
+-- ─── Y-locked screen-to-world resolver (shared) ──────────────────────────────
+local function screenToWorld(sp, planeY)
+    local cam = Workspace.CurrentCamera; if not cam then return nil end
+    local ray = cam:ScreenPointToRay(sp.X, sp.Y)
+    local d   = ray.Direction
+    if math.abs(d.Y) < 0.0001 then return ray.Origin + d * 200 end
+    local t = (planeY - ray.Origin.Y) / d.Y
+    if t <= 0 then return ray.Origin + d * 200 end
+    return ray.Origin + d * t
+end
 
--- Theme
-local T = {
-    BG        = C(14,  14,  20),
-    BG2       = C(20,  20,  30),
-    BG3       = C(26,  26,  38),
-    SIDEBAR   = C(11,  11,  17),
-    ACCENT    = C(180,  20,  80),
-    ACCENT2   = C(220,  60, 120),
-    PURPLE    = C(110,  40, 220),
-    TEXT      = C(235, 235, 245),
-    TEXTDIM   = C(140, 140, 165),
-    TOGGLE_ON = C(50,  200,  80),
-    TOGGLE_OFF= C(70,   70,  90),
-    WARNING   = C(255, 180,  30),
-    SUCCESS   = C(50,  220,  80),
-    ERROR     = C(255,  60,  60),
-    SCROLLBAR = C(40,   40,  60),
+-- ════════════════════════════════════════════════════════════════════════════
+--  GUI
+-- ════════════════════════════════════════════════════════════════════════════
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name="DevilsBladeGUI_8v31"; ScreenGui.ResetOnSpawn=false
+ScreenGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; ScreenGui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+
+-- Shared overlay (covers full screen for touch/drag events)
+local sharedOverlay = Instance.new("Frame")
+sharedOverlay.Size=UDim2.new(1,0,1,0); sharedOverlay.BackgroundTransparency=1
+sharedOverlay.BorderSizePixel=0; sharedOverlay.ZIndex=0; sharedOverlay.Parent=ScreenGui
+
+-- Finger indicator dots (8, one per sword)
+local fingerDots={}
+local dotColors={
+    Color3.fromRGB(176,18,34),Color3.fromRGB(18,105,176),Color3.fromRGB(15,138,68),Color3.fromRGB(168,112,16),
+    Color3.fromRGB(136,48,192),Color3.fromRGB(192,112,16),Color3.fromRGB(16,136,136),Color3.fromRGB(192,64,128),
 }
-
--- Utility constructors
-local function inst(cls, props)
-    local i = Instance.new(cls)
-    for k, v in pairs(props) do i[k] = v end
-    return i
+for i=1,SWORD_COUNT do
+    local fd=Instance.new("Frame"); fd.Size=UDim2.new(0,24,0,24); fd.AnchorPoint=Vector2.new(0.5,0.5)
+    fd.BackgroundColor3=dotColors[i]; fd.BackgroundTransparency=0.15; fd.BorderSizePixel=0
+    fd.Visible=false; fd.ZIndex=10; fd.Parent=ScreenGui
+    Instance.new("UICorner",fd).CornerRadius=UDim.new(1,0); fingerDots[i]=fd
 end
 
-local function corner(parent, r)
-    inst("UICorner", {CornerRadius=UDim.new(0,r or 8), Parent=parent})
-end
+-- Trail mode: special lead-sword dot (larger, gold ring)
+local trailDot = Instance.new("Frame")
+trailDot.Size=UDim2.new(0,32,0,32); trailDot.AnchorPoint=Vector2.new(0.5,0.5)
+trailDot.BackgroundColor3=Color3.fromRGB(255,210,30); trailDot.BackgroundTransparency=0.1
+trailDot.BorderSizePixel=0; trailDot.Visible=false; trailDot.ZIndex=12; trailDot.Parent=ScreenGui
+Instance.new("UICorner",trailDot).CornerRadius=UDim.new(1,0)
+-- Inner ring label (⚔)
+local trailDotLbl=Instance.new("TextLabel"); trailDotLbl.Size=UDim2.new(1,0,1,0)
+trailDotLbl.BackgroundTransparency=1; trailDotLbl.Text="⚔"; trailDotLbl.TextSize=14
+trailDotLbl.Font=Enum.Font.Fondamento; trailDotLbl.TextColor3=Color3.fromRGB(80,40,0)
+trailDotLbl.ZIndex=13; trailDotLbl.Parent=trailDot
 
-local function pad(parent, t, r, b, l)
-    inst("UIPadding",{PaddingTop=UDim.new(0,t or 6),PaddingRight=UDim.new(0,r or 6),
-        PaddingBottom=UDim.new(0,b or 6),PaddingLeft=UDim.new(0,l or 6),Parent=parent})
-end
+local touchToSword={}
+local swordDragY={}
 
-local function label(parent, text, pos, size, fs, fc, font, xa)
-    return inst("TextLabel", {
-        Text=text, Position=pos or UDim2.new(0,0,0,0),
-        Size=size or UDim2.new(1,0,0,20),
-        TextColor3=fc or T.TEXT, BackgroundTransparency=1,
-        Font=font or Enum.Font.GothamSemiBold, TextSize=fs or 13,
-        TextXAlignment=xa or Enum.TextXAlignment.Left,
-        BorderSizePixel=0, Parent=parent,
-    })
-end
+-- ─── Input handlers — unified, mode-aware ────────────────────────────────────
+sharedOverlay.InputBegan:Connect(function(inp)
+    if inp.UserInputType~=Enum.UserInputType.Touch
+    and inp.UserInputType~=Enum.UserInputType.MouseButton1 then return end
 
-local function divider(parent, yPos)
-    local f = inst("Frame",{
-        Size=UDim2.new(1,-16,0,1), Position=UDim2.new(0,8,0,yPos),
-        BackgroundColor3=T.BG3, BorderSizePixel=0, Parent=parent,
-    })
-    return f
-end
+    -- ── TRAIL MODE: one finger controls lead sword ────────────────────────────
+    if TRAIL_MODE then
+        if trailTouchId then return end   -- already tracking; ignore additional fingers
+        trailTouchId = inp
+        cancelReturn()  -- kill any in-progress return animation
 
--- ─── Toggle switch ────────────────────────────────────────────────────────────
-local function createToggle(parent, yPos, labelText, cfgKey, onChange)
-    local row = inst("Frame",{
-        Size=UDim2.new(1,-16,0,28), Position=UDim2.new(0,8,0,yPos),
-        BackgroundTransparency=1, Parent=parent,
-    })
-    label(row, labelText, UDim2.new(0,0,0,4), UDim2.new(1,-56,1,0), 12, T.TEXT)
-    local track = inst("Frame",{
-        Size=UDim2.new(0,44,0,22), Position=UDim2.new(1,-44,0.5,-11),
-        BackgroundColor3=CFG[cfgKey] and T.TOGGLE_ON or T.TOGGLE_OFF,
-        BorderSizePixel=0, Parent=row,
-    })
-    corner(track, 11)
-    local thumb = inst("Frame",{
-        Size=UDim2.new(0,18,0,18), Position=CFG[cfgKey] and UDim2.new(1,-20,0.5,-9) or UDim2.new(0,2,0.5,-9),
-        BackgroundColor3=C(240,240,240), BorderSizePixel=0, Parent=track,
-    })
-    corner(thumb, 9)
+        -- Lock Y to wherever Sword 1 currently is
+        local sw1 = swords[1]
+        trailLockedY = sw1 and sw1.centerPos.Y or (humanoidRootPart and humanoidRootPart.Position.Y or 0)
 
-    local function setState(state)
-        CFG[cfgKey] = state
-        local tw = TweenService:Create(track, TweenInfo.new(0.15),
-            {BackgroundColor3=state and T.TOGGLE_ON or T.TOGGLE_OFF})
-        local tp = TweenService:Create(thumb, TweenInfo.new(0.15),
-            {Position=state and UDim2.new(1,-20,0.5,-9) or UDim2.new(0,2,0.5,-9)})
-        tw:Play(); tp:Play()
-        if onChange then onChange(state) end
-        saveConfig()
+        -- Seed history at current finger world position so there's no jump
+        local wp = screenToWorld(Vector2.new(inp.Position.X, inp.Position.Y), trailLockedY)
+        if wp then
+            initHistory(wp)  -- fill buffer with finger start pos → no snake catchup on first frame
+        end
+
+        -- Show trail dot at finger position
+        trailDot.Position = UDim2.new(0, inp.Position.X, 0, inp.Position.Y)
+        trailDot.Visible  = true
+        return
     end
 
-    track.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-            setState(not CFG[cfgKey])
+    -- ── NORMAL MODE: assign first available enabled sword ─────────────────────
+    for i, sw in ipairs(swords) do
+        if sw.enabled and not sw.fingerActive then
+            sw.fingerActive=true; sw.fingerTouch=inp
+            touchToSword[inp]=i; swordDragY[i]=sw.centerPos.Y
+            local wp=screenToWorld(Vector2.new(inp.Position.X,inp.Position.Y),swordDragY[i])
+            if wp then
+                local locked=Vector3.new(wp.X,swordDragY[i],wp.Z)
+                sw.centerPos=locked; sw.anchor.Position=locked
+                fingerDots[i].Position=UDim2.new(0,inp.Position.X,0,inp.Position.Y)
+                fingerDots[i].Visible=true
+            end
+            break
         end
-    end)
+    end
+end)
 
-    -- Return setter for programmatic updates
-    return setState
-end
-
--- ─── Slider ──────────────────────────────────────────────────────────────────
-local function createSlider(parent, yPos, labelText, cfgKey, minV, maxV, onChange)
-    local row = inst("Frame",{
-        Size=UDim2.new(1,-16,0,50), Position=UDim2.new(0,8,0,yPos),
-        BackgroundTransparency=1, Parent=parent,
-    })
-    local lbl = label(row, labelText.." : "..tostring(CFG[cfgKey]),
-        UDim2.new(0,0,0,0), UDim2.new(1,0,0,18), 12, T.TEXT)
-    local track = inst("Frame",{
-        Size=UDim2.new(1,0,0,6), Position=UDim2.new(0,0,0,26),
-        BackgroundColor3=T.BG3, BorderSizePixel=0, Parent=row,
-    })
-    corner(track, 3)
-    local pct    = (CFG[cfgKey] - minV) / (maxV - minV)
-    local fill   = inst("Frame",{
-        Size=UDim2.new(pct,0,1,0), BackgroundColor3=T.ACCENT,
-        BorderSizePixel=0, Parent=track,
-    })
-    corner(fill, 3)
-    local thumb  = inst("Frame",{
-        Size=UDim2.new(0,14,0,14), Position=UDim2.new(pct,-7,-0.5,-1),
-        BackgroundColor3=T.ACCENT2, BorderSizePixel=0, Parent=track,
-    })
-    corner(thumb, 7)
-
-    local dragging = false
-    thumb.InputBegan:Connect(function(i)
-        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-            dragging=true end
-    end)
-    UserInputService.InputEnded:Connect(function(i)
-        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-            dragging=false end
-    end)
-    UserInputService.InputChanged:Connect(function(i)
-        if not dragging then return end
-        local abs = track.AbsolutePosition
-        local sz  = track.AbsoluteSize
-        local relX= math.clamp((i.Position.X - abs.X) / sz.X, 0, 1)
-        local val = math.floor(minV + relX * (maxV - minV))
-        CFG[cfgKey] = val
-        fill.Size   = UDim2.new(relX, 0, 1, 0)
-        thumb.Position = UDim2.new(relX, -7, -0.5, -1)
-        lbl.Text = labelText.." : "..tostring(val)
-        if onChange then onChange(val) end
-        saveConfig()
-    end)
-end
-
--- ─── Number input ─────────────────────────────────────────────────────────────
-local function createNumInput(parent, yPos, labelText, cfgKey, onChange)
-    local row = inst("Frame",{
-        Size=UDim2.new(1,-16,0,30), Position=UDim2.new(0,8,0,yPos),
-        BackgroundTransparency=1, Parent=parent,
-    })
-    label(row, labelText, UDim2.new(0,0,0,5), UDim2.new(0.6,0,1,0), 12, T.TEXT)
-    local box = inst("TextBox",{
-        Size=UDim2.new(0.38,0,0,24), Position=UDim2.new(0.62,0,0.5,-12),
-        BackgroundColor3=T.BG3, Text=tostring(CFG[cfgKey]),
-        TextColor3=T.TEXT, Font=Enum.Font.GothamSemiBold,
-        TextSize=12, BorderSizePixel=0, ClearTextOnFocus=false, Parent=row,
-    })
-    corner(box, 5)
-    pad(box, 3, 6, 3, 6)
-    box.FocusLost:Connect(function()
-        local v = tonumber(box.Text)
-        if v then
-            CFG[cfgKey] = v
-            if onChange then onChange(v) end
-            saveConfig()
+UserInputService.InputChanged:Connect(function(inp)
+    -- ── TRAIL MODE: track finger, push position into history ──────────────────
+    if TRAIL_MODE then
+        if inp~=trailTouchId then return end
+        if inp.UserInputType~=Enum.UserInputType.Touch
+        and inp.UserInputType~=Enum.UserInputType.MouseMovement then return end
+        local wp = screenToWorld(Vector2.new(inp.Position.X, inp.Position.Y), trailLockedY)
+        if wp then
+            -- Y stays locked; X and Z follow finger freely
+            local constrained = Vector3.new(wp.X, trailLockedY, wp.Z)
+            pushHistory(constrained)
         end
-    end)
+        -- Update dot position
+        trailDot.Position = UDim2.new(0, inp.Position.X, 0, inp.Position.Y)
+        return
+    end
+
+    -- ── NORMAL MODE ───────────────────────────────────────────────────────────
+    local i=touchToSword[inp]; if not i then return end
+    local sw=swords[i]; if not sw or not sw.fingerActive then return end
+    if inp.UserInputType~=Enum.UserInputType.Touch
+    and inp.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    local lockedY=swordDragY[i] or sw.centerPos.Y
+    local wp=screenToWorld(Vector2.new(inp.Position.X,inp.Position.Y),lockedY)
+    if wp then
+        local locked=Vector3.new(wp.X,lockedY,wp.Z)
+        sw.centerPos=locked; sw.anchor.Position=locked
+        fingerDots[i].Position=UDim2.new(0,inp.Position.X,0,inp.Position.Y)
+        fingerDots[i].Visible=true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+    -- ── TRAIL MODE: finger lifted → start return ──────────────────────────────
+    if TRAIL_MODE then
+        if inp~=trailTouchId then return end
+        trailTouchId = nil
+        trailDot.Visible = false
+        startReturn()
+        return
+    end
+
+    -- ── NORMAL MODE ───────────────────────────────────────────────────────────
+    local i=touchToSword[inp]; if not i then return end
+    local sw=swords[i]
+    if sw then
+        sw.fingerActive=false; sw.fingerTouch=nil; swordDragY[i]=nil
+        sw.centerPos=getFollowPos(sw.slotIndex); sw.anchor.Position=sw.centerPos
+        fingerDots[i].Visible=false
+    end
+    touchToSword[inp]=nil
+end)
+
+-- ─── UI helpers ──────────────────────────────────────────────────────────────
+local C=Color3.fromRGB
+local function frame(parent,size,pos,bg,bgT,z,r)
+    local f=Instance.new("Frame"); f.Size=size; f.Position=pos or UDim2.new(0,0,0,0)
+    f.BackgroundColor3=bg or C(18,4,4); f.BackgroundTransparency=bgT or 0
+    f.BorderSizePixel=0; f.ZIndex=z or 5; f.Parent=parent
+    if r then Instance.new("UICorner",f).CornerRadius=UDim.new(0,r) end; return f
+end
+local function lbl(parent,text,pos,size,fs,fc,font,align,z)
+    local L=Instance.new("TextLabel"); L.Size=size or UDim2.new(1,0,0,18)
+    L.Position=pos or UDim2.new(0,0,0,0); L.Text=text; L.TextColor3=fc or C(255,180,180)
+    L.BackgroundTransparency=1; L.Font=font or Enum.Font.Fondamento; L.TextSize=fs or 11
+    L.TextXAlignment=align or Enum.TextXAlignment.Left; L.BorderSizePixel=0; L.ZIndex=z or 7
+    L.Parent=parent; return L
+end
+local function btn(parent,text,pos,size,bg,tc,fs,r)
+    local B=Instance.new("TextButton"); B.Size=size or UDim2.new(0.8,0,0,26)
+    B.Position=pos or UDim2.new(0.1,0,0,0); B.Text=text; B.BackgroundColor3=bg or C(140,0,0)
+    B.TextColor3=tc or C(255,255,255); B.Font=Enum.Font.Fondamento; B.TextSize=fs or 13
+    B.BorderSizePixel=0; B.ZIndex=8; B.Parent=parent
+    Instance.new("UICorner",B).CornerRadius=UDim.new(0,r or 8); return B
+end
+local function stepper(parent,labelTxt,yOff,getV,onInc,onDec)
+    lbl(parent,labelTxt,UDim2.new(0,4,0,yOff),UDim2.new(1,-8,0,14),11)
+    local d=btn(parent,"-",UDim2.new(0.04,0,0,yOff+14),UDim2.new(0.2,0,0,24),C(100,20,0),C(255,220,220),13)
+    local disp=Instance.new("TextLabel"); disp.Size=UDim2.new(0.38,0,0,24); disp.Position=UDim2.new(0.28,0,0,yOff+14)
+    disp.Text=tostring(getV()); disp.BackgroundColor3=C(30,6,6); disp.TextColor3=C(255,200,200)
+    disp.Font=Enum.Font.Fondamento; disp.TextSize=12; disp.BorderSizePixel=0; disp.ZIndex=7; disp.Parent=parent
+    Instance.new("UICorner",disp).CornerRadius=UDim.new(0,6)
+    local u=btn(parent,"+",UDim2.new(0.70,0,0,yOff+14),UDim2.new(0.2,0,0,24),C(140,20,0),C(255,220,220),13)
+    d.MouseButton1Click:Connect(function() onDec(); disp.Text=tostring(getV()) end)
+    u.MouseButton1Click:Connect(function() onInc(); disp.Text=tostring(getV()) end)
+    return disp
 end
 
--- ─── Button ──────────────────────────────────────────────────────────────────
-local function createBtn(parent, yPos, text, w, callback, accent)
-    local btn = inst("TextButton",{
-        Size=UDim2.new(w or 1, w and 0 or -16, 0, 30),
-        Position=w and UDim2.new(0,8,0,yPos) or UDim2.new(0,8,0,yPos),
-        BackgroundColor3=accent or T.ACCENT,
-        Text=text, TextColor3=T.TEXT,
-        Font=Enum.Font.GothamBold, TextSize=12,
-        BorderSizePixel=0, Parent=parent,
-    })
-    corner(btn, 6)
-    local tw = TweenService:Create(btn, TweenInfo.new(0.1),
-        {BackgroundColor3=T.ACCENT2})
-    btn.MouseEnter:Connect(function() tw:Play() end)
-    btn.MouseLeave:Connect(function()
-        TweenService:Create(btn,TweenInfo.new(0.1),
-            {BackgroundColor3=accent or T.ACCENT}):Play()
-    end)
-    btn.MouseButton1Click:Connect(callback)
-    return btn
-end
+-- ─── Panel layout ─────────────────────────────────────────────────────────────
+-- Sidebar is now taller to fit Trail Mode controls
+local SIDEBAR_W = 220
+local CARD_W    = 230
+local CARD_H    = 90
+local CARD_GAP  = 6
+local GRID_COLS = 2
+local GRID_W    = CARD_W*GRID_COLS + CARD_GAP*(GRID_COLS+1)
+local PANEL_W   = SIDEBAR_W + GRID_W + 12
+local PANEL_H   = math.max(
+    530,  -- extra 50px vs original to accommodate trail controls
+    CARD_GAP + math.ceil(SWORD_COUNT/GRID_COLS)*(CARD_H+CARD_GAP) + 60
+)
 
--- ─── Section header ──────────────────────────────────────────────────────────
-local function sectionHeader(parent, yPos, text)
-    local f = inst("Frame",{
-        Size=UDim2.new(1,-16,0,24), Position=UDim2.new(0,8,0,yPos),
-        BackgroundColor3=T.BG3, BorderSizePixel=0, Parent=parent,
-    })
-    corner(f, 5)
-    label(f, "  "..text, UDim2.new(0,0,0,0), UDim2.new(1,0,1,0),
-        11, T.ACCENT, Enum.Font.GothamBold)
-    return f
-end
+local MainFrame = frame(ScreenGui,
+    UDim2.new(0,PANEL_W,0,PANEL_H),
+    UDim2.new(0.5,-PANEL_W//2, 0.5,-PANEL_H//2),
+    C(14,3,5), 0, 5, 16)
+MainFrame.ClipsDescendants=true
 
--- ─── Status badge ─────────────────────────────────────────────────────────────
-local function statusBadge(parent, yPos, text, color)
-    local f = inst("Frame",{
-        Size=UDim2.new(1,-16,0,22), Position=UDim2.new(0,8,0,yPos),
-        BackgroundColor3=color or T.BG3, BackgroundTransparency=0.6,
-        BorderSizePixel=0, Parent=parent,
-    })
-    corner(f, 5)
-    local lbl2 = label(f, text, UDim2.new(0,8,0,0), UDim2.new(1,-16,1,0), 11, T.TEXT)
-    return f, lbl2
-end
+-- Title bar
+local TitleBar=frame(MainFrame,UDim2.new(1,0,0,34),UDim2.new(0,0,0,0),C(90,0,0),0,6,0)
+TitleBar.ClipsDescendants=false
+Instance.new("UICorner",TitleBar).CornerRadius=UDim.new(0,16)
+lbl(TitleBar,"⚔  Devil's Blade v3.1 — Trail Mode",
+    UDim2.new(0,36,0,0),UDim2.new(1,-60,1,0),13,C(255,100,100),Enum.Font.Fondamento,Enum.TextXAlignment.Left,7)
 
--- ═══════════════════════════════════════════════════════════════════════════════
---  MAIN GUI FRAME
--- ═══════════════════════════════════════════════════════════════════════════════
+-- Drag
+local panelDragging=false; local panelTouchId=nil
+local panelDragStart=Vector2.new(); local panelStartPos=MainFrame.Position
+TitleBar.InputBegan:Connect(function(inp)
+    if (inp.UserInputType~=Enum.UserInputType.MouseButton1
+    and inp.UserInputType~=Enum.UserInputType.Touch) then return end
+    if panelDragging then return end
+    panelDragging=true; panelTouchId=inp
+    panelDragStart=Vector2.new(inp.Position.X,inp.Position.Y); panelStartPos=MainFrame.Position
+end)
+UserInputService.InputChanged:Connect(function(inp)
+    if not panelDragging or inp~=panelTouchId then return end
+    if inp.UserInputType~=Enum.UserInputType.Touch
+    and inp.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    MainFrame.Position=UDim2.new(panelStartPos.X.Scale,panelStartPos.X.Offset+(inp.Position.X-panelDragStart.X),
+        panelStartPos.Y.Scale,panelStartPos.Y.Offset+(inp.Position.Y-panelDragStart.Y))
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp==panelTouchId then panelDragging=false; panelTouchId=nil end
+end)
 
-local screenGui = inst("ScreenGui",{
-    Name="MuscleMasterHub", ResetOnSpawn=false,
-    ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
-    DisplayOrder=99,
-    Parent=Player:WaitForChild("PlayerGui"),
-})
-
-local mainFrame = inst("Frame",{
-    Name="Main", Size=UDim2.new(0,590,0,445),
-    Position=UDim2.new(0.5,-295,0.5,-222),
-    BackgroundColor3=T.BG, BorderSizePixel=0,
-    Parent=screenGui,
-})
-corner(mainFrame, 12)
-
--- Drop shadow (outer glow)
-local shadow = inst("Frame",{
-    Size=UDim2.new(1,12,1,12), Position=UDim2.new(0,-6,0,-6),
-    BackgroundColor3=C(0,0,0), BackgroundTransparency=0.55,
-    BorderSizePixel=0, ZIndex=0, Parent=mainFrame,
-})
-corner(shadow, 14)
-
--- ─── Title bar ────────────────────────────────────────────────────────────────
-local titleBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,38), BackgroundColor3=T.BG2,
-    BorderSizePixel=0, Parent=mainFrame,
-})
-corner(titleBar, 12)
-inst("Frame",{  -- Bottom fill to hide bottom corners
-    Size=UDim2.new(1,0,0,12), Position=UDim2.new(0,0,1,-12),
-    BackgroundColor3=T.BG2, BorderSizePixel=0, Parent=titleBar,
-})
-
--- Accent stripe
-local stripe = inst("Frame",{
-    Size=UDim2.new(0,4,1,-8), Position=UDim2.new(0,8,0,4),
-    BackgroundColor3=T.ACCENT, BorderSizePixel=0, Parent=titleBar,
-})
-corner(stripe, 2)
-
-label(titleBar, "  MUSCLE MASTER HUB",
-    UDim2.new(0,18,0,0), UDim2.new(1,-130,1,0),
-    15, T.TEXT, Enum.Font.GothamBold)
-label(titleBar, "v2.6  — Premium",
-    UDim2.new(0,200,0,0), UDim2.new(0,120,1,0),
-    10, T.TEXTDIM)
-
--- Minimize / Close
-local minimized = false
-local minBtn = inst("TextButton",{
-    Size=UDim2.new(0,28,0,24), Position=UDim2.new(1,-66,0,7),
-    BackgroundColor3=T.BG3, Text="−",
-    TextColor3=T.TEXT, Font=Enum.Font.GothamBold,
-    TextSize=18, BorderSizePixel=0, Parent=titleBar,
-})
-corner(minBtn, 6)
-
-local closeBtn = inst("TextButton",{
-    Size=UDim2.new(0,28,0,24), Position=UDim2.new(1,-32,0,7),
-    BackgroundColor3=C(180,40,40), Text="✕",
-    TextColor3=T.TEXT, Font=Enum.Font.GothamBold,
-    TextSize=13, BorderSizePixel=0, Parent=titleBar,
-})
-corner(closeBtn, 6)
-closeBtn.MouseButton1Click:Connect(function() screenGui:Destroy() end)
-
--- Content area (hidden when minimized)
-local contentArea = inst("Frame",{
-    Size=UDim2.new(1,0,1,-38), Position=UDim2.new(0,0,0,38),
-    BackgroundTransparency=1, BorderSizePixel=0, Parent=mainFrame,
-})
-
+-- Minimise
+local minimized=false
+local minBtn=btn(MainFrame,"−",UDim2.new(1,-30,0,4),UDim2.new(0,24,0,24),C(120,0,0),C(255,255,255),14,8)
+minBtn.ZIndex=10
 minBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    contentArea.Visible = not minimized
-    mainFrame.Size = minimized and UDim2.new(0,590,0,38) or UDim2.new(0,590,0,445)
-    minBtn.Text = minimized and "+" or "−"
-end)
-
--- ─── Drag ─────────────────────────────────────────────────────────────────────
-local dragging=false; local dStart; local fStart
-titleBar.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        dragging=true; dStart=i.Position; fStart=mainFrame.Position end
-end)
-UserInputService.InputChanged:Connect(function(i)
-    if dragging then
-        local d=i.Position-dStart
-        mainFrame.Position=UDim2.new(fStart.X.Scale,fStart.X.Offset+d.X,
-            fStart.Y.Scale,fStart.Y.Offset+d.Y) end
-end)
-UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        dragging=false end
+    minimized=not minimized
+    for _,c in ipairs(MainFrame:GetChildren()) do
+        if c~=minBtn and c.Name~="UICorner" and c:IsA("GuiObject") then c.Visible=not minimized end
+    end
+    minBtn.Text=minimized and "+" or "−"; minBtn.Visible=true
+    MainFrame.Size=minimized and UDim2.new(0,PANEL_W,0,38) or UDim2.new(0,PANEL_W,0,PANEL_H)
 end)
 
 -- ─── Left sidebar ─────────────────────────────────────────────────────────────
-local sidebar = inst("Frame",{
-    Size=UDim2.new(0,128,1,0), BackgroundColor3=T.SIDEBAR,
-    BorderSizePixel=0, Parent=contentArea,
-})
-inst("Frame",{ -- Right border
-    Size=UDim2.new(0,1,1,0), Position=UDim2.new(1,-1,0,0),
-    BackgroundColor3=T.BG3, BorderSizePixel=0, Parent=sidebar,
-})
+local Sidebar=frame(MainFrame,UDim2.new(0,SIDEBAR_W,1,-38),UDim2.new(0,0,0,38),C(18,4,6),0,6)
 
--- ─── Main content area ────────────────────────────────────────────────────────
-local pages = inst("Frame",{
-    Size=UDim2.new(1,-128,1,0), Position=UDim2.new(0,128,0,0),
-    BackgroundTransparency=1, BorderSizePixel=0, Parent=contentArea,
-})
-
--- ─── Status bar ───────────────────────────────────────────────────────────────
-local statusBar = inst("Frame",{
-    Size=UDim2.new(1,-128,0,22), Position=UDim2.new(0,128,1,-22),
-    BackgroundColor3=T.BG2, BorderSizePixel=0, ZIndex=5, Parent=contentArea,
-})
-local statusLbl = label(statusBar, "● Strength: 0  |  Rebirths: 0  |  Pet: ---  |  Status: Ready",
-    UDim2.new(0,8,0,0), UDim2.new(1,-16,1,0), 10, T.TEXTDIM, Enum.Font.Gotham)
-
--- ═══════════════════════════════════════════════════════════════════════════════
---  TAB SYSTEM
--- ═══════════════════════════════════════════════════════════════════════════════
-
-local TABS = {
-    {name="🏠  Main",    key="main"},
-    {name="🐾  Pet Glitch",key="pets"},
-    {name="💪  Training", key="train"},
-    {name="🔄  Rebirth",  key="rebirth"},
-    {name="📐  Size",     key="size"},
-    {name="📍  Teleports",key="tele"},
-    {name="⚙   Settings", key="settings"},
-}
-
-local tabBtns   = {}
-local tabPages  = {}
-local activeTab = "main"
-
-local function switchTab(key)
-    activeTab = key
-    for _, b in pairs(tabBtns) do
-        b.BackgroundColor3 = T.SIDEBAR
-        b.TextColor3 = T.TEXTDIM
-    end
-    for _, p in pairs(tabPages) do p.Visible = false end
-    if tabBtns[key] then
-        tabBtns[key].BackgroundColor3 = T.BG3
-        tabBtns[key].TextColor3 = T.TEXT
-    end
-    if tabPages[key] then tabPages[key].Visible = true end
+lbl(Sidebar,"SUMMON COUNT",UDim2.new(0,6,0,6),UDim2.new(1,-12,0,14),10,C(255,120,120))
+local countBtns={}
+local btnCols={C(160,0,0),C(0,90,160),C(0,130,60),C(160,80,0),C(100,30,160),C(160,90,0),C(0,100,100),C(160,40,100)}
+for i=1,8 do
+    local col=(i-1)%4; local row=math.floor((i-1)/4)
+    local b=btn(Sidebar,tostring(i),UDim2.new(col*0.25,2,0,24+row*30),UDim2.new(0.23,0,0,26),C(50,50,50),C(255,255,255),13,7)
+    countBtns[i]=b
 end
 
--- Create sidebar buttons
-for i, tab in ipairs(TABS) do
-    local btn2 = inst("TextButton",{
-        Size=UDim2.new(1,0,0,36), Position=UDim2.new(0,0,0,(i-1)*36+8),
-        BackgroundColor3=T.SIDEBAR, Text=tab.name,
-        TextColor3=T.TEXTDIM, Font=Enum.Font.GothamSemiBold,
-        TextSize=11, BorderSizePixel=0, TextXAlignment=Enum.TextXAlignment.Left,
-        Parent=sidebar,
-    })
-    pad(btn2, 0, 0, 0, 12)
-    local selBar = inst("Frame",{
-        Size=UDim2.new(0,3,0,20), Position=UDim2.new(0,0,0.5,-10),
-        BackgroundColor3=T.ACCENT, BorderSizePixel=0, Parent=btn2, Visible=false,
-    })
-    tabBtns[tab.key] = btn2
-    btn2.MouseButton1Click:Connect(function()
-        switchTab(tab.key)
-        for _, b in pairs(tabBtns) do
-            local sb = b:FindFirstChild("Frame")
-            if sb then sb.Visible = false end
+-- Info strip
+local infoF=frame(Sidebar,UDim2.new(0.96,0,0,20),UDim2.new(0.02,0,0,90),C(30,6,8),0,6,6)
+lbl(infoF,"cam-relative left · drag · Y-locked · release snaps",
+    UDim2.new(0,0,0,0),UDim2.new(1,0,1,0),9,C(180,120,130),Enum.Font.Fondamento,Enum.TextXAlignment.Center,7)
+
+-- Global yaw/pitch
+lbl(Sidebar,"── ALL SWORDS ──",UDim2.new(0,6,0,118),UDim2.new(1,-12,0,14),10,C(200,100,100))
+local allYawDeg=0; local allPitchDeg=0
+stepper(Sidebar,"All Yaw (deg)",134,
+    function() return allYawDeg end,
+    function() allYawDeg=(allYawDeg+15)%360; for _,sw in ipairs(swords) do if sw.enabled then sw.yaw=math.rad(allYawDeg) end end end,
+    function() allYawDeg=(allYawDeg-15+360)%360; for _,sw in ipairs(swords) do if sw.enabled then sw.yaw=math.rad(allYawDeg) end end end)
+stepper(Sidebar,"All Pitch (deg)",182,
+    function() return allPitchDeg end,
+    function() allPitchDeg=math.clamp(allPitchDeg+15,-80,80); for _,sw in ipairs(swords) do if sw.enabled then sw.pitch=math.rad(allPitchDeg) end end end,
+    function() allPitchDeg=math.clamp(allPitchDeg-15,-80,80); for _,sw in ipairs(swords) do if sw.enabled then sw.pitch=math.rad(allPitchDeg) end end end)
+
+-- Network badge
+lbl(Sidebar,"NETWORK",UDim2.new(0,6,0,240),UDim2.new(1,-12,0,14),10,C(200,100,100))
+local netBadge=frame(Sidebar,UDim2.new(0.9,0,0,20),UDim2.new(0.05,0,0,256),C(0,30,70),0.4,7,5)
+lbl(netBadge,"● Retained · SimRadius 100 000",
+    UDim2.new(0,0,0,0),UDim2.new(1,0,1,0),9,C(80,160,255),Enum.Font.Fondamento,Enum.TextXAlignment.Center,8)
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  TRAIL MODE CONTROLS (sidebar, between network badge and joystick)
+-- ════════════════════════════════════════════════════════════════════════════
+
+-- Divider
+local divider=frame(Sidebar,UDim2.new(0.9,0,0,1),UDim2.new(0.05,0,0,282),C(80,20,30),0,7)
+
+lbl(Sidebar,"── TRAIL MODE ──",UDim2.new(0,6,0,288),UDim2.new(1,-12,0,14),10,C(255,160,80))
+
+-- Trail ON/OFF toggle button
+local trailBtn=btn(Sidebar,"🐍  Snake Trail: OFF",
+    UDim2.new(0,6,0,306),UDim2.new(1,-12,0,30),
+    C(40,40,60),C(180,180,255),12,8)
+
+-- Trail lag stepper (controls spacing between swords)
+local trailLagDisp=stepper(Sidebar,"Trail Lag (frames)",342,
+    function() return TRAIL_LAG end,
+    function() TRAIL_LAG=math.min(TRAIL_LAG+2,60) end,
+    function() TRAIL_LAG=math.max(TRAIL_LAG-2,4) end)
+
+-- Trail status label
+local trailStatusLbl=lbl(Sidebar,"Status  : Inactive",
+    UDim2.new(0,6,0,396),UDim2.new(1,-12,0,14),
+    10,C(180,220,180))
+
+-- Wire the toggle
+trailBtn.MouseButton1Click:Connect(function()
+    TRAIL_MODE = not TRAIL_MODE
+
+    if TRAIL_MODE then
+        -- ── Entering trail mode ───────────────────────────────────────────────
+        trailBtn.Text              = "🐍  Snake Trail: ON"
+        trailBtn.BackgroundColor3  = C(0,140,70)
+        trailStatusLbl.Text        = "Status  : Trail Active"
+        trailStatusLbl.TextColor3  = C(80,255,120)
+
+        -- Kill any active individual sword drags
+        for _, sw in ipairs(swords) do
+            sw.fingerActive = false; sw.fingerTouch = nil
         end
-        selBar.Visible = true
-    end)
-end
+        for _, fd in ipairs(fingerDots) do fd.Visible = false end
+        touchToSword = {}
 
--- Create page frames
-local function newPage(key)
-    local f = inst("ScrollingFrame",{
-        Size=UDim2.new(1,0,1,-22), Position=UDim2.new(0,0,0,0),
-        BackgroundTransparency=1, BorderSizePixel=0,
-        CanvasSize=UDim2.new(0,0,0,1000),
-        ScrollBarThickness=4, ScrollBarImageColor3=T.SCROLLBAR,
-        Visible=false, Parent=pages,
-    })
-    tabPages[key] = f
-    return f
-end
+        -- Seed history at current Sword 1 position (no jumpstart snake)
+        local initPos = swords[1] and swords[1].centerPos
+            or (humanoidRootPart and humanoidRootPart.Position or Vector3.new())
+        initHistory(initPos)
 
--- ═══════════════════════════════════════════════════════════════════════════════
---  PAGE: MAIN (dashboard)
--- ═══════════════════════════════════════════════════════════════════════════════
-local mainPage = newPage("main")
+        -- Reset joystick
+        sjActive = false; sjDelta = Vector2.new()
+        -- JoyKnob will be referenced below — reset via stored ref
+    else
+        -- ── Leaving trail mode ────────────────────────────────────────────────
+        TRAIL_MODE = false
+        trailBtn.Text              = "🐍  Snake Trail: OFF"
+        trailBtn.BackgroundColor3  = C(40,40,60)
+        trailStatusLbl.Text        = "Status  : Inactive"
+        trailStatusLbl.TextColor3  = C(180,220,180)
 
-sectionHeader(mainPage, 8, "📊  LIVE STATUS")
+        -- Drop any active trail touch
+        trailTouchId = nil
+        trailDot.Visible = false
 
-local _, strLbl    = statusBadge(mainPage,  40, "Strength    :  0",       T.BG3)
-local _, rebLbl    = statusBadge(mainPage,  66, "Rebirths    :  0",       T.BG3)
-local _, petLbl    = statusBadge(mainPage,  92, "Pet         :  None",    T.BG3)
-local _, petStatLbl= statusBadge(mainPage, 118, "Pet Stats   :  +0/punch",T.BG3)
-local _, glitchLbl = statusBadge(mainPage, 144, "Glitch XP   :  0",       C(80,0,120))
-local _, sessionLbl= statusBadge(mainPage, 170, "Session     :  0m",      T.BG3)
-local _, scriptLbl = statusBadge(mainPage, 196, "Script      :  Idle",    T.BG3)
-
-divider(mainPage, 226)
-sectionHeader(mainPage, 234, "⚡  QUICK ACTIONS")
-
-createToggle(mainPage, 266, "Auto Punch",   "AutoPunch")
-createToggle(mainPage, 300, "Auto Pushup",  "AutoPushup")
-createToggle(mainPage, 334, "Auto Rebirth", "AutoRebirth")
-createToggle(mainPage, 368, "Auto Pet Glitch", "AutoPetGlitch")
-createToggle(mainPage, 402, "Anti-AFK",     "AntiAFK")
-
--- ═══════════════════════════════════════════════════════════════════════════════
---  PAGE: PET GLITCH
--- ═══════════════════════════════════════════════════════════════════════════════
-local petPage = newPage("pets")
-
-sectionHeader(petPage, 8, "🐾  PET GLITCH SYSTEM")
-
--- Info badges
-local _, warnLbl = statusBadge(petPage, 40,
-    "⚠  Some 2026 patch methods patched — use 'Current' first", T.WARNING)
-warnLbl.TextColor3 = C(20,20,20)
-
-local _, infoLbl = statusBadge(petPage, 66,
-    "ℹ  18,980 rebirths → Muscle King Rock = +95/punch (Unique pet)", C(30,0,80))
-
-divider(petPage, 96)
-sectionHeader(petPage, 104, "METHOD SELECT")
-
-createToggle(petPage, 136, "✅  Current Method (2025+)",  "UseCurrentMethod")
-createToggle(petPage, 170, "📜  Old Method Fallback (pre-2025)", "UseOldMethod")
-
-divider(petPage, 204)
-sectionHeader(petPage, 212, "GLITCH CONFIG")
-
-createToggle(petPage, 244, "🔒  Pet Level Lock (stop at 19)",    "PetLevelLock")
-createToggle(petPage, 278, "🤖  Auto Equip Best Glitch Pet",     "AutoPetGlitch")
-
--- Target rebirth display
-local _, targetRebLbl = statusBadge(petPage, 310,
-    "Target Rebirth : 18980 (Max for Muscle King Rock)", T.BG3)
-
--- Glitchable rebirths quick list (shows nearest above current)
-local _, nearestGlitch = statusBadge(petPage, 336,
-    "Next Glitchable : checking...", T.BG3)
-
-divider(petPage, 366)
-sectionHeader(petPage, 374, "🚀  ONE-CLICK SETUP")
-
-createBtn(petPage, 404, "⚡  MAX GLITCH SETUP  (18,980 + Unique Pet + Muscle King)", 1,
-    function()
-        -- Set optimal config
-        CFG.TargetRebirth    = 18980
-        CFG.UseCurrentMethod = true
-        CFG.UseOldMethod     = false
-        CFG.PetLevelLock     = true
-        -- Teleport to Muscle King Rock
-        local hrp = getHRP()
-        if hrp then hrp.CFrame = TELEPORTS["Muscle King Rock"] end
-        -- Equip best pet
-        local pet = findBestGlitchPet()
-        if pet then equipPetObj(pet) end
-        CFG.AutoPetGlitch = true
-        saveConfig()
-    end, T.PURPLE)
-
-divider(petPage, 442)
-sectionHeader(petPage, 450, "📊  GLITCH STATS (LIVE)")
-
-local _, glitchStatLbl2 = statusBadge(petPage, 480, "Stats gained this session  :  0", T.BG3)
-local _, glitchXPLbl    = statusBadge(petPage, 506, "Pet XP  :  0", T.BG3)
-local _, glitchPetLbl   = statusBadge(petPage, 532, "Active Glitch Pet  :  None", T.BG3)
-local _, glitchActive2  = statusBadge(petPage, 558, "Glitch Status  :  Inactive", T.BG3)
-
--- Full glitchable rebirths list display
-sectionHeader(petPage, 590, "📋  GLITCHABLE REBIRTHS LIST (All)")
-local glitchListLbl = label(petPage,
-    table.concat(GLITCH_REBIRTHS, "  ·  "),
-    UDim2.new(0,8,0,620), UDim2.new(1,-16,0,300),
-    9, T.TEXTDIM, Enum.Font.Gotham)
-glitchListLbl.TextWrapped = true
-
--- ═══════════════════════════════════════════════════════════════════════════════
---  PAGE: TRAINING
--- ═══════════════════════════════════════════════════════════════════════════════
-local trainPage = newPage("train")
-
-sectionHeader(trainPage, 8, "💪  AUTO TRAINING")
-
-createToggle(trainPage, 40,  "⚡  Fast Punch (remove cooldown)", "FastPunch")
-createToggle(trainPage, 74,  "🥊  Auto Punch",                   "AutoPunch")
-createToggle(trainPage, 108, "📍  Lock Position While Punching", "LockPosition",
-    function(v)
-        if v then lockedPos = getHRP() and getHRP().CFrame end
-    end)
-
-createSlider(trainPage, 142, "Punch Speed", "PunchSpeed", 1, 20)
-
-divider(trainPage, 198)
-sectionHeader(trainPage, 206, "🏋️  WORKOUT TOOLS")
-
-createToggle(trainPage, 238, "↕️  Auto Pushup",    "AutoPushup")
-createToggle(trainPage, 272, "🧘  Auto Situp",     "AutoSitup")
-createToggle(trainPage, 306, "🏋  Auto Weight",    "AutoWeight")
-createToggle(trainPage, 340, "🤸  Auto Handstand", "AutoHandstand")
-createToggle(trainPage, 374, "🌟  Auto Best Tool", "BestTool")
-
-createSlider(trainPage, 408, "Train Speed", "TrainSpeed", 1, 20)
-
-divider(trainPage, 464)
-sectionHeader(trainPage, 472, "🔧  TOOL ACTIONS")
-
-createBtn(trainPage, 504, "Equip Best Punch Tool", 0.48, function()
-    equipTool(getBestTool(PUNCH_TOOLS))
-end)
-createBtn(trainPage, 504, "Equip Best Train Tool", 0.48, function()
-    equipTool(getBestTool(TOOL_PRIORITY))
+        -- Cancel return, snap swords to formation immediately
+        cancelReturn()
+        for i, sw in ipairs(swords) do
+            if sw.enabled then
+                sw.centerPos       = getFollowPos(i)
+                sw.anchor.Position = sw.centerPos
+            end
+        end
+    end
 end)
 
--- Note: second button needs X offset — rebuild with manual positions
-local trainBtns = {}
-do
-    local b1 = inst("TextButton",{
-        Size=UDim2.new(0.46,-4,0,28), Position=UDim2.new(0,8,0,504),
-        BackgroundColor3=T.ACCENT, Text="Equip Best Punch",
-        TextColor3=T.TEXT, Font=Enum.Font.GothamBold, TextSize=11,
-        BorderSizePixel=0, Parent=trainPage,
-    })
-    corner(b1, 6)
-    b1.MouseButton1Click:Connect(function() equipTool(getBestTool(PUNCH_TOOLS)) end)
-    local b2 = inst("TextButton",{
-        Size=UDim2.new(0.46,-4,0,28), Position=UDim2.new(0.54,-4,0,504),
-        BackgroundColor3=T.PURPLE, Text="Equip Best Train",
-        TextColor3=T.TEXT, Font=Enum.Font.GothamBold, TextSize=11,
-        BorderSizePixel=0, Parent=trainPage,
-    })
-    corner(b2, 6)
-    b2.MouseButton1Click:Connect(function() equipTool(getBestTool(TOOL_PRIORITY)) end)
-end
+-- ─── Joystick (shifted down to Y=418 to fit trail controls) ──────────────────
+lbl(Sidebar,"ROTATE ALL (DRAG)",UDim2.new(0,6,0,418),UDim2.new(1,-12,0,14),10,C(200,100,100))
+local JoyPanel=frame(Sidebar,UDim2.new(0,110,0,110),UDim2.new(0.5,-55,0,434),C(25,8,10),0.55,7,55)
+local JoyKnob=frame(JoyPanel,UDim2.new(0,36,0,36),UDim2.new(0.5,-18,0.5,-18),C(200,20,30),0,8,18)
 
--- ═══════════════════════════════════════════════════════════════════════════════
---  PAGE: REBIRTH
--- ═══════════════════════════════════════════════════════════════════════════════
-local rebirthPage = newPage("rebirth")
+local sjActive=false; local sjTouch=nil
+local sjDelta=Vector2.new()
+local function clamp2d(v,m) local mg=v.Magnitude; return mg>m and v/mg*m or v end
 
-sectionHeader(rebirthPage, 8, "🔄  AUTO REBIRTH SYSTEM")
-
-createToggle(rebirthPage, 40,  "🔄  Auto Rebirth",          "AutoRebirth")
-createToggle(rebirthPage, 74,  "♾️   Infinite Rebirth Mode", "InfiniteRebirth")
-createToggle(rebirthPage, 108, "⚡  Fast Rebirth (use boosts)", "FastRebirth")
-createToggle(rebirthPage, 142, "🛡️  Rebirth Protection",    "RebirthProtect")
-createToggle(rebirthPage, 176, "💾  Save Extra Strength %", "SaveStrength")
-
-divider(rebirthPage, 210)
-sectionHeader(rebirthPage, 218, "THRESHOLD")
-
-createNumInput(rebirthPage, 250, "Rebirth When Strength ≥", "RebirthAtStrength")
-
-divider(rebirthPage, 288)
-sectionHeader(rebirthPage, 296, "📊  REBIRTH STATS")
-
-local _, rebCountLbl  = statusBadge(rebirthPage, 328, "Rebirths This Session  :  0", T.BG3)
-local _, rebETA       = statusBadge(rebirthPage, 354, "Est. Time to Next  :  --", T.BG3)
-local _, curRebLbl    = statusBadge(rebirthPage, 380, "Current Rebirths  :  0", T.BG3)
-local _, isGlitchLbl  = statusBadge(rebirthPage, 406, "Glitchable  :  Checking...", T.BG3)
-local _, nextGlLbl    = statusBadge(rebirthPage, 432, "Next Glitchable  :  --", T.BG3)
-
-divider(rebirthPage, 462)
-createBtn(rebirthPage, 474, "🔄  REBIRTH NOW (manual)", 1, function()
-    if CFG.RebirthProtect then
-        scriptLbl.Text = "Script : Rebirth blocked (protection ON)"
-        return
+JoyPanel.InputBegan:Connect(function(inp)
+    if (inp.UserInputType==Enum.UserInputType.Touch
+    or  inp.UserInputType==Enum.UserInputType.MouseButton1) and not sjActive then
+        sjActive=true; sjTouch=inp
     end
-    task.spawn(doRebirth)
-end, T.PURPLE)
-
-createBtn(rebirthPage, 510, "📍  Teleport to Muscle King Gym", 1, function()
-    local hrp = getHRP()
-    if hrp then hrp.CFrame = TELEPORTS["Muscle King Rock"] end
-end, T.BG3)
-
--- ═══════════════════════════════════════════════════════════════════════════════
---  PAGE: SIZE
--- ═══════════════════════════════════════════════════════════════════════════════
-local sizePage = newPage("size")
-
-sectionHeader(sizePage, 8, "📐  SIZE SYSTEM")
-
-createToggle(sizePage, 40, "🔄  Auto Set Size", "AutoSize")
-createToggle(sizePage, 74, "🏠  Keep Size After Rebirth", "AutoSize")
-
-divider(sizePage, 108)
-sectionHeader(sizePage, 116, "PRESET SIZES")
-
-local sizePresets = {"Normal","Big","Huge","Max"}
-for i, preset in ipairs(sizePresets) do
-    local x   = (i-1) % 2
-    local y   = math.floor((i-1) / 2)
-    local col = (preset == CFG.TargetSize) and T.ACCENT or T.BG3
-    local sBtn = inst("TextButton",{
-        Size=UDim2.new(0.46,0,0,36),
-        Position=UDim2.new(x==0 and 0.04 or 0.54, 0, 0, 148 + y*44),
-        BackgroundColor3=col, Text=preset.."  ("..tostring(SIZE_PRESETS[preset]).."x)",
-        TextColor3=T.TEXT, Font=Enum.Font.GothamBold, TextSize=12,
-        BorderSizePixel=0, Parent=sizePage,
-    })
-    corner(sBtn, 7)
-    sBtn.MouseButton1Click:Connect(function()
-        CFG.TargetSize = preset
-        for _, b in pairs(sizePage:GetChildren()) do
-            if b:IsA("TextButton") then b.BackgroundColor3 = T.BG3 end
+end)
+UserInputService.InputChanged:Connect(function(inp)
+    if sjActive and inp==sjTouch then
+        local d=Vector2.new(inp.Position.X,inp.Position.Y)
+        local origin=Vector2.new(JoyPanel.AbsolutePosition.X+55,JoyPanel.AbsolutePosition.Y+55)
+        local c=clamp2d(d-origin,45); sjDelta=c
+        JoyKnob.Position=UDim2.new(0.5,c.X-18,0.5,c.Y-18)
+    end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp==sjTouch then
+        sjActive=false; sjTouch=nil; sjDelta=Vector2.new()
+        JoyKnob.Position=UDim2.new(0.5,-18,0.5,-18)
+    end
+end)
+RunService.Heartbeat:Connect(function()
+    if TRAIL_MODE then return end  -- joystick disabled while trail is active
+    if not sjActive then return end
+    for _,sw in ipairs(swords) do
+        if sw.enabled then
+            sw.yaw  =sw.yaw+sjDelta.X*0.018
+            sw.pitch=math.clamp(sw.pitch+sjDelta.Y*0.018,-math.pi*0.88,math.pi*0.88)
         end
-        sBtn.BackgroundColor3 = T.ACCENT
-        applySize(preset)
-        saveConfig()
-    end)
-end
+    end
+    allYawDeg  =math.floor(math.deg(swords[1].yaw)%360+0.5)
+    allPitchDeg=math.floor(math.deg(swords[1].pitch)+0.5)
+end)
 
-divider(sizePage, 238)
-createBtn(sizePage, 250, "⚡  APPLY SIZE NOW", 1, function()
-    applySize(CFG.TargetSize)
-end, T.PURPLE)
+-- Watermark
+lbl(Sidebar,"Devil's Blade v3.1 — Trail Mode",
+    UDim2.new(0,0,1,-18),UDim2.new(1,0,0,16),
+    9,C(140,60,70),Enum.Font.Fondamento,Enum.TextXAlignment.Center,7)
 
--- ═══════════════════════════════════════════════════════════════════════════════
---  PAGE: TELEPORTS
--- ═══════════════════════════════════════════════════════════════════════════════
-local telePage = newPage("tele")
+-- ─── Sword card grid ──────────────────────────────────────────────────────────
+local SWORD_NAMES ={"\u{2160}","\u{2161}","\u{2162}","\u{2163}","\u{2164}","\u{2165}","\u{2166}","\u{2167}"}
+local SWORD_STUDS ={45,49,53,57,61,65,69,73}
+local SWORD_COLORS={C(176,18,34),C(18,105,176),C(15,138,68),C(168,112,16),C(136,48,192),C(192,112,16),C(16,136,136),C(192,64,128)}
 
-sectionHeader(telePage, 8, "📍  TELEPORT LIST")
+local CardGrid=frame(MainFrame,UDim2.new(0,GRID_W,1,-42),UDim2.new(0,SIDEBAR_W+4,0,40),C(12,2,4),0,6)
+local partCountLabels={}
 
-local sortedTeles = {
-    "Spawn","Beach/Green Rock","Jungle Rock","Muscle King Rock",
-    "Legend Gym Rock","Frost Zone","Mythical Zone","Eternal Zone","Ancient Jungle"
-}
-
-for i, tName in ipairs(sortedTeles) do
-    local yy = 40 + (i-1)*44
-    local tBtn = inst("TextButton",{
-        Size=UDim2.new(1,-16,0,34), Position=UDim2.new(0,8,0,yy),
-        BackgroundColor3=T.BG3, Text="📍  "..tName,
-        TextColor3=T.TEXT, Font=Enum.Font.GothamSemiBold, TextSize=12,
-        TextXAlignment=Enum.TextXAlignment.Left,
-        BorderSizePixel=0, Parent=telePage,
-    })
-    corner(tBtn, 6)
-    pad(tBtn, 0, 0, 0, 10)
-    tBtn.MouseEnter:Connect(function()
-        tBtn.BackgroundColor3 = T.BG2
-    end)
-    tBtn.MouseLeave:Connect(function()
-        tBtn.BackgroundColor3 = T.BG3
-    end)
-    tBtn.MouseButton1Click:Connect(function()
-        local hrp = getHRP()
-        if hrp and TELEPORTS[tName] then
-            hrp.CFrame = TELEPORTS[tName]
+for i=1,SWORD_COUNT do
+    local col=(i-1)%GRID_COLS; local row=math.floor((i-1)/GRID_COLS)
+    local cx=CARD_GAP+col*(CARD_W+CARD_GAP); local cy=CARD_GAP+row*(CARD_H+CARD_GAP)
+    local sw=swords[i]; local col3=SWORD_COLORS[i]
+    local card=frame(CardGrid,UDim2.new(0,CARD_W,0,CARD_H),UDim2.new(0,cx,0,cy),C(20,5,8),0,7,10)
+    card.Name="Card"..i
+    local header=frame(card,UDim2.new(1,0,0,22),UDim2.new(0,0,0,0),col3,0,8,10)
+    lbl(header,SWORD_NAMES[i].." · Blade   "..SWORD_STUDS[i].."st",
+        UDim2.new(0,8,0,0),UDim2.new(0.7,-8,1,0),12,C(255,255,255),Enum.Font.Fondamento,Enum.TextXAlignment.Left,9)
+    local pcLbl=lbl(header,"0 pts",UDim2.new(0.72,0,0,0),UDim2.new(0.26,0,1,0),
+        10,C(255,230,230),Enum.Font.Fondamento,Enum.TextXAlignment.Right,9)
+    partCountLabels[i]=pcLbl
+    lbl(card,"Yaw",UDim2.new(0,6,0,24),UDim2.new(0.4,0,0,12),10,C(200,160,160))
+    local yd=btn(card,"−",UDim2.new(0.02,0,0,36),UDim2.new(0.13,0,0,20),C(80,20,0),C(255,220,220),13,5)
+    local yv=Instance.new("TextLabel"); yv.Size=UDim2.new(0.18,0,0,20); yv.Position=UDim2.new(0.16,0,0,36)
+    yv.Text="0°"; yv.BackgroundColor3=C(25,5,5); yv.TextColor3=C(255,200,200)
+    yv.Font=Enum.Font.Fondamento; yv.TextSize=11; yv.BorderSizePixel=0; yv.ZIndex=8; yv.Parent=card
+    Instance.new("UICorner",yv).CornerRadius=UDim.new(0,4)
+    local yu=btn(card,"+",UDim2.new(0.35,0,0,36),UDim2.new(0.13,0,0,20),C(120,20,0),C(255,220,220),13,5)
+    lbl(card,"Pitch",UDim2.new(0.5,0,0,24),UDim2.new(0.4,0,0,12),10,C(200,160,160))
+    local pd=btn(card,"−",UDim2.new(0.52,0,0,36),UDim2.new(0.13,0,0,20),C(80,20,0),C(255,220,220),13,5)
+    local pv=Instance.new("TextLabel"); pv.Size=UDim2.new(0.18,0,0,20); pv.Position=UDim2.new(0.66,0,0,36)
+    pv.Text="0°"; pv.BackgroundColor3=C(25,5,5); pv.TextColor3=C(255,200,200)
+    pv.Font=Enum.Font.Fondamento; pv.TextSize=11; pv.BorderSizePixel=0; pv.ZIndex=8; pv.Parent=card
+    Instance.new("UICorner",pv).CornerRadius=UDim.new(0,4)
+    local pu=btn(card,"+",UDim2.new(0.85,0,0,36),UDim2.new(0.13,0,0,20),C(120,20,0),C(255,220,220),13,5)
+    local snap=btn(card,"⟳ Snap to position",UDim2.new(0.02,0,0,62),UDim2.new(0.96,0,0,20),C(0,50,110),C(120,180,255),10,5)
+    local swYawDeg=0
+    yd.MouseButton1Click:Connect(function() swYawDeg=(swYawDeg-15+360)%360; sw.yaw=math.rad(swYawDeg); yv.Text=swYawDeg.."°" end)
+    yu.MouseButton1Click:Connect(function() swYawDeg=(swYawDeg+15)%360; sw.yaw=math.rad(swYawDeg); yv.Text=swYawDeg.."°" end)
+    local swPitchDeg=0
+    pd.MouseButton1Click:Connect(function() swPitchDeg=math.clamp(swPitchDeg-15,-80,80); sw.pitch=math.rad(swPitchDeg); pv.Text=swPitchDeg.."°" end)
+    pu.MouseButton1Click:Connect(function() swPitchDeg=math.clamp(swPitchDeg+15,-80,80); sw.pitch=math.rad(swPitchDeg); pv.Text=swPitchDeg.."°" end)
+    snap.MouseButton1Click:Connect(function()
+        if humanoidRootPart then
+            local newPos=getFollowPos(sw.slotIndex); local moved=(newPos-sw.centerPos).Magnitude>0.5
+            sw.centerPos=newPos; sw.anchor.Position=newPos
+            if moved then playSound("12221967") end
         end
     end)
 end
 
--- ═══════════════════════════════════════════════════════════════════════════════
---  PAGE: SETTINGS
--- ═══════════════════════════════════════════════════════════════════════════════
-local settingsPage = newPage("settings")
-
-sectionHeader(settingsPage, 8, "⚙  PLAYER SETTINGS")
-
-createSlider(settingsPage, 40, "WalkSpeed", "WalkSpeed", 16, 200, function(v)
-    local h = getHum(); if h then h.WalkSpeed = v end
-end)
-
-createSlider(settingsPage, 96, "JumpPower", "JumpPower", 50, 500, function(v)
-    local h = getHum(); if h then h.JumpPower = v end
-end)
-
-divider(settingsPage, 150)
-sectionHeader(settingsPage, 158, "MISC")
-
-createToggle(settingsPage, 190, "🚫  Noclip",        "Noclip")
-createToggle(settingsPage, 224, "∞   Infinite Jump", "InfiniteJump")
-createToggle(settingsPage, 258, "💤  Anti-AFK",      "AntiAFK")
-
-divider(settingsPage, 292)
-sectionHeader(settingsPage, 300, "💾  CONFIG")
-
-createBtn(settingsPage, 332, "💾  Save Config", 0.46, saveConfig)
-createBtn(settingsPage, 332, "📂  Load Config", 0.46, loadConfig)
-
-do
-    local b1 = inst("TextButton",{
-        Size=UDim2.new(0.46,-4,0,28), Position=UDim2.new(0,8,0,332),
-        BackgroundColor3=T.ACCENT, Text="💾  Save Config",
-        TextColor3=T.TEXT, Font=Enum.Font.GothamBold, TextSize=11,
-        BorderSizePixel=0, Parent=settingsPage,
-    })
-    corner(b1, 6)
-    b1.MouseButton1Click:Connect(saveConfig)
-    local b2 = inst("TextButton",{
-        Size=UDim2.new(0.46,-4,0,28), Position=UDim2.new(0.54,-4,0,332),
-        BackgroundColor3=T.PURPLE, Text="📂  Load Config",
-        TextColor3=T.TEXT, Font=Enum.Font.GothamBold, TextSize=11,
-        BorderSizePixel=0, Parent=settingsPage,
-    })
-    corner(b2, 6)
-    b2.MouseButton1Click:Connect(loadConfig)
-end
-
-sectionHeader(settingsPage, 368, "ℹ  ABOUT")
-local _, aboutLbl = statusBadge(settingsPage, 400,
-    "Muscle Master Hub  v2.6  — Built on researched ML data", T.BG3)
-local _, aboutLbl2 = statusBadge(settingsPage, 426,
-    "18,980 rebirths · Muscle King Rock · +95/punch · Unique pets", T.BG3)
-local _, aboutLbl3 = statusBadge(settingsPage, 452,
-    "Works: Synapse  Fluxus  Delta  Solara  Xeno  Arceus X", T.BG3)
-
--- ═══════════════════════════════════════════════════════════════════════════════
---  LIVE STATUS UPDATE LOOP
--- ═══════════════════════════════════════════════════════════════════════════════
-
--- Set canvas sizes for scrollable pages
-for _, key in ipairs({"main","pets","train","rebirth","size","tele","settings"}) do
-    local p = tabPages[key]
-    if p then p.CanvasSize = UDim2.new(0,0,0,940) end
-end
-tabPages["tele"].CanvasSize = UDim2.new(0,0,0,#sortedTeles*44+60)
-
-local updateClock = 0
+-- Live part count updater
+local _pClock=0
 RunService.Heartbeat:Connect(function(dt)
-    updateClock = updateClock + dt
-    if updateClock < 0.4 then return end
-    updateClock = 0
-
-    local str      = getStat("Strength") or getStat("Muscle") or 0
-    local rebirths = getStat("Rebirths") or 0
-    local elapsed  = os.time() - sessionStart
-    local elapsedM = math.floor(elapsed / 60)
-
-    -- Status bar
-    statusLbl.Text = ("● Str: %s  |  Reb: %d  |  Session: %dm  |  %s"):format(
-        formatNum(str), rebirths,
-        elapsedM,
-        (CFG.AutoPunch or CFG.AutoPushup) and "🟢 Farming" or "⚪ Idle"
-    )
-
-    -- Main page
-    strLbl.Text       = "Strength    :  "..formatNum(str)
-    rebLbl.Text       = "Rebirths    :  "..tostring(rebirths)
-    sessionLbl.Text   = "Session     :  "..elapsedM.."m"
-    glitchLbl.Text    = "Glitch XP   :  "..formatNum(glitchXP)
-
-    local activeFeats = {}
-    if CFG.AutoPunch     then table.insert(activeFeats, "Punch")   end
-    if CFG.AutoPushup    then table.insert(activeFeats, "Pushup")  end
-    if CFG.AutoRebirth   then table.insert(activeFeats, "Rebirth") end
-    if CFG.AutoPetGlitch then table.insert(activeFeats, "Glitch")  end
-    scriptLbl.Text = "Script      :  "..
-        (#activeFeats > 0 and "🟢 "..table.concat(activeFeats,"+") or "⚪ Idle")
-
-    -- Pet status
-    local pets  = Player:FindFirstChild("Pets")
-    local petStr = "None"
-    if pets then
-        local first = pets:GetChildren()[1]
-        if first then
-            petStr = first.Name..(first:FindFirstChild("Level") and " Lv"..first.Level.Value or "")
-        end
-    end
-    petLbl.Text  = "Pet         :  "..petStr
-    petStatLbl.Text = "Pet Stats   :  +"..
-        (isGlitchable(rebirths) and "95/punch ✓" or "? (not glitchable)")
-
-    -- Pet glitch page
-    local glitchStatus = glitchActive and "🟢  ACTIVE" or "⚪  Inactive"
-    glitchActive2.Text    = "Glitch Status  :  "..glitchStatus
-    glitchStatLbl2.Text   = "Stats gained this session  :  "..formatNum(glitchStats)
-    glitchXPLbl.Text      = "Pet XP  :  "..tostring(glitchXP)
-    glitchPetLbl.Text     = "Active Glitch Pet  :  "..(currentGlitchPet and currentGlitchPet.Name or "None")
-    nearestGlitch.Text    = "Next Glitchable  :  "..tostring(nextGlitchable(rebirths))
-    targetRebLbl.Text     = "Target Rebirth  :  "..tostring(CFG.TargetRebirth).." (Max: Muscle King Rock)"
-    isGlitchLbl.Text      = "Current Rebirth "..tostring(rebirths)..
-        (isGlitchable(rebirths) and "  ✅  GLITCHABLE" or "  ❌  not glitchable")
-
-    -- Rebirth page
-    rebCountLbl.Text  = "Rebirths This Session  :  "..tostring(rebirthCount)
-    curRebLbl.Text    = "Current Rebirths  :  "..tostring(rebirths)
-    nextGlLbl.Text    = "Next Glitchable  :  "..tostring(nextGlitchable(rebirths))
-
-    -- Auto size loop
-    if CFG.AutoSize then applySize(CFG.TargetSize) end
-
-    -- WalkSpeed / JumpPower enforcement
-    local h = getHum()
-    if h then
-        if CFG.WalkSpeed ~= 16 then h.WalkSpeed = CFG.WalkSpeed end
-        if CFG.JumpPower ~= 50 then h.JumpPower = CFG.JumpPower end
+    _pClock=_pClock+dt; if _pClock<0.5 then return end; _pClock=0
+    for i,sw in ipairs(swords) do
+        if partCountLabels[i] then partCountLabels[i].Text=(#sw.parts).." pts" end
     end
 end)
 
--- ─── Initial tab ──────────────────────────────────────────────────────────────
-switchTab("main")
+-- Trail status label live updater
+RunService.Heartbeat:Connect(function()
+    if not TRAIL_MODE then return end
+    if trailTouchId then
+        trailStatusLbl.Text       = "Status  : 🟢 Dragging"
+        trailStatusLbl.TextColor3 = C(80,255,120)
+    elseif isReturning then
+        trailStatusLbl.Text       = "Status  : ↩ Returning..."
+        trailStatusLbl.TextColor3 = C(255,200,80)
+    else
+        trailStatusLbl.Text       = "Status  : ● Idle (waiting)"
+        trailStatusLbl.TextColor3 = C(160,160,200)
+    end
+end)
 
--- ─── Done ─────────────────────────────────────────────────────────────────────
-print("╔════════════════════════════════╗")
-print("║  MUSCLE MASTER HUB  v2.6      ║")
-print("║  Loaded. All systems ready.   ║")
-print("║  18,980 rebirths = max glitch ║")
-print("╚════════════════════════════════╝")
+-- ─── Count buttons ────────────────────────────────────────────────────────────
+local function setSwordCount(n)
+    activeSwordCount=n
+    for i=1,SWORD_COUNT do
+        swords[i].enabled=(i<=n)
+        countBtns[i].BackgroundColor3=(i<=n) and btnCols[i] or C(50,50,50)
+        fingerDots[i].Visible=false; swords[i].fingerActive=false
+        swords[i].fingerTouch=nil; swordDragY[i]=nil
+        local card=CardGrid:FindFirstChild("Card"..i)
+        if card then card.BackgroundTransparency=(i<=n) and 0 or 0.55 end
+    end
+    touchToSword={}
+    -- Reset trail state too
+    trailTouchId=nil; trailDot.Visible=false; cancelReturn()
+    resetPartitions()
+    for i=1,n do
+        swords[i].centerPos=getFollowPos(i); swords[i].anchor.Position=swords[i].centerPos
+    end
+    -- Re-seed history to Sword 1's position
+    initHistory(swords[1] and swords[1].centerPos or Vector3.new())
+    playSound("12221967")
+end
+
+for i=1,SWORD_COUNT do countBtns[i].MouseButton1Click:Connect(function() setSwordCount(i) end) end
+
+-- ─── Character respawn ───────────────────────────────────────────────────────
+LocalPlayer.CharacterAdded:Connect(function(nc)
+    character=nc; humanoidRootPart=nc:WaitForChild("HumanoidRootPart"); humanoid=nc:WaitForChild("Humanoid")
+    task.wait(0.1)
+    trailTouchId=nil; trailDot.Visible=false; cancelReturn()
+    for i,sw in ipairs(swords) do
+        if sw.enabled then sw.centerPos=getFollowPos(i); sw.anchor.Position=sw.centerPos end
+    end
+    initHistory(swords[1] and swords[1].centerPos or humanoidRootPart.Position)
+    resetPartitions()
+end)
+
+-- ─── Startup ─────────────────────────────────────────────────────────────────
+pcall(function()
+    local uid=Players:GetUserIdFromNameAsync("DieStupidNinja")
+    local img=Players:GetUserThumbnailAsync(uid,Enum.ThumbnailType.HeadShot,Enum.ThumbnailSize.Size420x420)
+    StarterGui:SetCore("SendNotification",{
+        Title="Devil's Blade v3.1",
+        Text="Trail Mode added · 🐍 Snake Trail toggle in sidebar",
+        Icon=img, Duration=5,
+    })
+end)
+
+setSwordCount(8)
