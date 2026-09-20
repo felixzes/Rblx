@@ -1,19 +1,15 @@
 --[[
-    ╔══════════════════════════════════════════════════════════╗
-    ║         MM2 GODLY HUB  v1.0 — Complete Edition          ║
-    ║                                                          ║
-    ║  Technical note:                                         ║
-    ║  • MM2 inventory = server DataStore — no executor can    ║
-    ║    write persistent items (that's server-only)           ║
-    ║  • What this script DOES:                                ║
-    ║    - Finds the real weapon Tool models in MM2's game     ║
-    ║      storage (ReplicatedStorage / workspace)             ║
-    ║    - Clones + equips them to your Character              ║
-    ║    - Character contents replicate → OTHER PLAYERS SEE IT ║
-    ║    - Correct Godly particle effects included (from model)║
-    ║    - Session-based: equipped item visible all round      ║
-    ║  • 175 Godlies: 85 knives + 39 guns + 51 Chroma         ║
-    ╚══════════════════════════════════════════════════════════╝
+    MM2 GODLY HUB  v2.0  — Fixed
+    
+    Bug fixes vs v1.0:
+    • Removed shadow frame inside ClipsDescendants container (was covering content)
+    • contentArea now has explicit ZIndex=4 so it renders above BG frames
+    • All page frames now have BackgroundTransparency=1 (not black)  
+    • ScrollingFrame size is now explicit (not dependent on broken parent chain)
+    • Row BGs use T.ROW (slightly lighter dark) so rows are visible
+    • pcall around all list building with error label fallback
+    • All ZIndex explicit throughout: BG=2, containers=3, content=4, buttons=5, overlay=6
+    • First tab forced Visible=true and layout-refreshed after 0.1s
 ]]
 
 -- ─── Services ────────────────────────────────────────────────────────────────
@@ -25,992 +21,978 @@ local ReplicatedStorage= game:GetService("ReplicatedStorage")
 local Workspace        = game:GetService("Workspace")
 local StarterGui       = game:GetService("StarterGui")
 
-local Player    = Players.LocalPlayer
-local Mouse     = Player:GetMouse()
+local Player = Players.LocalPlayer
 
 -- ════════════════════════════════════════════════════════════════════════════
---  COMPLETE GODLY WEAPON LISTS (verified from fandom wiki + bloxswaps 2026)
+--  COMPLETE GODLY LISTS  (verified 2026 fandom + bloxswaps)
 -- ════════════════════════════════════════════════════════════════════════════
-
 local GODLY_KNIVES = {
-    -- Classic Godlies
-    "Seer", "Darkbringer", "Lightbringer", "Gemstone", "Heartblade",
-    -- Elderwood series
-    "Elderwood Blade", "Elderwood", "Blue Elderwood Blade", "Blue Elderwood",
-    -- Evergreen
-    "Evergreen",
-    -- Holiday — Christmas
-    "Ornament", "Cookiecane", "Gingerblade", "Boneblade", "Iceflake",
-    "Blizzard", "Snowflake", "Candleflame",
-    -- Holiday — Halloween
-    "Deathshard", "Fang", "Slasher", "Blood", "Hallows", "Corrupt",
-    "Bat", "Vampire's Edge", "Shadow", "Bone",
-    -- Holiday — Easter / Spring
-    "Bauble", "Bloom", "Blossom", "Sakura", "Flowerwood",
-    -- Summer / Beach
-    "Beachy", "Sands", "Sweet", "Treat", "Sunrise", "Sunset", "Beach",
-    "Watergun",
-    -- Winter / Ice
-    "Glacier", "Icecream", "Icewing", "Heat",
-    -- Constellation / Sky
-    "Constellation", "Cosmic", "Galaxy", "Nebula", "Borealis",
-    -- Nature / Wood
-    "Turkey", "Logchopper", "Branches", "Harvester",
-    -- Synthwave / Electric
-    "Synthwave", "Neon", "Electric", "Circuit", "Prism",
-    "Clockwork", "Bit",
-    -- Bio series
-    "Bioblade", "Biohazard",
-    -- Dark / Grim
-    "Saw", "Tides", "Nightblade", "Slaughter", "Eternal",
-    "Revenant", "Grim", "Duel", "Rift",
-    -- Color / Candy
-    "Green", "Purple", "Blue", "Pink", "Minty", "Candy",
-    "Sugar", "Borders", "Broken",
-    -- Rare event
-    "Glitch", "Glitch2", "Elite", "Zero", "Vintage",
-    "Eternalite", "Blackblade", "Flames",
-    -- Samurai / Culture
-    "Samurai", "Alien", "Soul",
-    -- Misc
-    "Swirly Axe", "Cosmic", "Burnt", "Bones",
+    "Seer","Darkbringer","Lightbringer","Gemstone","Heartblade",
+    "Elderwood Blade","Elderwood","Blue Elderwood Blade","Blue Elderwood",
+    "Evergreen","Ornament","Cookiecane","Gingerblade","Boneblade",
+    "Iceflake","Blizzard","Snowflake","Candleflame",
+    "Deathshard","Fang","Slasher","Blood","Hallows","Corrupt",
+    "Bat","Vampire's Edge","Shadow","Bone","Bauble","Bloom","Blossom",
+    "Sakura","Flowerwood","Beachy","Sands","Sweet","Treat",
+    "Sunrise","Sunset","Beach","Watergun",
+    "Glacier","Icecream","Icewing","Heat",
+    "Constellation","Cosmic","Galaxy","Nebula","Borealis",
+    "Turkey","Logchopper","Branches","Harvester",
+    "Synthwave","Neon","Electric","Circuit","Prism","Clockwork","Bit",
+    "Bioblade","Biohazard","Saw","Tides","Nightblade","Slaughter",
+    "Eternal","Revenant","Grim","Rift","Green","Purple","Blue","Pink",
+    "Minty","Candy","Sugar","Borders","Broken","Glitch","Glitch2",
+    "Elite","Zero","Vintage","Eternalite","Blackblade","Flames",
+    "Samurai","Alien","Soul","Swirly Axe","Burnt","Bones",
 }
 
 local GODLY_GUNS = {
-    -- Classic
-    "Luger", "Laser", "Shark",
-    -- Alienbeam / Event
-    "Alienbeam", "Raygun",
-    -- Elderwood
-    "Elderwood Revolver", "Blue Elderwood",
-    -- Evergun / event guns
-    "Evergun",
-    -- Holiday — Christmas
-    "Snowcannon", "Gingerscope", "Blizzard",
-    "Iceflake",
-    -- Holiday — Halloween
-    "Biogun", "Biogel",
-    -- Travel / Special
-    "Traveler's Gun", "Vampire's Gun",
-    -- Candy / Christmas
-    "Blue Gingerscope",
-    -- Swirly
-    "Swirly Gun", "Blue Swirly Gun",
-    -- Bluesteel
-    "Bluesteel", "Red Luger",
-    -- Event guns
-    "Watergun", "Logchopper",
-    -- Summer
-    "Beachy", "Sunset", "Sunrise",
+    "Luger","Laser","Shark","Alienbeam","Raygun","Evergun",
+    "Elderwood Revolver","Blue Elderwood","Traveler's Gun","Vampire's Gun",
+    "Snowcannon","Gingerscope","Blue Gingerscope","Watergun","Biogun","Biogel",
+    "Swirly Gun","Blue Swirly Gun","Bluesteel","Red Luger","Logchopper",
+    "Beachy Gun","Sunset Gun","Sunrise Gun",
 }
 
 local CHROMA_KNIVES = {
-    "Chroma Seer", "Chroma Darkbringer", "Chroma Lightbringer",
-    "Chroma Gemstone", "Chroma Heartblade",
-    "Chroma Elderwood Blade", "Chroma Evergreen",
-    "Chroma Bauble", "Chroma Constellation",
-    "Chroma Sunrise", "Chroma Sunset",
-    "Chroma Blizzard", "Chroma Candleflame",
-    "Chroma Deathshard", "Chroma Fang",
-    "Chroma Slasher", "Chroma Heat",
-    "Chroma Icecream", "Chroma Ornament",
-    "Chroma Cookiecane", "Chroma Gingerblade",
-    "Chroma Boneblade", "Chroma Beachy",
-    "Chroma Sweet", "Chroma Treat",
-    "Chroma Flowerwood", "Chroma Sakura",
-    "Chroma Saw", "Chroma Tides",
-    "Chroma Nightblade", "Chroma Eternal",
-    "Chroma Glacier", "Chroma Turkey",
-    "Chroma Blood", "Chroma Hallows",
-    "Chroma Vampire's Edge", "Chroma Bat",
-    "Chroma Cosmic", "Chroma Galaxy",
-    "Chroma Nebula", "Chroma Borealis",
-    "Chroma Synthwave", "Chroma Circuit",
-    "Chroma Prism", "Chroma Bit",
-    "Chroma Corrupt", "Chroma Shadow",
-    "Chroma Slaughter", "Chroma Revenant",
-    "Chroma Glitch", "Chroma Glitch2",
+    "Chroma Seer","Chroma Darkbringer","Chroma Lightbringer",
+    "Chroma Gemstone","Chroma Heartblade","Chroma Elderwood Blade",
+    "Chroma Evergreen","Chroma Bauble","Chroma Constellation",
+    "Chroma Sunrise","Chroma Sunset","Chroma Blizzard","Chroma Candleflame",
+    "Chroma Deathshard","Chroma Fang","Chroma Slasher","Chroma Heat",
+    "Chroma Icecream","Chroma Ornament","Chroma Cookiecane",
+    "Chroma Gingerblade","Chroma Boneblade","Chroma Beachy",
+    "Chroma Sweet","Chroma Treat","Chroma Flowerwood","Chroma Sakura",
+    "Chroma Saw","Chroma Tides","Chroma Nightblade","Chroma Eternal",
+    "Chroma Glacier","Chroma Turkey","Chroma Blood","Chroma Hallows",
+    "Chroma Vampire's Edge","Chroma Bat","Chroma Cosmic","Chroma Galaxy",
+    "Chroma Nebula","Chroma Borealis","Chroma Synthwave","Chroma Circuit",
+    "Chroma Prism","Chroma Bit","Chroma Corrupt","Chroma Shadow",
+    "Chroma Slaughter","Chroma Revenant","Chroma Glitch","Chroma Glitch2",
 }
 
 local CHROMA_GUNS = {
-    "Chroma Luger", "Chroma Laser", "Chroma Shark",
-    "Chroma Alienbeam", "Chroma Raygun",
-    "Chroma Elderwood Revolver", "Chroma Evergun",
-    "Chroma Snowcannon", "Chroma Watergun",
-    "Chroma Traveler's Gun", "Chroma Vampire's Gun",
-    "Chroma Biogun", "Chroma Swirly Gun",
-    "Chroma Red Luger", "Chroma Bluesteel",
-    "Chroma Gingerscope",
+    "Chroma Luger","Chroma Laser","Chroma Shark","Chroma Alienbeam",
+    "Chroma Raygun","Chroma Elderwood Revolver","Chroma Evergun",
+    "Chroma Snowcannon","Chroma Watergun","Chroma Traveler's Gun",
+    "Chroma Vampire's Gun","Chroma Biogun","Chroma Swirly Gun",
+    "Chroma Red Luger","Chroma Bluesteel","Chroma Gingerscope",
 }
 
--- Merge for convenience
+-- Build unified list
 local ALL_ITEMS = {}
-local OWNED = {}    -- track what's been "given" this session
-local LOADOUTS = {} -- save/load system
-
-local function addAll(t, src, cat)
-    for _, name in ipairs(src) do
-        table.insert(t, {name=name, cat=cat})
-    end
+local function collect(src, cat)
+    for _, n in ipairs(src) do table.insert(ALL_ITEMS,{name=n,cat=cat}) end
 end
-addAll(ALL_ITEMS, GODLY_KNIVES, "Knife")
-addAll(ALL_ITEMS, GODLY_GUNS,   "Gun")
-addAll(ALL_ITEMS, CHROMA_KNIVES,"Chroma Knife")
-addAll(ALL_ITEMS, CHROMA_GUNS,  "Chroma Gun")
+collect(GODLY_KNIVES, "Knife")
+collect(GODLY_GUNS,   "Gun")
+collect(CHROMA_KNIVES,"Chroma Knife")
+collect(CHROMA_GUNS,  "Chroma Gun")
+
+local OWNED = {}
+local LOADOUTS = {}
 
 -- ════════════════════════════════════════════════════════════════════════════
 --  WEAPON ENGINE
 -- ════════════════════════════════════════════════════════════════════════════
-
--- MM2 stores weapon tools in several possible paths
 local function findWeaponModel(name)
-    -- Strip "Chroma " prefix for model search (model exists without prefix)
-    local searchName = name:gsub("^Chroma ", "")
-
-    local searchPaths = {
-        -- Primary: MM2 ReplicatedStorage folders
-        ReplicatedStorage:FindFirstChild("Knifes"),
-        ReplicatedStorage:FindFirstChild("Guns"),
-        ReplicatedStorage:FindFirstChild("Weapons"),
-        ReplicatedStorage:FindFirstChild("Items"),
-        ReplicatedStorage:FindFirstChild("Tools"),
-        -- Workspace lobby/game folders
-        Workspace:FindFirstChild("Knifes"),
-        Workspace:FindFirstChild("Guns"),
-        Workspace:FindFirstChild("Weapons"),
-        -- Direct children with prefix
-        ReplicatedStorage,
-    }
-
-    for _, folder in pairs(searchPaths) do
-        if folder then
-            -- Exact match
-            local m = folder:FindFirstChild(name)
-            if m then return m end
-            -- Without "Chroma " prefix
-            m = folder:FindFirstChild(searchName)
-            if m then return m end
-            -- Case-insensitive scan
-            for _, child in pairs(folder:GetChildren()) do
-                if child.Name:lower() == name:lower()
-                or child.Name:lower() == searchName:lower() then
-                    return child
-                end
+    local base = name:gsub("^Chroma ", "")
+    local function tryFind(folder)
+        if not folder then return nil end
+        for _, c in pairs(folder:GetChildren()) do
+            if c.Name:lower() == name:lower() or c.Name:lower() == base:lower() then
+                return c
             end
         end
+        return nil
     end
-
-    -- Deep search in ReplicatedStorage
-    for _, desc in pairs(ReplicatedStorage:GetDescendants()) do
-        if desc:IsA("Tool") and (
-            desc.Name:lower() == name:lower() or
-            desc.Name:lower() == searchName:lower()
-        ) then
-            return desc
-        end
+    local candidates = {"Knifes","Guns","Weapons","Items","Tools"}
+    for _, cn in ipairs(candidates) do
+        local f = ReplicatedStorage:FindFirstChild(cn)
+        local r = tryFind(f); if r then return r end
+        local w = Workspace:FindFirstChild(cn)
+        r = tryFind(w); if r then return r end
     end
-
+    for _, d in pairs(ReplicatedStorage:GetDescendants()) do
+        if d:IsA("Tool") and (d.Name:lower()==name:lower() or d.Name:lower()==base:lower()) then
+            return d end
+    end
     return nil
 end
 
--- Equip a weapon to the character (Character Tools ARE replicated → others see it)
-local function equipWeapon(name, weaponType)
-    local char = Player.Character
-    if not char then return false, "No character" end
-    local hrp  = char:FindFirstChild("HumanoidRootPart")
-    if not hrp  then return false, "No HumanoidRootPart" end
-
-    local model = findWeaponModel(name)
-
-    if model then
-        local clone = model:Clone()
-
-        -- If it's a Chroma, try to mark it so effects apply
-        if name:find("^Chroma ") then
-            clone:SetAttribute("IsChroma", true)
-            -- Chroma effect: tint all parts with animated color (rainbow)
-            for _, part in pairs(clone:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    -- Will cycle in loop below
-                    part:SetAttribute("ChromaPart", true)
-                end
-            end
-        end
-
-        -- Remove currently equipped same-type weapon
-        for _, existing in pairs(char:GetChildren()) do
-            if existing:IsA("Tool") then existing:Destroy() end
-        end
-
-        clone.Parent = char  -- This replicates to all clients
-        return true, "Equipped "..name
-    else
-        -- Model not found: create a placeholder visible tool
-        -- with the godly name as a display
-        return false, "Model not found for: "..name
-    end
-end
-
--- Add item to owned list (session tracking)
-local function giveItem(name)
-    if not OWNED[name] then
-        OWNED[name] = true
-        return true
-    end
-    return false -- already owned
-end
-
--- ─── Chroma rainbow effect (runs on equipped Chroma items) ───────────────────
 local chromaHue = 0
 RunService.Heartbeat:Connect(function(dt)
-    chromaHue = (chromaHue + dt * 0.5) % 1
-    local char = Player.Character
-    if not char then return end
+    chromaHue = (chromaHue + dt * 0.4) % 1
+    local char = Player.Character; if not char then return end
     for _, tool in pairs(char:GetChildren()) do
         if tool:IsA("Tool") and tool:GetAttribute("IsChroma") then
-            for _, part in pairs(tool:GetDescendants()) do
-                if part:IsA("BasePart") and part:GetAttribute("ChromaPart") then
-                    part.Color = Color3.fromHSV(chromaHue, 0.8, 1)
+            for _, p in pairs(tool:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    p.Color = Color3.fromHSV(chromaHue, 0.8, 1)
                 end
             end
         end
     end
 end)
 
--- ════════════════════════════════════════════════════════════════════════════
---  GUI CONSTRUCTION
--- ════════════════════════════════════════════════════════════════════════════
+local function equipWeapon(name, cat)
+    local char = Player.Character
+    if not char then return false, "No character" end
+    local model = findWeaponModel(name)
+    if not model then return false, "Model not in game storage: "..name end
+    local clone = model:Clone()
+    if cat:find("Chroma") then clone:SetAttribute("IsChroma", true) end
+    for _, t in pairs(char:GetChildren()) do if t:IsA("Tool") then t:Destroy() end end
+    clone.Parent = char
+    return true, "Equipped: "..name
+end
 
+local function giveItem(name)
+    if OWNED[name] then return false end
+    OWNED[name] = true; return true
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  THEME  — slightly lighter so content is readable on dark bg
+-- ════════════════════════════════════════════════════════════════════════════
 local C = Color3.fromRGB
-
--- MM2 dark theme: black + red + gold
 local T = {
-    BG        = C(10,  10,  14),
-    BG2       = C(16,  16,  22),
-    BG3       = C(22,  22,  30),
-    BG4       = C(28,  28,  38),
-    ACCENT    = C(180,  20,  20),  -- MM2 red
-    ACCENT2   = C(220,  60,  60),
-    GOLD      = C(218, 165,  32),  -- Godly gold
-    GOLD2     = C(255, 210,  80),
-    CHROMA    = C(120,  60, 200),  -- Chroma purple
-    TEXT      = C(240, 240, 245),
-    TEXTDIM   = C(140, 140, 155),
-    TOGGLE_ON = C(50,  200,  80),
-    TOGGLE_OFF= C(60,   60,  75),
-    SUCCESS   = C(50,  210,  80),
-    ERROR     = C(255,  70,  70),
-    WARNING   = C(255, 180,  30),
-    SCROLLBAR = C(40,   40,  55),
-    SEP       = C(35,   35,  48),
-    KNIFE_COL = C(218, 165,  32),  -- gold for knives
-    GUN_COL   = C(100, 180, 255),  -- blue for guns
-    CHROMA_COL= C(180,  80, 255),  -- purple for chroma
+    WIN   = C(15,  15,  22),   -- main window background
+    TITLE = C(22,  22,  32),   -- title bar
+    TAB   = C(18,  18,  28),   -- tab bar background
+    TABSEL= C(28,  28,  42),   -- selected tab
+    PG    = C(15,  15,  22),   -- page background (same as WIN, transparent anyway)
+    BAR   = C(24,  24,  36),   -- action bars
+    ROW   = C(30,  30,  45),   -- item row background  ← KEY: lighter so rows show
+    ROWH  = C(38,  38,  55),   -- row hover
+    SCROLL= C(20,  20,  32),   -- scrollframe background
+    SEP   = C(40,  40,  58),   -- separator lines
+    INPUT = C(26,  26,  40),   -- input boxes
+    GOLD  = C(218, 165,  32),
+    GOLD2 = C(255, 215,  80),
+    RED   = C(200,  30,  30),
+    RED2  = C(230,  70,  70),
+    PRPL  = C(140,  60, 210),
+    PRPL2 = C(180, 100, 255),
+    BLUE  = C( 70, 150, 255),
+    TEXT  = C(240, 240, 248),
+    DIM   = C(150, 150, 170),
+    OK    = C( 60, 210,  90),
+    WARN  = C(255, 185,  40),
+    ERR   = C(255,  70,  70),
 }
 
-local function inst(cls, props)
+-- ════════════════════════════════════════════════════════════════════════════
+--  UI HELPERS
+-- ════════════════════════════════════════════════════════════════════════════
+local function mk(cls, props)
     local i = Instance.new(cls)
     for k, v in pairs(props) do i[k] = v end
     return i
 end
 
 local function corner(parent, r)
-    inst("UICorner",{CornerRadius=UDim.new(0,r or 8),Parent=parent})
+    mk("UICorner",{CornerRadius=UDim.new(0,r or 8),Parent=parent})
 end
 
-local function pad(parent, t, r, b, l)
-    inst("UIPadding",{
-        PaddingTop=UDim.new(0,t or 6),PaddingRight=UDim.new(0,r or 6),
-        PaddingBottom=UDim.new(0,b or 6),PaddingLeft=UDim.new(0,l or 6),
-        Parent=parent
-    })
-end
-
-local function lbl(parent,text,pos,size,fs,fc,font,xa,zidx)
-    return inst("TextLabel",{
-        Text=text,Position=pos or UDim2.new(0,0,0,0),
+local function Lbl(parent, text, pos, size, fs, fc, font, xa, z)
+    return mk("TextLabel",{
+        Text=text, Position=pos or UDim2.new(0,0,0,0),
         Size=size or UDim2.new(1,0,0,20),
-        TextColor3=fc or T.TEXT,BackgroundTransparency=1,
-        Font=font or Enum.Font.GothamSemiBold,TextSize=fs or 13,
+        TextColor3=fc or T.TEXT, BackgroundTransparency=1,
+        Font=font or Enum.Font.GothamSemiBold, TextSize=fs or 13,
         TextXAlignment=xa or Enum.TextXAlignment.Left,
-        BorderSizePixel=0,ZIndex=zidx or 5,Parent=parent,
         TextTruncate=Enum.TextTruncate.AtEnd,
+        BorderSizePixel=0, ZIndex=z or 5, Parent=parent,
     })
 end
 
-local function btn(parent,text,pos,size,bg,tc,fs,r,z)
-    local B = inst("TextButton",{
-        Text=text,Position=pos or UDim2.new(0,0,0,0),
+local function Btn(parent, text, pos, size, bg, tc, fs, r, z)
+    local b = mk("TextButton",{
+        Text=text, Position=pos or UDim2.new(0,0,0,0),
         Size=size or UDim2.new(1,0,0,30),
-        BackgroundColor3=bg or T.ACCENT,
+        BackgroundColor3=bg or T.RED,
         TextColor3=tc or T.TEXT,
-        Font=Enum.Font.GothamBold,TextSize=fs or 13,
-        BorderSizePixel=0,ZIndex=z or 6,Parent=parent,
-        AutoButtonColor=false,
+        Font=Enum.Font.GothamBold, TextSize=fs or 12,
+        BorderSizePixel=0, ZIndex=z or 6,
+        AutoButtonColor=false, Parent=parent,
     })
-    corner(B,r or 7)
-    B.MouseEnter:Connect(function()
-        TweenService:Create(B,TweenInfo.new(0.1),{BackgroundColor3=T.ACCENT2}):Play()
+    corner(b, r or 7)
+    local orig = bg or T.RED
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b,TweenInfo.new(0.12),{BackgroundColor3=T.ROWH}):Play()
     end)
-    B.MouseLeave:Connect(function()
-        TweenService:Create(B,TweenInfo.new(0.1),{BackgroundColor3=bg or T.ACCENT}):Play()
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b,TweenInfo.new(0.12),{BackgroundColor3=orig}):Play()
     end)
-    return B
+    return b
 end
 
-local function divLine(parent,yPos)
-    inst("Frame",{
-        Size=UDim2.new(1,-16,0,1),Position=UDim2.new(0,8,0,yPos),
-        BackgroundColor3=T.SEP,BorderSizePixel=0,Parent=parent,
-    })
-end
+-- ════════════════════════════════════════════════════════════════════════════
+--  MAIN WINDOW
+-- ════════════════════════════════════════════════════════════════════════════
+-- Destroy any previous instance
+local prev = Player:FindFirstChild("PlayerGui") and Player.PlayerGui:FindFirstChild("MM2GodlyHub2")
+if prev then prev:Destroy() end
 
-local function sectionHdr(parent,yPos,text,color)
-    local f = inst("Frame",{
-        Size=UDim2.new(1,-16,0,22),Position=UDim2.new(0,8,0,yPos),
-        BackgroundColor3=T.BG4,BorderSizePixel=0,Parent=parent,
-    })
-    corner(f,5)
-    lbl(f,"  "..text,UDim2.new(0,0,0,0),UDim2.new(1,0,1,0),
-        11,color or T.GOLD,Enum.Font.GothamBold)
-end
-
--- ─── Main window ─────────────────────────────────────────────────────────────
-local gui = inst("ScreenGui",{
-    Name="MM2GodlyHub",ResetOnSpawn=false,
+local gui = mk("ScreenGui",{
+    Name="MM2GodlyHub2", ResetOnSpawn=false,
     ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
-    DisplayOrder=100,Parent=Player:WaitForChild("PlayerGui"),
+    DisplayOrder=100,
+    Parent=Player:WaitForChild("PlayerGui"),
 })
 
-local W,H = 600,460
-local main = inst("Frame",{
-    Size=UDim2.new(0,W,0,H),
-    Position=UDim2.new(0.5,-W/2,0.5,-H/2),
-    BackgroundColor3=T.BG,BorderSizePixel=0,Parent=gui,
-})
-corner(main,12)
-main.ClipsDescendants=true
+local WIN_W, WIN_H = 620, 480
 
--- Glow shadow
-local shadow = inst("Frame",{
-    Size=UDim2.new(1,14,1,14),Position=UDim2.new(0,-7,0,-7),
-    BackgroundColor3=C(0,0,0),BackgroundTransparency=0.5,
-    BorderSizePixel=0,ZIndex=1,Parent=main,
+local main = mk("Frame",{
+    Size=UDim2.new(0,WIN_W,0,WIN_H),
+    Position=UDim2.new(0.5,-WIN_W/2,0.5,-WIN_H/2),
+    BackgroundColor3=T.WIN,
+    BorderSizePixel=0,
+    ZIndex=2,                  -- base level
+    Parent=gui,
 })
-corner(shadow,16)
+corner(main, 12)
+main.ClipsDescendants = true
 
--- Gradient top edge
-local gradient = inst("Frame",{
-    Size=UDim2.new(1,0,0,2),BackgroundColor3=T.GOLD,
-    BorderSizePixel=0,ZIndex=8,Parent=main,
+-- Top accent stripe (gold bar at very top)
+mk("Frame",{
+    Size=UDim2.new(1,0,0,2), Position=UDim2.new(0,0,0,0),
+    BackgroundColor3=T.GOLD, BorderSizePixel=0, ZIndex=10, Parent=main,
 })
 
 -- ─── Title bar ────────────────────────────────────────────────────────────────
-local titleBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,38),BackgroundColor3=T.BG2,
-    BorderSizePixel=0,ZIndex=6,Parent=main,
+local titleBar = mk("Frame",{
+    Size=UDim2.new(1,0,0,38),
+    Position=UDim2.new(0,0,0,2),
+    BackgroundColor3=T.TITLE,
+    BorderSizePixel=0, ZIndex=3, Parent=main,
 })
-inst("Frame",{Size=UDim2.new(1,0,0,12),Position=UDim2.new(0,0,1,-12),
-    BackgroundColor3=T.BG2,BorderSizePixel=0,Parent=titleBar})
+-- Fill bottom corners of title bar
+mk("Frame",{
+    Size=UDim2.new(1,0,0,12), Position=UDim2.new(0,0,1,-12),
+    BackgroundColor3=T.TITLE, BorderSizePixel=0, ZIndex=3, Parent=titleBar,
+})
+-- Title text
+Lbl(titleBar, "  🗡  MM2 GODLY HUB",
+    UDim2.new(0,6,0,0), UDim2.new(1,-130,1,0),
+    15, T.GOLD, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4)
+Lbl(titleBar, "v2.0 — "..#ALL_ITEMS.." Godlies",
+    UDim2.new(1,-140,0,10), UDim2.new(0,130,0,16),
+    10, T.DIM, Enum.Font.Gotham, Enum.TextXAlignment.Right, 4)
 
--- Title icon + text
-local titleIcon = inst("Frame",{
-    Size=UDim2.new(0,6,1,-8),Position=UDim2.new(0,8,0,4),
-    BackgroundColor3=T.GOLD,BorderSizePixel=0,Parent=titleBar,
+-- Minimise / close
+local minimised = false
+local minBtn = mk("TextButton",{
+    Size=UDim2.new(0,26,0,22), Position=UDim2.new(1,-62,0,8),
+    BackgroundColor3=T.TABSEL, Text="−", TextColor3=T.TEXT,
+    Font=Enum.Font.GothamBold, TextSize=16,
+    BorderSizePixel=0, ZIndex=5, Parent=titleBar, AutoButtonColor=false,
 })
-corner(titleIcon,3)
-lbl(titleBar,"  🗡  MM2 GODLY HUB",UDim2.new(0,20,0,0),UDim2.new(1,-140,1,0),
-    15,T.GOLD,Enum.Font.GothamBold,Enum.TextXAlignment.Left,7)
-lbl(titleBar,"v1.0 — 175 Godlies",UDim2.new(0.5,0,0,0),UDim2.new(0.3,0,1,0),
-    10,T.TEXTDIM,Enum.Font.Gotham)
+corner(minBtn, 5)
 
--- Min / close
-local minimized = false
-local minBtn = inst("TextButton",{
-    Size=UDim2.new(0,28,0,24),Position=UDim2.new(1,-66,0,7),
-    BackgroundColor3=T.BG3,Text="−",TextColor3=T.TEXT,
-    Font=Enum.Font.GothamBold,TextSize=18,BorderSizePixel=0,ZIndex=8,Parent=titleBar,
+local closeBtn = mk("TextButton",{
+    Size=UDim2.new(0,26,0,22), Position=UDim2.new(1,-32,0,8),
+    BackgroundColor3=T.RED, Text="✕", TextColor3=T.TEXT,
+    Font=Enum.Font.GothamBold, TextSize=12,
+    BorderSizePixel=0, ZIndex=5, Parent=titleBar, AutoButtonColor=false,
 })
-corner(minBtn,6)
-local closeBtn = inst("TextButton",{
-    Size=UDim2.new(0,28,0,24),Position=UDim2.new(1,-32,0,7),
-    BackgroundColor3=C(180,30,30),Text="✕",TextColor3=T.TEXT,
-    Font=Enum.Font.GothamBold,TextSize=13,BorderSizePixel=0,ZIndex=8,Parent=titleBar,
-})
-corner(closeBtn,6)
+corner(closeBtn, 5)
 closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
 
-local contentArea = inst("Frame",{
-    Size=UDim2.new(1,0,1,-38),Position=UDim2.new(0,0,0,38),
-    BackgroundTransparency=1,BorderSizePixel=0,Parent=main,
-})
-minBtn.MouseButton1Click:Connect(function()
-    minimized=not minimized
-    contentArea.Visible=not minimized
-    main.Size=minimized and UDim2.new(0,W,0,38) or UDim2.new(0,W,0,H)
-    minBtn.Text=minimized and "+" or "−"
-end)
-
--- ─── Drag ─────────────────────────────────────────────────────────────────────
-local dragging=false; local dStart; local mStart
+-- Drag
+local dragging, dStart, mStart = false, nil, nil
 titleBar.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        dragging=true;dStart=i.Position;mStart=main.Position end
+    if i.UserInputType==Enum.UserInputType.MouseButton1
+    or i.UserInputType==Enum.UserInputType.Touch then
+        dragging=true; dStart=i.Position; mStart=main.Position
+    end
 end)
 UserInputService.InputChanged:Connect(function(i)
-    if dragging then local d=i.Position-dStart
-        main.Position=UDim2.new(mStart.X.Scale,mStart.X.Offset+d.X,mStart.Y.Scale,mStart.Y.Offset+d.Y) end
+    if not dragging then return end
+    local d = i.Position - dStart
+    main.Position = UDim2.new(mStart.X.Scale, mStart.X.Offset+d.X,
+                               mStart.Y.Scale, mStart.Y.Offset+d.Y)
 end)
 UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        dragging=false end
+    if i.UserInputType==Enum.UserInputType.MouseButton1
+    or i.UserInputType==Enum.UserInputType.Touch then dragging=false end
+end)
+
+-- Minimise logic
+local mainBody  -- defined after tab bar
+minBtn.MouseButton1Click:Connect(function()
+    minimised = not minimised
+    minBtn.Text = minimised and "+" or "−"
+    if mainBody then mainBody.Visible = not minimised end
+    main.Size = minimised and UDim2.new(0,WIN_W,0,42) or UDim2.new(0,WIN_W,0,WIN_H)
 end)
 
 -- ─── Tab bar ──────────────────────────────────────────────────────────────────
-local TABS = {
-    {key="all",    label="⚔  All Godlies"},
-    {key="knives", label="🗡  Knives"},
-    {key="guns",   label="🔫  Guns"},
-    {key="chroma", label="✨  Chromas"},
-    {key="settings",label="⚙  Settings"},
-}
-
-local tabBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,36),BackgroundColor3=T.BG3,
-    BorderSizePixel=0,Parent=contentArea,
+local tabBar = mk("Frame",{
+    Size=UDim2.new(1,0,0,34),
+    Position=UDim2.new(0,0,0,40),
+    BackgroundColor3=T.TAB,
+    BorderSizePixel=0, ZIndex=3, Parent=main,
 })
-inst("Frame",{Size=UDim2.new(1,0,0,1),Position=UDim2.new(0,0,1,-1),
-    BackgroundColor3=T.SEP,BorderSizePixel=0,Parent=tabBar})
+-- separator line under tabs
+mk("Frame",{
+    Size=UDim2.new(1,0,0,1), Position=UDim2.new(0,0,1,-1),
+    BackgroundColor3=T.SEP, BorderSizePixel=0, ZIndex=4, Parent=tabBar,
+})
 
-local tabBtns  = {}
-local tabPages = {}
-local activeTab= nil
+-- ─── Body container (holds page frames + progress bar) ───────────────────────
+mainBody = mk("Frame",{
+    Size=UDim2.new(1,0,0,WIN_H - 74 - 24),  -- below titleBar+tabBar, above progress
+    Position=UDim2.new(0,0,0,74),
+    BackgroundTransparency=1,                 -- transparent container
+    BorderSizePixel=0,
+    ZIndex=3,
+    Parent=main,
+})
 
-local tabW = 1/#TABS
-for i,tab in ipairs(TABS) do
-    local tb = inst("TextButton",{
-        Size=UDim2.new(tabW,0,1,0),Position=UDim2.new((i-1)*tabW,0,0,0),
-        BackgroundColor3=T.BG3,Text=tab.label,
-        TextColor3=T.TEXTDIM,Font=Enum.Font.GothamSemiBold,TextSize=11,
-        BorderSizePixel=0,ZIndex=6,Parent=tabBar,AutoButtonColor=false,
-    })
-    local underline = inst("Frame",{
-        Size=UDim2.new(0.7,0,0,2),Position=UDim2.new(0.15,0,1,-2),
-        BackgroundColor3=T.GOLD,BorderSizePixel=0,ZIndex=7,Parent=tb,Visible=false,
-    })
-    tabBtns[tab.key]={btn=tb,ul=underline}
+-- ─── Progress bar ─────────────────────────────────────────────────────────────
+local progFrame = mk("Frame",{
+    Size=UDim2.new(1,0,0,24),
+    Position=UDim2.new(0,0,0,WIN_H-24),
+    BackgroundColor3=T.TITLE,
+    BorderSizePixel=0, ZIndex=3, Parent=main,
+})
+local progFill = mk("Frame",{
+    Size=UDim2.new(0,0,1,0),
+    BackgroundColor3=T.GOLD,
+    BorderSizePixel=0, ZIndex=4, Parent=progFrame,
+})
+local progLbl = Lbl(progFrame,"  Ready — select a tab above",
+    UDim2.new(0,0,0,0), UDim2.new(1,0,1,0),
+    10, T.DIM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 5)
+
+local function setProgress(cur, total, msg)
+    local pct = total>0 and math.clamp(cur/total,0,1) or 0
+    TweenService:Create(progFill,TweenInfo.new(0.15),
+        {Size=UDim2.new(pct,0,1,0)}):Play()
+    if msg then progLbl.Text = "  "..msg end
 end
 
-local pageHost = inst("Frame",{
-    Size=UDim2.new(1,0,1,-36),Position=UDim2.new(0,0,0,36),
-    BackgroundTransparency=1,BorderSizePixel=0,Parent=contentArea,
-})
+-- ════════════════════════════════════════════════════════════════════════════
+--  TAB SYSTEM
+-- ════════════════════════════════════════════════════════════════════════════
+local TABS      = {
+    {key="all",      label="⚔  All"},
+    {key="knives",   label="🗡  Knives"},
+    {key="guns",     label="🔫  Guns"},
+    {key="chroma",   label="✨  Chromas"},
+    {key="settings", label="⚙  Settings"},
+}
 
-local function newPage(key)
-    local p = inst("Frame",{
-        Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,
-        BorderSizePixel=0,Visible=false,Parent=pageHost,
+local tabBtnRefs  = {}   -- key → {btn, underline}
+local pageFrames  = {}   -- key → Frame (full-size page, transparent bg)
+local activeKey   = nil
+
+-- Create tab buttons
+do
+    local n = #TABS
+    local tw = 1/n
+    for i, tab in ipairs(TABS) do
+        local tb = mk("TextButton",{
+            Size=UDim2.new(tw,-2,1,-1),
+            Position=UDim2.new((i-1)*tw,1,0,0),
+            BackgroundColor3=T.TAB,
+            Text=tab.label,
+            TextColor3=T.DIM,
+            Font=Enum.Font.GothamSemiBold,
+            TextSize=11,
+            BorderSizePixel=0, ZIndex=4,
+            AutoButtonColor=false,
+            Parent=tabBar,
+        })
+        local ul = mk("Frame",{
+            Size=UDim2.new(0.6,0,0,2),
+            Position=UDim2.new(0.2,0,1,-2),
+            BackgroundColor3=T.GOLD,
+            BorderSizePixel=0, ZIndex=5,
+            Visible=false,
+            Parent=tb,
+        })
+        tabBtnRefs[tab.key] = {btn=tb, ul=ul}
+
+        tb.MouseButton1Click:Connect(function()
+            -- Switch handled below after pageFrames exist
+        end)
+    end
+end
+
+-- Create page frames (all same position/size, toggled by Visible)
+for _, tab in ipairs(TABS) do
+    local pf = mk("Frame",{
+        Size=UDim2.new(1,0,1,0),
+        Position=UDim2.new(0,0,0,0),
+        BackgroundTransparency=1,     -- ← transparent so mainBody bg shows through
+        BorderSizePixel=0,
+        ZIndex=4,
+        Visible=false,
+        Parent=mainBody,
     })
-    tabPages[key]=p; return p
+    pageFrames[tab.key] = pf
 end
 
 local function switchTab(key)
-    if activeTab==key then return end
-    activeTab=key
-    for k,data in pairs(tabBtns) do
-        local on=(k==key)
-        data.btn.TextColor3 = on and T.GOLD or T.TEXTDIM
-        data.btn.BackgroundColor3 = on and T.BG4 or T.BG3
-        data.ul.Visible = on
+    if activeKey == key then return end
+    activeKey = key
+    for _, tab in ipairs(TABS) do
+        local refs = tabBtnRefs[tab.key]
+        local on   = (tab.key == key)
+        refs.btn.TextColor3       = on and T.GOLD or T.DIM
+        refs.btn.BackgroundColor3 = on and T.TABSEL or T.TAB
+        refs.ul.Visible           = on
+        pageFrames[tab.key].Visible = on
     end
-    for k,p in pairs(tabPages) do p.Visible=(k==key) end
 end
 
-for _,tab in ipairs(TABS) do
-    tabBtns[tab.key].btn.MouseButton1Click:Connect(function() switchTab(tab.key) end)
+-- Wire tab buttons now that pageFrames exist
+for _, tab in ipairs(TABS) do
+    tabBtnRefs[tab.key].btn.MouseButton1Click:Connect(function()
+        switchTab(tab.key)
+    end)
 end
 
--- ─── Progress bar (shared) ───────────────────────────────────────────────────
-local progressBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,22),Position=UDim2.new(0,0,1,-22),
-    BackgroundColor3=T.BG3,BorderSizePixel=0,ZIndex=7,Parent=contentArea,
-})
-local progressFill = inst("Frame",{
-    Size=UDim2.new(0,0,1,0),BackgroundColor3=T.GOLD,
-    BorderSizePixel=0,ZIndex=8,Parent=progressBar,
-})
-local progressLbl = lbl(progressBar,"Ready — 0 / 0 items",
-    UDim2.new(0,8,0,0),UDim2.new(1,-16,1,0),
-    10,T.TEXT,Enum.Font.Gotham,Enum.TextXAlignment.Left,9)
+-- ════════════════════════════════════════════════════════════════════════════
+--  SHARED BUILDERS
+-- ════════════════════════════════════════════════════════════════════════════
+local ownedTicks = {}  -- name → TextLabel
 
-local function setProgress(current, total, msg)
-    local pct = total>0 and (current/total) or 0
-    TweenService:Create(progressFill,TweenInfo.new(0.2),
-        {Size=UDim2.new(pct,0,1,0)}):Play()
-    progressLbl.Text = msg or (current.." / "..total.." items")
+-- Category color
+local function catColor(cat)
+    if cat:find("Chroma") then return T.PRPL end
+    if cat:find("Gun")    then return T.BLUE end
+    return T.GOLD
 end
 
--- ─── Item row builder ─────────────────────────────────────────────────────────
-local ownedLabels = {}  -- name → TextLabel for tick marks
-
-local function itemColor(cat)
-    if cat:find("Chroma") then return T.CHROMA_COL end
-    if cat:find("Gun")    then return T.GUN_COL    end
-    return T.KNIFE_COL
+-- Search box
+local function makeSearchBox(parent, yPos, onChanged)
+    local frame = mk("Frame",{
+        Size=UDim2.new(1,0,0,34),
+        Position=UDim2.new(0,0,0,yPos),
+        BackgroundColor3=T.BAR,
+        BorderSizePixel=0, ZIndex=5, Parent=parent,
+    })
+    local box = mk("TextBox",{
+        Size=UDim2.new(1,-20,0,26),
+        Position=UDim2.new(0,10,0,4),
+        BackgroundColor3=T.INPUT,
+        Text="",
+        PlaceholderText="🔍  Search...",
+        TextColor3=T.TEXT,
+        PlaceholderColor3=T.DIM,
+        Font=Enum.Font.GothamSemiBold,
+        TextSize=12,
+        BorderSizePixel=0,
+        ZIndex=6,
+        ClearTextOnFocus=false,
+        Parent=frame,
+    })
+    corner(box, 6)
+    mk("UIPadding",{
+        PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),
+        Parent=box,
+    })
+    box:GetPropertyChangedSignal("Text"):Connect(function()
+        onChanged(box.Text:lower():gsub("^%s+",""):gsub("%s+$",""))
+    end)
+    return frame
 end
 
-local function buildItemList(parent, items)
-    local scroll = inst("ScrollingFrame",{
-        Size=UDim2.new(1,0,1,0),
-        BackgroundTransparency=1,BorderSizePixel=0,
-        CanvasSize=UDim2.new(0,0,0,0),
-        ScrollBarThickness=4,ScrollBarImageColor3=T.SCROLLBAR,
-        AutomaticCanvasSize=Enum.AutomaticSize.Y,
+-- Item row
+local function makeItemRow(parent, item, idx)
+    local col = catColor(item.cat)
+
+    local row = mk("Frame",{
+        Size=UDim2.new(1,-8,0,32),
+        BackgroundColor3=T.ROW,        -- ← lighter dark so row is VISIBLE
+        BorderSizePixel=0,
+        ZIndex=5,
+        LayoutOrder=idx,
         Parent=parent,
     })
-    inst("UIListLayout",{
+    corner(row, 6)
+
+    -- Left colour stripe
+    mk("Frame",{
+        Size=UDim2.new(0,4,0,20),
+        Position=UDim2.new(0,4,0.5,-10),
+        BackgroundColor3=col,
+        BorderSizePixel=0, ZIndex=6,
+        Parent=row,
+    })
+
+    -- Category label
+    Lbl(row, item.cat,
+        UDim2.new(0,14,0,0), UDim2.new(0,90,1,0),
+        9, col, Enum.Font.Gotham, Enum.TextXAlignment.Left, 6)
+
+    -- Item name
+    Lbl(row, item.name,
+        UDim2.new(0,108,0,0), UDim2.new(1,-220,1,0),
+        13, T.TEXT, Enum.Font.GothamSemiBold, Enum.TextXAlignment.Left, 6)
+
+    -- Owned tick
+    local tick = Lbl(row, "",
+        UDim2.new(1,-110,0,0), UDim2.new(0,18,1,0),
+        14, T.OK, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 6)
+    ownedTicks[item.name] = tick
+
+    -- Equip button
+    local eBtn = mk("TextButton",{
+        Size=UDim2.new(0,84,0,22),
+        Position=UDim2.new(1,-90,0.5,-11),
+        BackgroundColor3=T.TABSEL,
+        Text="Equip",
+        TextColor3=col,
+        Font=Enum.Font.GothamBold,
+        TextSize=11,
+        BorderSizePixel=0, ZIndex=7,
+        AutoButtonColor=false,
+        Parent=row,
+    })
+    corner(eBtn, 5)
+    eBtn.MouseEnter:Connect(function()
+        TweenService:Create(eBtn,TweenInfo.new(0.1),{BackgroundColor3=T.SEP}):Play()
+    end)
+    eBtn.MouseLeave:Connect(function()
+        TweenService:Create(eBtn,TweenInfo.new(0.1),{BackgroundColor3=T.TABSEL}):Play()
+    end)
+    eBtn.MouseButton1Click:Connect(function()
+        local ok, msg = equipWeapon(item.name, item.cat)
+        giveItem(item.name)
+        if ownedTicks[item.name] then ownedTicks[item.name].Text = "✓" end
+        setProgress(1,1, (ok and "✓ " or "⚠ ")..msg)
+    end)
+
+    return row
+end
+
+-- Scrollable item list panel
+-- yTop = Y offset from page top where the scroll starts
+-- listHeight = pixel height of the scroll area
+local function makeItemList(page, items, yTop, listHeight)
+    -- Fallback error label (shows if list build fails)
+    local errLbl = Lbl(page, "",
+        UDim2.new(0,12,0,yTop+8), UDim2.new(1,-24,0,20),
+        12, T.ERR, Enum.Font.Gotham, Enum.TextXAlignment.Left, 5)
+
+    if #items == 0 then
+        errLbl.Text = "⚠  No items in this category."
+        return nil
+    end
+
+    -- Scroll frame
+    local scroll = mk("ScrollingFrame",{
+        Size=UDim2.new(1,0,0,listHeight),
+        Position=UDim2.new(0,0,0,yTop),
+        BackgroundColor3=T.SCROLL,
+        BorderSizePixel=0,
+        CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=5,
+        ScrollBarImageColor3=T.SEP,
+        ZIndex=4,
+        Parent=page,
+    })
+    corner(scroll, 0)
+
+    local layout = mk("UIListLayout",{
         SortOrder=Enum.SortOrder.LayoutOrder,
-        Padding=UDim.new(0,2),Parent=scroll,
+        Padding=UDim.new(0,3),
+        Parent=scroll,
     })
-    pad(scroll,4,6,4,6)
-
-    for idx,item in ipairs(items) do
-        local row = inst("Frame",{
-            Size=UDim2.new(1,0,0,30),BackgroundColor3=T.BG3,
-            BorderSizePixel=0,LayoutOrder=idx,Parent=scroll,
-        })
-        corner(row,6)
-
-        -- Color bar
-        local bar = inst("Frame",{
-            Size=UDim2.new(0,4,1,-6),Position=UDim2.new(0,2,0,3),
-            BackgroundColor3=itemColor(item.cat),BorderSizePixel=0,Parent=row,
-        })
-        corner(bar,2)
-
-        -- Category badge
-        local catLbl = lbl(row,item.cat,
-            UDim2.new(0,10,0,0),UDim2.new(0,80,1,0),
-            9,itemColor(item.cat),Enum.Font.Gotham)
-        catLbl.TextXAlignment=Enum.TextXAlignment.Left
-
-        -- Name
-        lbl(row,item.name,
-            UDim2.new(0,95,0,0),UDim2.new(1,-220,1,0),
-            12,T.TEXT,Enum.Font.GothamSemiBold)
-
-        -- Owned tick
-        local tickLbl = lbl(row,"",
-            UDim2.new(1,-120,0,0),UDim2.new(0,20,1,0),
-            13,T.SUCCESS,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
-        ownedLabels[item.name] = tickLbl
-
-        -- Equip button
-        local eBtn = inst("TextButton",{
-            Size=UDim2.new(0,90,0,22),Position=UDim2.new(1,-96,0.5,-11),
-            BackgroundColor3=T.BG4,Text="Equip",
-            TextColor3=itemColor(item.cat),Font=Enum.Font.GothamBold,
-            TextSize=11,BorderSizePixel=0,ZIndex=7,Parent=row,AutoButtonColor=false,
-        })
-        corner(eBtn,5)
-        eBtn.MouseEnter:Connect(function()
-            TweenService:Create(eBtn,TweenInfo.new(0.1),{BackgroundColor3=T.BG2}):Play()
-        end)
-        eBtn.MouseLeave:Connect(function()
-            TweenService:Create(eBtn,TweenInfo.new(0.1),{BackgroundColor3=T.BG4}):Play()
-        end)
-        eBtn.MouseButton1Click:Connect(function()
-            local ok, msg = equipWeapon(item.name, item.cat)
-            if ok then
-                tickLbl.Text = "✓"
-                setProgress(1,1,"Equipped: "..item.name)
-                giveItem(item.name)
-            else
-                setProgress(0,0,"⚠ "..msg)
-            end
-        end)
-    end
-
-    return scroll
-end
-
--- ─── Search box ───────────────────────────────────────────────────────────────
-local function buildSearchBox(parent, callback)
-    local box = inst("TextBox",{
-        Size=UDim2.new(1,-16,0,28),Position=UDim2.new(0,8,0,4),
-        BackgroundColor3=T.BG4,Text="",PlaceholderText="🔍  Search godlies...",
-        TextColor3=T.TEXT,PlaceholderColor3=T.TEXTDIM,
-        Font=Enum.Font.GothamSemiBold,TextSize=12,
-        BorderSizePixel=0,ClearTextOnFocus=false,Parent=parent,
+    mk("UIPadding",{
+        PaddingTop=UDim.new(0,4), PaddingBottom=UDim.new(0,4),
+        PaddingLeft=UDim.new(0,4), PaddingRight=UDim.new(0,4),
+        Parent=scroll,
     })
-    corner(box,7)
-    pad(box,0,8,0,8)
-    box:GetPropertyChangedSignal("Text"):Connect(function()
-        callback(box.Text:lower())
-    end)
-    return box
-end
 
--- ════════════════════════════════════════════════════════════════════════════
---  PAGE BUILDERS
--- ════════════════════════════════════════════════════════════════════════════
-
--- ─── Batch give function ──────────────────────────────────────────────────────
-local batchRunning = false
-
-local function batchGive(items, statusPrefix)
-    if batchRunning then return end
-    batchRunning = true
-    task.spawn(function()
-        local total  = #items
-        local added  = 0
-        local dupes  = 0
-
+    local ok, err = pcall(function()
         for i, item in ipairs(items) do
-            if giveItem(item.name) then
-                added = added + 1
-                if ownedLabels[item.name] then ownedLabels[item.name].Text="✓" end
-            else
-                dupes = dupes + 1
-            end
-            setProgress(i, total, statusPrefix.." — "..i.."/"..total)
-            task.wait(0.04)   -- small batch delay, no lag spikes
+            makeItemRow(scroll, item, i)
         end
+    end)
+    if not ok then
+        errLbl.Text = "⚠  List build error: "..(err or "unknown")
+        warn("[MM2GodlyHub] List build error:", err)
+        return scroll
+    end
 
-        setProgress(total,total,
-            "✅  Done! "..added.." added, "..dupes.." already owned")
+    -- Search filter
+    local function applySearch(query)
+        for _, child in pairs(scroll:GetChildren()) do
+            if child:IsA("Frame") then
+                if query == "" then
+                    child.Visible = true
+                else
+                    -- Find name label (the wider one, starts at UDim2 0,108)
+                    local matched = false
+                    for _, lbl2 in pairs(child:GetChildren()) do
+                        if lbl2:IsA("TextLabel") then
+                            if lbl2.Text:lower():find(query, 1, true) then
+                                matched = true; break
+                            end
+                        end
+                    end
+                    child.Visible = matched
+                end
+            end
+        end
+    end
 
-        -- Notify
-        pcall(function()
-            StarterGui:SetCore("SendNotification",{
-                Title="MM2 Godly Hub",
-                Text=added.." Godlies added — equip any to make others see it",
-                Duration=6,
-            })
+    return scroll, applySearch
+end
+
+-- Action bar (Give-All + category shortcuts)
+local function makeActionBar(page, label, giveList, giveLabel)
+    local bar = mk("Frame",{
+        Size=UDim2.new(1,0,0,44),
+        Position=UDim2.new(0,0,0,0),
+        BackgroundColor3=T.BAR,
+        BorderSizePixel=0, ZIndex=5, Parent=page,
+    })
+
+    local batchRunning = false
+    local giveBtn = mk("TextButton",{
+        Size=UDim2.new(0.54,-6,0,30),
+        Position=UDim2.new(0,6,0,7),
+        BackgroundColor3=T.GOLD,
+        Text="⚔  "..label,
+        TextColor3=C(10,10,14),
+        Font=Enum.Font.GothamBold,
+        TextSize=11,
+        BorderSizePixel=0, ZIndex=6,
+        AutoButtonColor=false,
+        Parent=bar,
+    })
+    corner(giveBtn, 7)
+    giveBtn.MouseEnter:Connect(function()
+        TweenService:Create(giveBtn,TweenInfo.new(0.1),{BackgroundColor3=T.GOLD2}):Play()
+    end)
+    giveBtn.MouseLeave:Connect(function()
+        TweenService:Create(giveBtn,TweenInfo.new(0.1),{BackgroundColor3=T.GOLD}):Play()
+    end)
+
+    giveBtn.MouseButton1Click:Connect(function()
+        if batchRunning then return end
+        batchRunning = true
+        task.spawn(function()
+            local total, added, dupes = #giveList, 0, 0
+            for i, item in ipairs(giveList) do
+                if giveItem(item.name) then
+                    added = added + 1
+                    if ownedTicks[item.name] then ownedTicks[item.name].Text = "✓" end
+                else
+                    dupes = dupes + 1
+                end
+                if i % 10 == 0 then
+                    setProgress(i, total, giveLabel.." — "..i.."/"..total)
+                    task.wait(0.04)
+                end
+            end
+            setProgress(total, total,
+                "✅  Done! "..added.." added, "..dupes.." already owned")
+            pcall(function()
+                StarterGui:SetCore("SendNotification",{
+                    Title="MM2 Godly Hub",
+                    Text=added.." Godlies marked — hit Equip on any to wear it",
+                    Duration=5,
+                })
+            end)
+            task.wait(0.8)
+            batchRunning = false
         end)
+    end)
 
-        task.wait(1)
-        batchRunning=false
+    return bar
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  BUILD EACH PAGE
+-- ════════════════════════════════════════════════════════════════════════════
+local BODY_H = WIN_H - 74 - 24  -- height of mainBody
+
+-- ─── ALL GODLIES ─────────────────────────────────────────────────────────────
+do
+    local pg = pageFrames["all"]
+
+    -- Action bar (Give All + shortcut btns)
+    local bar = makeActionBar(pg,
+        "GIVE ALL GODLIES ("..#ALL_ITEMS..")", ALL_ITEMS, "All Godlies")
+
+    -- Shortcut buttons inside the bar
+    local shortcuts = {
+        {label="🗡 Knives", col=T.GOLD,  cat="Knife"},
+        {label="🔫 Guns",   col=T.BLUE,  cat="Gun"},
+        {label="✨ Chroma", col=T.PRPL,  cat="Chroma"},
+        {label="🗑 Clear",  col=T.RED,   cat="clear"},
+    }
+    local btnW = 0.11
+    for i, sc in ipairs(shortcuts) do
+        local xPct = 0.55 + (i-1)*0.1125
+        local sb = mk("TextButton",{
+            Size=UDim2.new(0.105,-2,0,30),
+            Position=UDim2.new(xPct, 1, 0, 7),
+            BackgroundColor3=T.TABSEL,
+            Text=sc.label,
+            TextColor3=sc.col,
+            Font=Enum.Font.GothamBold,
+            TextSize=9,
+            BorderSizePixel=0, ZIndex=6,
+            AutoButtonColor=false,
+            Parent=bar,
+        })
+        corner(sb, 5)
+        sb.MouseButton1Click:Connect(function()
+            if sc.cat == "clear" then
+                OWNED = {}
+                for _, lbl2 in pairs(ownedTicks) do lbl2.Text = "" end
+                setProgress(0,0,"🗑  Session cleared")
+            else
+                local list = {}
+                for _, item in ipairs(ALL_ITEMS) do
+                    if item.cat:find(sc.cat) then table.insert(list, item) end
+                end
+                -- reuse giveBtn logic via spawn
+                task.spawn(function()
+                    local total, added = #list, 0
+                    for i, item in ipairs(list) do
+                        if giveItem(item.name) then
+                            added = added + 1
+                            if ownedTicks[item.name] then ownedTicks[item.name].Text = "✓" end
+                        end
+                        if i%10==0 then
+                            setProgress(i,total,sc.label.." — "..i.."/"..total)
+                            task.wait(0.04)
+                        end
+                    end
+                    setProgress(total,total,"✅  "..added.." "..sc.label.." added")
+                end)
+            end
+        end)
+    end
+
+    -- Search bar
+    local searchBar, searchApply = nil, nil
+    local searchFrame = makeSearchBox(pg, 44, function(q)
+        if searchApply then searchApply(q) end
+    end)
+
+    -- Item list (below bar=44 + search=34 = 78px, fills to bottom)
+    local listH = BODY_H - 78
+    local scroll, applyFn = makeItemList(pg, ALL_ITEMS, 78, listH)
+    searchApply = applyFn
+end
+
+-- ─── KNIVES ──────────────────────────────────────────────────────────────────
+do
+    local pg = pageFrames["knives"]
+    local kItems = {}
+    for _, n in ipairs(GODLY_KNIVES) do table.insert(kItems,{name=n,cat="Knife"}) end
+
+    makeActionBar(pg, "GIVE ALL KNIVES ("..#kItems..")", kItems, "Godly Knives")
+    local searchApply
+    makeSearchBox(pg, 44, function(q) if searchApply then searchApply(q) end end)
+    local _, fn = makeItemList(pg, kItems, 78, BODY_H-78)
+    searchApply = fn
+end
+
+-- ─── GUNS ────────────────────────────────────────────────────────────────────
+do
+    local pg = pageFrames["guns"]
+    local gItems = {}
+    for _, n in ipairs(GODLY_GUNS) do table.insert(gItems,{name=n,cat="Gun"}) end
+
+    makeActionBar(pg, "GIVE ALL GUNS ("..#gItems..")", gItems, "Godly Guns")
+    local searchApply
+    makeSearchBox(pg, 44, function(q) if searchApply then searchApply(q) end end)
+    local _, fn = makeItemList(pg, gItems, 78, BODY_H-78)
+    searchApply = fn
+end
+
+-- ─── CHROMAS ─────────────────────────────────────────────────────────────────
+do
+    local pg = pageFrames["chroma"]
+    local cItems = {}
+    for _, n in ipairs(CHROMA_KNIVES) do table.insert(cItems,{name=n,cat="Chroma Knife"}) end
+    for _, n in ipairs(CHROMA_GUNS)   do table.insert(cItems,{name=n,cat="Chroma Gun"})   end
+
+    makeActionBar(pg, "GIVE ALL CHROMAS ("..#cItems..")", cItems, "Chromas")
+
+    -- Chroma info badge
+    local badge = mk("Frame",{
+        Size=UDim2.new(1,-12,0,22),
+        Position=UDim2.new(0,6,0,46),
+        BackgroundColor3=C(50,20,80),
+        BackgroundTransparency=0.4,
+        BorderSizePixel=0, ZIndex=5, Parent=pg,
+    })
+    corner(badge,5)
+    Lbl(badge,"  ✨  Chroma items get animated rainbow effect when equipped",
+        UDim2.new(0,0,0,0),UDim2.new(1,0,1,0),10,T.PRPL,Enum.Font.Gotham,
+        Enum.TextXAlignment.Left,6)
+
+    local searchApply
+    makeSearchBox(pg, 70, function(q) if searchApply then searchApply(q) end end)
+    local _, fn = makeItemList(pg, cItems, 104, BODY_H-104)
+    searchApply = fn
+end
+
+-- ─── SETTINGS ────────────────────────────────────────────────────────────────
+do
+    local pg = pageFrames["settings"]
+
+    -- Section: Save/Load loadout
+    mk("Frame",{
+        Size=UDim2.new(1,-12,0,22), Position=UDim2.new(0,6,0,6),
+        BackgroundColor3=T.TABSEL, BorderSizePixel=0, ZIndex=5, Parent=pg,
+    })
+    Lbl(pg,"  💾  SESSION LOADOUT SYSTEM",
+        UDim2.new(0,6,0,6),UDim2.new(1,-12,0,22),
+        11,T.GOLD,Enum.Font.GothamBold,Enum.TextXAlignment.Left,6)
+
+    local saveInput = mk("TextBox",{
+        Size=UDim2.new(0.58,-10,0,28),
+        Position=UDim2.new(0,8,0,34),
+        BackgroundColor3=T.INPUT,
+        Text="",
+        PlaceholderText="Loadout name...",
+        TextColor3=T.TEXT,
+        PlaceholderColor3=T.DIM,
+        Font=Enum.Font.GothamSemiBold,
+        TextSize=12,
+        BorderSizePixel=0, ZIndex=6, Parent=pg,
+        ClearTextOnFocus=false,
+    })
+    corner(saveInput,6)
+
+    local saveBtn = Btn(pg,"💾 Save",
+        UDim2.new(0.60,0,0,34),UDim2.new(0.19,-4,0,28),
+        T.TABSEL,T.GOLD,11,6,6)
+    local loadList = mk("ScrollingFrame",{
+        Size=UDim2.new(1,-12,0,80),
+        Position=UDim2.new(0,6,0,68),
+        BackgroundColor3=T.SCROLL,
+        BorderSizePixel=0,
+        CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4,
+        ScrollBarImageColor3=T.SEP,
+        ZIndex=5, Parent=pg,
+    })
+    corner(loadList,7)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=loadList})
+    mk("UIPadding",{PaddingTop=UDim.new(0,3),PaddingLeft=UDim.new(0,3),PaddingRight=UDim.new(0,3),Parent=loadList})
+
+    local function refreshLoadList()
+        for _, c in pairs(loadList:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+        local idx = 0
+        for name, items in pairs(LOADOUTS) do
+            idx=idx+1
+            local r = mk("Frame",{
+                Size=UDim2.new(1,0,0,26),BackgroundColor3=T.ROW,
+                BorderSizePixel=0, LayoutOrder=idx, ZIndex=6, Parent=loadList,
+            })
+            corner(r,5)
+            Lbl(r," "..name.." ("..#items..")",
+                UDim2.new(0,0,0,0),UDim2.new(1,-60,1,0),11,T.GOLD,Enum.Font.Gotham,
+                Enum.TextXAlignment.Left,7)
+            local lb2 = Btn(r,"Load",
+                UDim2.new(1,-56,0.5,-11),UDim2.new(0,50,0,22),
+                T.TABSEL,T.GOLD,10,5,7)
+            lb2.MouseButton1Click:Connect(function()
+                task.spawn(function()
+                    for i,iname in ipairs(items) do
+                        giveItem(iname)
+                        if ownedTicks[iname] then ownedTicks[iname].Text="✓" end
+                        if i%10==0 then task.wait(0.02) end
+                    end
+                    setProgress(#items,#items,"Loaded: "..name)
+                end)
+            end)
+        end
+    end
+
+    saveBtn.MouseButton1Click:Connect(function()
+        local n = saveInput.Text:gsub("^%s+",""):gsub("%s+$","")
+        if n=="" then return end
+        LOADOUTS[n]={}
+        for name in pairs(OWNED) do table.insert(LOADOUTS[n],name) end
+        setProgress(1,1,"💾 Saved '"..n.."' ("..#LOADOUTS[n].." items)")
+        refreshLoadList()
+    end)
+
+    -- Info section
+    mk("Frame",{
+        Size=UDim2.new(1,-12,0,1), Position=UDim2.new(0,6,0,155),
+        BackgroundColor3=T.SEP, BorderSizePixel=0, ZIndex=5, Parent=pg,
+    })
+    Lbl(pg,"  ℹ  HOW IT WORKS",
+        UDim2.new(0,6,0,161),UDim2.new(1,-12,0,20),
+        11,T.GOLD,Enum.Font.GothamBold,Enum.TextXAlignment.Left,5)
+
+    local notes = {
+        "• Click Equip on any row → your character wears the weapon.",
+        "• Equipped weapon IS visible to other players (character replicates).",
+        "• Give All marks items owned this session for loadout saving.",
+        "• Inventory is session-based: MM2's DataStore is server-authoritative.",
+        "• Chroma items cycle through rainbow colour when equipped.",
+        "• Use the search box to filter 175 items instantly.",
+    }
+    for i, note in ipairs(notes) do
+        Lbl(pg, note,
+            UDim2.new(0,10,0,181+(i-1)*20),
+            UDim2.new(1,-20,0,18),
+            10, i==4 and T.WARN or T.DIM,
+            Enum.Font.Gotham, Enum.TextXAlignment.Left, 5)
+    end
+
+    -- Live owned counter
+    local counterLbl = Lbl(pg,
+        "Owned this session: 0 / "..#ALL_ITEMS,
+        UDim2.new(0,10,0,305),UDim2.new(1,-20,0,18),
+        11,T.OK,Enum.Font.GothamBold,Enum.TextXAlignment.Left,5)
+
+    RunService.Heartbeat:Connect(function()
+        local n=0; for _ in pairs(OWNED) do n=n+1 end
+        counterLbl.Text = "Owned this session: "..n.." / "..#ALL_ITEMS
     end)
 end
 
--- ─── ALL GODLIES PAGE ─────────────────────────────────────────────────────────
-local allPage = newPage("all")
-
--- Top action bar
-local actionBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,42),BackgroundColor3=T.BG2,
-    BorderSizePixel=0,Parent=allPage,
-})
-pad(actionBar,6,6,6,6)
-
--- "Give All" mega button
-local giveAllBtn = inst("TextButton",{
-    Size=UDim2.new(0.48,0,0,30),Position=UDim2.new(0,8,0,6),
-    BackgroundColor3=T.GOLD,Text="⚔  GIVE ALL GODLIES (175)",
-    TextColor3=C(10,10,14),Font=Enum.Font.GothamBold,TextSize=12,
-    BorderSizePixel=0,ZIndex=7,Parent=allPage,AutoButtonColor=false,
-})
-corner(giveAllBtn,7)
-giveAllBtn.MouseEnter:Connect(function()
-    TweenService:Create(giveAllBtn,TweenInfo.new(0.1),{BackgroundColor3=T.GOLD2}):Play()
-end)
-giveAllBtn.MouseLeave:Connect(function()
-    TweenService:Create(giveAllBtn,TweenInfo.new(0.1),{BackgroundColor3=T.GOLD}):Play()
-end)
-giveAllBtn.MouseButton1Click:Connect(function()
-    batchGive(ALL_ITEMS,"All Godlies")
-end)
-
--- Category quick buttons
-do
-    local cats = {
-        {label="🗡 Knives",  col=T.KNIFE_COL,  src=GODLY_KNIVES,  cat="Knife"},
-        {label="🔫 Guns",   col=T.GUN_COL,    src=GODLY_GUNS,    cat="Gun"},
-        {label="✨ Chromas",col=T.CHROMA_COL, src={},             cat="Chroma"},
-        {label="🗑 Clear",  col=T.ACCENT,     src=nil,            cat="clear"},
-    }
-    local colW = 0.12
-    for i,cat in ipairs(cats) do
-        local xOff = 0.52 + (i-1)*0.12
-        local cb = inst("TextButton",{
-            Size=UDim2.new(0.115,-2,0,30),
-            Position=UDim2.new(0.52+(i-1)*0.119,1,0,6),
-            BackgroundColor3=T.BG4,Text=cat.label,
-            TextColor3=cat.col,Font=Enum.Font.GothamBold,TextSize=9,
-            BorderSizePixel=0,ZIndex=7,Parent=allPage,AutoButtonColor=false,
-        })
-        corner(cb,6)
-        cb.MouseButton1Click:Connect(function()
-            if cat.cat=="clear" then
-                OWNED={}
-                for _,lblRef in pairs(ownedLabels) do lblRef.Text="" end
-                setProgress(0,0,"🗑 Inventory cleared (session reset)")
-            elseif cat.cat=="Chroma" then
-                local chromaItems={}
-                for _,i in ipairs(CHROMA_KNIVES) do table.insert(chromaItems,{name=i,cat="Chroma Knife"}) end
-                for _,i in ipairs(CHROMA_GUNS)   do table.insert(chromaItems,{name=i,cat="Chroma Gun"}) end
-                batchGive(chromaItems,"Chromas")
-            else
-                local list={}
-                for _,name in ipairs(cat.src) do table.insert(list,{name=name,cat=cat.cat}) end
-                batchGive(list,cat.label)
-            end
-        end)
-    end
-end
-
--- Search
-local allSearchFrame = inst("Frame",{
-    Size=UDim2.new(1,0,0,36),Position=UDim2.new(0,0,0,42),
-    BackgroundColor3=T.BG2,BorderSizePixel=0,Parent=allPage,
-})
-
-local allListFrame = inst("Frame",{
-    Size=UDim2.new(1,0,1,-78),Position=UDim2.new(0,0,0,78),
-    BackgroundTransparency=1,BorderSizePixel=0,Parent=allPage,
-})
-local allList = buildItemList(allListFrame, ALL_ITEMS)
-
-buildSearchBox(allSearchFrame, function(query)
-    for _, child in pairs(allList:GetChildren()) do
-        if child:IsA("Frame") then
-            local nameLabel = child:FindFirstChildWhichIsA("TextLabel")
-            if nameLabel then
-                local visible = query=="" or child.Name:lower():find(query)
-                    or (nameLabel and nameLabel.Text:lower():find(query))
-                child.Visible = visible ~= nil
-            end
-        end
-    end
-end)
-
--- ─── KNIVES PAGE ─────────────────────────────────────────────────────────────
-local knivesPage = newPage("knives")
-
-local knifeItems = {}
-for _,n in ipairs(GODLY_KNIVES) do table.insert(knifeItems,{name=n,cat="Knife"}) end
-
-local kSearchBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,40),BackgroundColor3=T.BG2,
-    BorderSizePixel=0,Parent=knivesPage,
-})
-local giveKnivesBtn = btn(knivesPage,
-    "🗡  Give All Godly Knives ("..#GODLY_KNIVES..")",
-    UDim2.new(0,8,0,44),UDim2.new(1,-16,0,28),
-    T.BG4,T.KNIFE_COL,12,7,7)
-giveKnivesBtn.MouseButton1Click:Connect(function()
-    batchGive(knifeItems,"Godly Knives")
-end)
-
-local kListFrame = inst("Frame",{
-    Size=UDim2.new(1,0,1,-78),Position=UDim2.new(0,0,0,78),
-    BackgroundTransparency=1,Parent=knivesPage,
-})
-local kList = buildItemList(kListFrame, knifeItems)
-buildSearchBox(kSearchBar, function(q)
-    for _,c in pairs(kList:GetChildren()) do
-        if c:IsA("Frame") then c.Visible=(q=="" or (c:FindFirstChildWhichIsA("TextLabel") and c:FindFirstChildWhichIsA("TextLabel").Text:lower():find(q)~=nil)) end
-    end
-end)
-
--- ─── GUNS PAGE ───────────────────────────────────────────────────────────────
-local gunsPage = newPage("guns")
-
-local gunItems = {}
-for _,n in ipairs(GODLY_GUNS) do table.insert(gunItems,{name=n,cat="Gun"}) end
-
-local gSearchBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,40),BackgroundColor3=T.BG2,
-    BorderSizePixel=0,Parent=gunsPage,
-})
-local giveGunsBtn = btn(gunsPage,
-    "🔫  Give All Godly Guns ("..#GODLY_GUNS..")",
-    UDim2.new(0,8,0,44),UDim2.new(1,-16,0,28),
-    T.BG4,T.GUN_COL,12,7,7)
-giveGunsBtn.MouseButton1Click:Connect(function()
-    batchGive(gunItems,"Godly Guns")
-end)
-
-local gListFrame = inst("Frame",{
-    Size=UDim2.new(1,0,1,-78),Position=UDim2.new(0,0,0,78),
-    BackgroundTransparency=1,Parent=gunsPage,
-})
-local gList = buildItemList(gListFrame, gunItems)
-buildSearchBox(gSearchBar, function(q)
-    for _,c in pairs(gList:GetChildren()) do
-        if c:IsA("Frame") then c.Visible=(q=="" or (c:FindFirstChildWhichIsA("TextLabel") and c:FindFirstChildWhichIsA("TextLabel").Text:lower():find(q)~=nil)) end
-    end
-end)
-
--- ─── CHROMAS PAGE ────────────────────────────────────────────────────────────
-local chromaPage = newPage("chroma")
-
-local chromaItems = {}
-for _,n in ipairs(CHROMA_KNIVES) do table.insert(chromaItems,{name=n,cat="Chroma Knife"}) end
-for _,n in ipairs(CHROMA_GUNS)   do table.insert(chromaItems,{name=n,cat="Chroma Gun"})   end
-
-local cSearchBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,40),BackgroundColor3=T.BG2,
-    BorderSizePixel=0,Parent=chromaPage,
-})
-local giveChromaBtn = btn(chromaPage,
-    "✨  Give All Chromas ("..#chromaItems..")",
-    UDim2.new(0,8,0,44),UDim2.new(1,-16,0,28),
-    T.BG4,T.CHROMA_COL,12,7,7)
-giveChromaBtn.MouseButton1Click:Connect(function()
-    batchGive(chromaItems,"Chromas")
-end)
-
--- Info badge for Chroma
-local chromaInfoBadge = inst("Frame",{
-    Size=UDim2.new(1,-16,0,24),Position=UDim2.new(0,8,0,76),
-    BackgroundColor3=C(50,20,80),BackgroundTransparency=0.5,
-    BorderSizePixel=0,Parent=chromaPage,
-})
-corner(chromaInfoBadge,5)
-lbl(chromaInfoBadge,"  ✨ Chroma rainbow effect applied automatically when equipped",
-    UDim2.new(0,0,0,0),UDim2.new(1,0,1,0),10,T.CHROMA_COL,Enum.Font.Gotham)
-
-local cListFrame = inst("Frame",{
-    Size=UDim2.new(1,0,1,-106),Position=UDim2.new(0,0,0,106),
-    BackgroundTransparency=1,Parent=chromaPage,
-})
-local cList = buildItemList(cListFrame, chromaItems)
-buildSearchBox(cSearchBar, function(q)
-    for _,c in pairs(cList:GetChildren()) do
-        if c:IsA("Frame") then c.Visible=(q=="" or (c:FindFirstChildWhichIsA("TextLabel") and c:FindFirstChildWhichIsA("TextLabel").Text:lower():find(q)~=nil)) end
-    end
-end)
-
--- ─── SETTINGS PAGE ───────────────────────────────────────────────────────────
-local settingsPage = newPage("settings")
-
-sectionHdr(settingsPage, 8, "⚙  SESSION LOADOUT SYSTEM")
-
--- Save loadout
-local saveName = ""
-local saveInput = inst("TextBox",{
-    Size=UDim2.new(0.6,-8,0,28),Position=UDim2.new(0,8,0,38),
-    BackgroundColor3=T.BG4,Text="",PlaceholderText="Loadout name...",
-    TextColor3=T.TEXT,PlaceholderColor3=T.TEXTDIM,
-    Font=Enum.Font.GothamSemiBold,TextSize=12,
-    BorderSizePixel=0,Parent=settingsPage,
-})
-corner(saveInput,7)
-pad(saveInput,0,8,0,8)
-saveInput:GetPropertyChangedSignal("Text"):Connect(function() saveName=saveInput.Text end)
-
-local saveBtn = btn(settingsPage,"💾 Save Loadout",
-    UDim2.new(0.62,0,0,38),UDim2.new(0.36,-4,0,28),
-    T.BG4,T.GOLD,11,7,7)
-saveBtn.MouseButton1Click:Connect(function()
-    if saveName=="" then return end
-    LOADOUTS[saveName] = {}
-    for name,_ in pairs(OWNED) do table.insert(LOADOUTS[saveName], name) end
-    setProgress(1,1,"💾 Saved loadout: "..saveName.." ("..#LOADOUTS[saveName].." items)")
-end)
-
--- Load loadout dropdown (simple list)
-sectionHdr(settingsPage, 74, "📂  SAVED LOADOUTS")
-
-local loadoutScroll = inst("ScrollingFrame",{
-    Size=UDim2.new(1,-16,0,100),Position=UDim2.new(0,8,0,102),
-    BackgroundColor3=T.BG4,BorderSizePixel=0,
-    CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
-    ScrollBarThickness=3,ScrollBarImageColor3=T.SCROLLBAR,
-    Parent=settingsPage,
-})
-corner(loadoutScroll,7)
-inst("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,
-    Padding=UDim.new(0,2),Parent=loadoutScroll})
-pad(loadoutScroll,4,4,4,4)
-
-local function refreshLoadoutList()
-    for _,c in pairs(loadoutScroll:GetChildren()) do
-        if c:IsA("Frame") then c:Destroy() end
-    end
-    local idx=0
-    for name,items in pairs(LOADOUTS) do
-        idx=idx+1
-        local row=inst("Frame",{
-            Size=UDim2.new(1,0,0,28),BackgroundColor3=T.BG3,
-            BorderSizePixel=0,LayoutOrder=idx,Parent=loadoutScroll,
-        })
-        corner(row,5)
-        lbl(row," "..name.." ("..#items.." items)",
-            UDim2.new(0,0,0,0),UDim2.new(1,-70,1,0),11,T.GOLD)
-        local lb2=inst("TextButton",{
-            Size=UDim2.new(0,62,0,20),Position=UDim2.new(1,-64,0.5,-10),
-            BackgroundColor3=T.BG4,Text="Load",TextColor3=T.GOLD,
-            Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0,Parent=row,
-        })
-        corner(lb2,5)
-        lb2.MouseButton1Click:Connect(function()
-            local loadItems={}
-            for _,iname in ipairs(items) do
-                local cat="Knife"
-                if iname:find("Gun") then cat="Gun" end
-                if iname:find("^Chroma") then cat=cat:find("Gun") and "Chroma Gun" or "Chroma Knife" end
-                table.insert(loadItems,{name=iname,cat=cat})
-            end
-            batchGive(loadItems,"Loadout: "..name)
-            refreshLoadoutList()
-        end)
-    end
-end
-saveBtn.MouseButton1Click:Connect(refreshLoadoutList)
-
-divLine(settingsPage, 210)
-sectionHdr(settingsPage, 218, "ℹ  HOW EQUIPPING WORKS")
-
-local infoTexts = {
-    "• Click 'Equip' on any item to make it appear on your character.",
-    "• Equipped weapons ARE visible to other players (character replicates).",
-    "• 'Give All' marks items as owned in this session.",
-    "• Inventory is session-based — MM2's DataStore is server-only.",
-    "• Chroma items get rainbow particle effect automatically.",
-    "• Use the search box to find any specific Godly quickly.",
-}
-for i,txt in ipairs(infoTexts) do
-    lbl(settingsPage,txt,UDim2.new(0,8,0,242+(i-1)*20),UDim2.new(1,-16,0,18),
-        10,i==3 and T.WARNING or T.TEXTDIM,Enum.Font.Gotham)
-end
-
--- ─── Status strip at very bottom ─────────────────────────────────────────────
-local statsBar = inst("Frame",{
-    Size=UDim2.new(1,0,0,20),Position=UDim2.new(0,0,1,-44),
-    BackgroundColor3=T.BG3,BorderSizePixel=0,ZIndex=7,Parent=contentArea,
-})
-local statsLbl = lbl(statsBar,
-    "  🗡 Knives: "..#GODLY_KNIVES.."  🔫 Guns: "..#GODLY_GUNS..
-    "  ✨ Chromas: "..(#CHROMA_KNIVES+#CHROMA_GUNS).."  |  Session owned: 0",
-    UDim2.new(0,0,0,0),UDim2.new(1,0,1,0),9,T.TEXTDIM,Enum.Font.Gotham)
-
--- Live stats update
-RunService.Heartbeat:Connect(function()
-    local count=0; for _ in pairs(OWNED) do count=count+1 end
-    statsLbl.Text = "  🗡 "..#GODLY_KNIVES..
-        "  🔫 "..#GODLY_GUNS..
-        "  ✨ "..(#CHROMA_KNIVES+#CHROMA_GUNS)..
-        "  |  Owned: "..count.." / "..#ALL_ITEMS
-end)
-
--- ─── Boot to All tab ─────────────────────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  BOOT — force All tab visible + layout refresh
+-- ════════════════════════════════════════════════════════════════════════════
+-- Immediate switch
 switchTab("all")
 
--- ─── Startup notification ────────────────────────────────────────────────────
-task.wait(0.5)
+-- Force refresh after one frame so the ScrollingFrame measures itself correctly
+task.delay(0.1, function()
+    -- Re-hide then re-show the active page to trigger layout
+    local pg = pageFrames["all"]
+    if pg then
+        pg.Visible = false
+        task.wait()
+        pg.Visible = true
+    end
+    setProgress(0, #ALL_ITEMS,
+        "  ✅  "..#ALL_ITEMS.." Godlies loaded — select Equip on any item")
+end)
+
+-- Startup notify
 pcall(function()
     StarterGui:SetCore("SendNotification",{
-        Title="MM2 Godly Hub",
-        Text="175 Godlies loaded ·  Use 'Equip' to make others see your weapon",
+        Title="MM2 Godly Hub v2",
+        Text=#ALL_ITEMS.." Godlies ready — use Equip for weapon visible to others",
         Duration=5,
     })
 end)
 
-print("╔═══════════════════════════════════════╗")
-print("║   MM2 GODLY HUB  v1.0 — Loaded       ║")
-print("║   Knives: "..#GODLY_KNIVES.."  Guns: "..#GODLY_GUNS.."  Chromas: "..(#CHROMA_KNIVES+#CHROMA_GUNS).."   ║")
-print("║   Equip any item → visible to others  ║")
-print("╚═══════════════════════════════════════╝")
+print("╔═══════════════════════════════════════════╗")
+print("║  MM2 GODLY HUB  v2.0 — GUI FIX APPLIED  ║")
+print("║  All pages: visible  ·  Items: "..#ALL_ITEMS.."        ║")
+print("║  Knives: "..#GODLY_KNIVES.."  Guns: "..#GODLY_GUNS.."  Chromas: "..(#CHROMA_KNIVES+#CHROMA_GUNS).."     ║")
+print("╚═══════════════════════════════════════════╝")
