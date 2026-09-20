@@ -1,998 +1,1041 @@
 --[[
-    MM2 GODLY HUB  v2.0  — Fixed
-    
-    Bug fixes vs v1.0:
-    • Removed shadow frame inside ClipsDescendants container (was covering content)
-    • contentArea now has explicit ZIndex=4 so it renders above BG frames
-    • All page frames now have BackgroundTransparency=1 (not black)  
-    • ScrollingFrame size is now explicit (not dependent on broken parent chain)
-    • Row BGs use T.ROW (slightly lighter dark) so rows are visible
-    • pcall around all list building with error label fallback
-    • All ZIndex explicit throughout: BG=2, containers=3, content=4, buttons=5, overlay=6
-    • First tab forced Visible=true and layout-refreshed after 0.1s
+    Devil's Blade — 8 SWORD EDITION + MOVE ALL + TRAIL MODE
+    Realistic longsword silhouette — 500-point diamond cross-section blade
 ]]
 
--- ─── Services ────────────────────────────────────────────────────────────────
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService     = game:GetService("TweenService")
-local ReplicatedStorage= game:GetService("ReplicatedStorage")
-local Workspace        = game:GetService("Workspace")
+local SoundService     = game:GetService("SoundService")
 local StarterGui       = game:GetService("StarterGui")
+local TweenService     = game:GetService("TweenService")
+local Workspace        = game:GetService("Workspace")
+local LocalPlayer      = Players.LocalPlayer
 
-local Player = Players.LocalPlayer
+local character        = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local humanoid         = character:WaitForChild("Humanoid")
 
--- ════════════════════════════════════════════════════════════════════════════
---  COMPLETE GODLY LISTS  (verified 2026 fandom + bloxswaps)
--- ════════════════════════════════════════════════════════════════════════════
-local GODLY_KNIVES = {
-    "Seer","Darkbringer","Lightbringer","Gemstone","Heartblade",
-    "Elderwood Blade","Elderwood","Blue Elderwood Blade","Blue Elderwood",
-    "Evergreen","Ornament","Cookiecane","Gingerblade","Boneblade",
-    "Iceflake","Blizzard","Snowflake","Candleflame",
-    "Deathshard","Fang","Slasher","Blood","Hallows","Corrupt",
-    "Bat","Vampire's Edge","Shadow","Bone","Bauble","Bloom","Blossom",
-    "Sakura","Flowerwood","Beachy","Sands","Sweet","Treat",
-    "Sunrise","Sunset","Beach","Watergun",
-    "Glacier","Icecream","Icewing","Heat",
-    "Constellation","Cosmic","Galaxy","Nebula","Borealis",
-    "Turkey","Logchopper","Branches","Harvester",
-    "Synthwave","Neon","Electric","Circuit","Prism","Clockwork","Bit",
-    "Bioblade","Biohazard","Saw","Tides","Nightblade","Slaughter",
-    "Eternal","Revenant","Grim","Rift","Green","Purple","Blue","Pink",
-    "Minty","Candy","Sugar","Borders","Broken","Glitch","Glitch2",
-    "Elite","Zero","Vintage","Eternalite","Blackblade","Flames",
-    "Samurai","Alien","Soul","Swirly Axe","Burnt","Bones",
-}
-
-local GODLY_GUNS = {
-    "Luger","Laser","Shark","Alienbeam","Raygun","Evergun",
-    "Elderwood Revolver","Blue Elderwood","Traveler's Gun","Vampire's Gun",
-    "Snowcannon","Gingerscope","Blue Gingerscope","Watergun","Biogun","Biogel",
-    "Swirly Gun","Blue Swirly Gun","Bluesteel","Red Luger","Logchopper",
-    "Beachy Gun","Sunset Gun","Sunrise Gun",
-}
-
-local CHROMA_KNIVES = {
-    "Chroma Seer","Chroma Darkbringer","Chroma Lightbringer",
-    "Chroma Gemstone","Chroma Heartblade","Chroma Elderwood Blade",
-    "Chroma Evergreen","Chroma Bauble","Chroma Constellation",
-    "Chroma Sunrise","Chroma Sunset","Chroma Blizzard","Chroma Candleflame",
-    "Chroma Deathshard","Chroma Fang","Chroma Slasher","Chroma Heat",
-    "Chroma Icecream","Chroma Ornament","Chroma Cookiecane",
-    "Chroma Gingerblade","Chroma Boneblade","Chroma Beachy",
-    "Chroma Sweet","Chroma Treat","Chroma Flowerwood","Chroma Sakura",
-    "Chroma Saw","Chroma Tides","Chroma Nightblade","Chroma Eternal",
-    "Chroma Glacier","Chroma Turkey","Chroma Blood","Chroma Hallows",
-    "Chroma Vampire's Edge","Chroma Bat","Chroma Cosmic","Chroma Galaxy",
-    "Chroma Nebula","Chroma Borealis","Chroma Synthwave","Chroma Circuit",
-    "Chroma Prism","Chroma Bit","Chroma Corrupt","Chroma Shadow",
-    "Chroma Slaughter","Chroma Revenant","Chroma Glitch","Chroma Glitch2",
-}
-
-local CHROMA_GUNS = {
-    "Chroma Luger","Chroma Laser","Chroma Shark","Chroma Alienbeam",
-    "Chroma Raygun","Chroma Elderwood Revolver","Chroma Evergun",
-    "Chroma Snowcannon","Chroma Watergun","Chroma Traveler's Gun",
-    "Chroma Vampire's Gun","Chroma Biogun","Chroma Swirly Gun",
-    "Chroma Red Luger","Chroma Bluesteel","Chroma Gingerscope",
-}
-
--- Build unified list
-local ALL_ITEMS = {}
-local function collect(src, cat)
-    for _, n in ipairs(src) do table.insert(ALL_ITEMS,{name=n,cat=cat}) end
-end
-collect(GODLY_KNIVES, "Knife")
-collect(GODLY_GUNS,   "Gun")
-collect(CHROMA_KNIVES,"Chroma Knife")
-collect(CHROMA_GUNS,  "Chroma Gun")
-
-local OWNED = {}
-local LOADOUTS = {}
-
--- ════════════════════════════════════════════════════════════════════════════
---  WEAPON ENGINE
--- ════════════════════════════════════════════════════════════════════════════
-local function findWeaponModel(name)
-    local base = name:gsub("^Chroma ", "")
-    local function tryFind(folder)
-        if not folder then return nil end
-        for _, c in pairs(folder:GetChildren()) do
-            if c.Name:lower() == name:lower() or c.Name:lower() == base:lower() then
-                return c
-            end
-        end
-        return nil
-    end
-    local candidates = {"Knifes","Guns","Weapons","Items","Tools"}
-    for _, cn in ipairs(candidates) do
-        local f = ReplicatedStorage:FindFirstChild(cn)
-        local r = tryFind(f); if r then return r end
-        local w = Workspace:FindFirstChild(cn)
-        r = tryFind(w); if r then return r end
-    end
-    for _, d in pairs(ReplicatedStorage:GetDescendants()) do
-        if d:IsA("Tool") and (d.Name:lower()==name:lower() or d.Name:lower()==base:lower()) then
-            return d end
-    end
-    return nil
-end
-
-local chromaHue = 0
-RunService.Heartbeat:Connect(function(dt)
-    chromaHue = (chromaHue + dt * 0.4) % 1
-    local char = Player.Character; if not char then return end
-    for _, tool in pairs(char:GetChildren()) do
-        if tool:IsA("Tool") and tool:GetAttribute("IsChroma") then
-            for _, p in pairs(tool:GetDescendants()) do
-                if p:IsA("BasePart") then
-                    p.Color = Color3.fromHSV(chromaHue, 0.8, 1)
-                end
+-- ─── Network ──────────────────────────────────────────────────────────────────
+if not getgenv().Network then
+    getgenv().Network = { BaseParts={}, Velocity=Vector3.new(14.46,14.46,14.46) }
+    local N = getgenv().Network
+    N.RetainPart = function(p)
+        if typeof(p)=="Instance" and p:IsA("BasePart") and p:IsDescendantOf(Workspace) then
+            if not table.find(N.BaseParts,p) then
+                table.insert(N.BaseParts,p)
+                p.CustomPhysicalProperties = PhysicalProperties.new(0,0,0,0,0)
+                p.CanCollide = false
             end
         end
     end
-end)
-
-local function equipWeapon(name, cat)
-    local char = Player.Character
-    if not char then return false, "No character" end
-    local model = findWeaponModel(name)
-    if not model then return false, "Model not in game storage: "..name end
-    local clone = model:Clone()
-    if cat:find("Chroma") then clone:SetAttribute("IsChroma", true) end
-    for _, t in pairs(char:GetChildren()) do if t:IsA("Tool") then t:Destroy() end end
-    clone.Parent = char
-    return true, "Equipped: "..name
-end
-
-local function giveItem(name)
-    if OWNED[name] then return false end
-    OWNED[name] = true; return true
-end
-
--- ════════════════════════════════════════════════════════════════════════════
---  THEME  — slightly lighter so content is readable on dark bg
--- ════════════════════════════════════════════════════════════════════════════
-local C = Color3.fromRGB
-local T = {
-    WIN   = C(15,  15,  22),   -- main window background
-    TITLE = C(22,  22,  32),   -- title bar
-    TAB   = C(18,  18,  28),   -- tab bar background
-    TABSEL= C(28,  28,  42),   -- selected tab
-    PG    = C(15,  15,  22),   -- page background (same as WIN, transparent anyway)
-    BAR   = C(24,  24,  36),   -- action bars
-    ROW   = C(30,  30,  45),   -- item row background  ← KEY: lighter so rows show
-    ROWH  = C(38,  38,  55),   -- row hover
-    SCROLL= C(20,  20,  32),   -- scrollframe background
-    SEP   = C(40,  40,  58),   -- separator lines
-    INPUT = C(26,  26,  40),   -- input boxes
-    GOLD  = C(218, 165,  32),
-    GOLD2 = C(255, 215,  80),
-    RED   = C(200,  30,  30),
-    RED2  = C(230,  70,  70),
-    PRPL  = C(140,  60, 210),
-    PRPL2 = C(180, 100, 255),
-    BLUE  = C( 70, 150, 255),
-    TEXT  = C(240, 240, 248),
-    DIM   = C(150, 150, 170),
-    OK    = C( 60, 210,  90),
-    WARN  = C(255, 185,  40),
-    ERR   = C(255,  70,  70),
-}
-
--- ════════════════════════════════════════════════════════════════════════════
---  UI HELPERS
--- ════════════════════════════════════════════════════════════════════════════
-local function mk(cls, props)
-    local i = Instance.new(cls)
-    for k, v in pairs(props) do i[k] = v end
-    return i
-end
-
-local function corner(parent, r)
-    mk("UICorner",{CornerRadius=UDim.new(0,r or 8),Parent=parent})
-end
-
-local function Lbl(parent, text, pos, size, fs, fc, font, xa, z)
-    return mk("TextLabel",{
-        Text=text, Position=pos or UDim2.new(0,0,0,0),
-        Size=size or UDim2.new(1,0,0,20),
-        TextColor3=fc or T.TEXT, BackgroundTransparency=1,
-        Font=font or Enum.Font.GothamSemiBold, TextSize=fs or 13,
-        TextXAlignment=xa or Enum.TextXAlignment.Left,
-        TextTruncate=Enum.TextTruncate.AtEnd,
-        BorderSizePixel=0, ZIndex=z or 5, Parent=parent,
-    })
-end
-
-local function Btn(parent, text, pos, size, bg, tc, fs, r, z)
-    local b = mk("TextButton",{
-        Text=text, Position=pos or UDim2.new(0,0,0,0),
-        Size=size or UDim2.new(1,0,0,30),
-        BackgroundColor3=bg or T.RED,
-        TextColor3=tc or T.TEXT,
-        Font=Enum.Font.GothamBold, TextSize=fs or 12,
-        BorderSizePixel=0, ZIndex=z or 6,
-        AutoButtonColor=false, Parent=parent,
-    })
-    corner(b, r or 7)
-    local orig = bg or T.RED
-    b.MouseEnter:Connect(function()
-        TweenService:Create(b,TweenInfo.new(0.12),{BackgroundColor3=T.ROWH}):Play()
-    end)
-    b.MouseLeave:Connect(function()
-        TweenService:Create(b,TweenInfo.new(0.12),{BackgroundColor3=orig}):Play()
-    end)
-    return b
-end
-
--- ════════════════════════════════════════════════════════════════════════════
---  MAIN WINDOW
--- ════════════════════════════════════════════════════════════════════════════
--- Destroy any previous instance
-local prev = Player:FindFirstChild("PlayerGui") and Player.PlayerGui:FindFirstChild("MM2GodlyHub2")
-if prev then prev:Destroy() end
-
-local gui = mk("ScreenGui",{
-    Name="MM2GodlyHub2", ResetOnSpawn=false,
-    ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
-    DisplayOrder=100,
-    Parent=Player:WaitForChild("PlayerGui"),
-})
-
-local WIN_W, WIN_H = 620, 480
-
-local main = mk("Frame",{
-    Size=UDim2.new(0,WIN_W,0,WIN_H),
-    Position=UDim2.new(0.5,-WIN_W/2,0.5,-WIN_H/2),
-    BackgroundColor3=T.WIN,
-    BorderSizePixel=0,
-    ZIndex=2,                  -- base level
-    Parent=gui,
-})
-corner(main, 12)
-main.ClipsDescendants = true
-
--- Top accent stripe (gold bar at very top)
-mk("Frame",{
-    Size=UDim2.new(1,0,0,2), Position=UDim2.new(0,0,0,0),
-    BackgroundColor3=T.GOLD, BorderSizePixel=0, ZIndex=10, Parent=main,
-})
-
--- ─── Title bar ────────────────────────────────────────────────────────────────
-local titleBar = mk("Frame",{
-    Size=UDim2.new(1,0,0,38),
-    Position=UDim2.new(0,0,0,2),
-    BackgroundColor3=T.TITLE,
-    BorderSizePixel=0, ZIndex=3, Parent=main,
-})
--- Fill bottom corners of title bar
-mk("Frame",{
-    Size=UDim2.new(1,0,0,12), Position=UDim2.new(0,0,1,-12),
-    BackgroundColor3=T.TITLE, BorderSizePixel=0, ZIndex=3, Parent=titleBar,
-})
--- Title text
-Lbl(titleBar, "  🗡  MM2 GODLY HUB",
-    UDim2.new(0,6,0,0), UDim2.new(1,-130,1,0),
-    15, T.GOLD, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4)
-Lbl(titleBar, "v2.0 — "..#ALL_ITEMS.." Godlies",
-    UDim2.new(1,-140,0,10), UDim2.new(0,130,0,16),
-    10, T.DIM, Enum.Font.Gotham, Enum.TextXAlignment.Right, 4)
-
--- Minimise / close
-local minimised = false
-local minBtn = mk("TextButton",{
-    Size=UDim2.new(0,26,0,22), Position=UDim2.new(1,-62,0,8),
-    BackgroundColor3=T.TABSEL, Text="−", TextColor3=T.TEXT,
-    Font=Enum.Font.GothamBold, TextSize=16,
-    BorderSizePixel=0, ZIndex=5, Parent=titleBar, AutoButtonColor=false,
-})
-corner(minBtn, 5)
-
-local closeBtn = mk("TextButton",{
-    Size=UDim2.new(0,26,0,22), Position=UDim2.new(1,-32,0,8),
-    BackgroundColor3=T.RED, Text="✕", TextColor3=T.TEXT,
-    Font=Enum.Font.GothamBold, TextSize=12,
-    BorderSizePixel=0, ZIndex=5, Parent=titleBar, AutoButtonColor=false,
-})
-corner(closeBtn, 5)
-closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
-
--- Drag
-local dragging, dStart, mStart = false, nil, nil
-titleBar.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1
-    or i.UserInputType==Enum.UserInputType.Touch then
-        dragging=true; dStart=i.Position; mStart=main.Position
-    end
-end)
-UserInputService.InputChanged:Connect(function(i)
-    if not dragging then return end
-    local d = i.Position - dStart
-    main.Position = UDim2.new(mStart.X.Scale, mStart.X.Offset+d.X,
-                               mStart.Y.Scale, mStart.Y.Offset+d.Y)
-end)
-UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1
-    or i.UserInputType==Enum.UserInputType.Touch then dragging=false end
-end)
-
--- Minimise logic
-local mainBody  -- defined after tab bar
-minBtn.MouseButton1Click:Connect(function()
-    minimised = not minimised
-    minBtn.Text = minimised and "+" or "−"
-    if mainBody then mainBody.Visible = not minimised end
-    main.Size = minimised and UDim2.new(0,WIN_W,0,42) or UDim2.new(0,WIN_W,0,WIN_H)
-end)
-
--- ─── Tab bar ──────────────────────────────────────────────────────────────────
-local tabBar = mk("Frame",{
-    Size=UDim2.new(1,0,0,34),
-    Position=UDim2.new(0,0,0,40),
-    BackgroundColor3=T.TAB,
-    BorderSizePixel=0, ZIndex=3, Parent=main,
-})
--- separator line under tabs
-mk("Frame",{
-    Size=UDim2.new(1,0,0,1), Position=UDim2.new(0,0,1,-1),
-    BackgroundColor3=T.SEP, BorderSizePixel=0, ZIndex=4, Parent=tabBar,
-})
-
--- ─── Body container (holds page frames + progress bar) ───────────────────────
-mainBody = mk("Frame",{
-    Size=UDim2.new(1,0,0,WIN_H - 74 - 24),  -- below titleBar+tabBar, above progress
-    Position=UDim2.new(0,0,0,74),
-    BackgroundTransparency=1,                 -- transparent container
-    BorderSizePixel=0,
-    ZIndex=3,
-    Parent=main,
-})
-
--- ─── Progress bar ─────────────────────────────────────────────────────────────
-local progFrame = mk("Frame",{
-    Size=UDim2.new(1,0,0,24),
-    Position=UDim2.new(0,0,0,WIN_H-24),
-    BackgroundColor3=T.TITLE,
-    BorderSizePixel=0, ZIndex=3, Parent=main,
-})
-local progFill = mk("Frame",{
-    Size=UDim2.new(0,0,1,0),
-    BackgroundColor3=T.GOLD,
-    BorderSizePixel=0, ZIndex=4, Parent=progFrame,
-})
-local progLbl = Lbl(progFrame,"  Ready — select a tab above",
-    UDim2.new(0,0,0,0), UDim2.new(1,0,1,0),
-    10, T.DIM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 5)
-
-local function setProgress(cur, total, msg)
-    local pct = total>0 and math.clamp(cur/total,0,1) or 0
-    TweenService:Create(progFill,TweenInfo.new(0.15),
-        {Size=UDim2.new(pct,0,1,0)}):Play()
-    if msg then progLbl.Text = "  "..msg end
-end
-
--- ════════════════════════════════════════════════════════════════════════════
---  TAB SYSTEM
--- ════════════════════════════════════════════════════════════════════════════
-local TABS      = {
-    {key="all",      label="⚔  All"},
-    {key="knives",   label="🗡  Knives"},
-    {key="guns",     label="🔫  Guns"},
-    {key="chroma",   label="✨  Chromas"},
-    {key="settings", label="⚙  Settings"},
-}
-
-local tabBtnRefs  = {}   -- key → {btn, underline}
-local pageFrames  = {}   -- key → Frame (full-size page, transparent bg)
-local activeKey   = nil
-
--- Create tab buttons
-do
-    local n = #TABS
-    local tw = 1/n
-    for i, tab in ipairs(TABS) do
-        local tb = mk("TextButton",{
-            Size=UDim2.new(tw,-2,1,-1),
-            Position=UDim2.new((i-1)*tw,1,0,0),
-            BackgroundColor3=T.TAB,
-            Text=tab.label,
-            TextColor3=T.DIM,
-            Font=Enum.Font.GothamSemiBold,
-            TextSize=11,
-            BorderSizePixel=0, ZIndex=4,
-            AutoButtonColor=false,
-            Parent=tabBar,
-        })
-        local ul = mk("Frame",{
-            Size=UDim2.new(0.6,0,0,2),
-            Position=UDim2.new(0.2,0,1,-2),
-            BackgroundColor3=T.GOLD,
-            BorderSizePixel=0, ZIndex=5,
-            Visible=false,
-            Parent=tb,
-        })
-        tabBtnRefs[tab.key] = {btn=tb, ul=ul}
-
-        tb.MouseButton1Click:Connect(function()
-            -- Switch handled below after pageFrames exist
-        end)
-    end
-end
-
--- Create page frames (all same position/size, toggled by Visible)
-for _, tab in ipairs(TABS) do
-    local pf = mk("Frame",{
-        Size=UDim2.new(1,0,1,0),
-        Position=UDim2.new(0,0,0,0),
-        BackgroundTransparency=1,     -- ← transparent so mainBody bg shows through
-        BorderSizePixel=0,
-        ZIndex=4,
-        Visible=false,
-        Parent=mainBody,
-    })
-    pageFrames[tab.key] = pf
-end
-
-local function switchTab(key)
-    if activeKey == key then return end
-    activeKey = key
-    for _, tab in ipairs(TABS) do
-        local refs = tabBtnRefs[tab.key]
-        local on   = (tab.key == key)
-        refs.btn.TextColor3       = on and T.GOLD or T.DIM
-        refs.btn.BackgroundColor3 = on and T.TABSEL or T.TAB
-        refs.ul.Visible           = on
-        pageFrames[tab.key].Visible = on
-    end
-end
-
--- Wire tab buttons now that pageFrames exist
-for _, tab in ipairs(TABS) do
-    tabBtnRefs[tab.key].btn.MouseButton1Click:Connect(function()
-        switchTab(tab.key)
-    end)
-end
-
--- ════════════════════════════════════════════════════════════════════════════
---  SHARED BUILDERS
--- ════════════════════════════════════════════════════════════════════════════
-local ownedTicks = {}  -- name → TextLabel
-
--- Category color
-local function catColor(cat)
-    if cat:find("Chroma") then return T.PRPL end
-    if cat:find("Gun")    then return T.BLUE end
-    return T.GOLD
-end
-
--- Search box
-local function makeSearchBox(parent, yPos, onChanged)
-    local frame = mk("Frame",{
-        Size=UDim2.new(1,0,0,34),
-        Position=UDim2.new(0,0,0,yPos),
-        BackgroundColor3=T.BAR,
-        BorderSizePixel=0, ZIndex=5, Parent=parent,
-    })
-    local box = mk("TextBox",{
-        Size=UDim2.new(1,-20,0,26),
-        Position=UDim2.new(0,10,0,4),
-        BackgroundColor3=T.INPUT,
-        Text="",
-        PlaceholderText="🔍  Search...",
-        TextColor3=T.TEXT,
-        PlaceholderColor3=T.DIM,
-        Font=Enum.Font.GothamSemiBold,
-        TextSize=12,
-        BorderSizePixel=0,
-        ZIndex=6,
-        ClearTextOnFocus=false,
-        Parent=frame,
-    })
-    corner(box, 6)
-    mk("UIPadding",{
-        PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),
-        Parent=box,
-    })
-    box:GetPropertyChangedSignal("Text"):Connect(function()
-        onChanged(box.Text:lower():gsub("^%s+",""):gsub("%s+$",""))
-    end)
-    return frame
-end
-
--- Item row
-local function makeItemRow(parent, item, idx)
-    local col = catColor(item.cat)
-
-    local row = mk("Frame",{
-        Size=UDim2.new(1,-8,0,32),
-        BackgroundColor3=T.ROW,        -- ← lighter dark so row is VISIBLE
-        BorderSizePixel=0,
-        ZIndex=5,
-        LayoutOrder=idx,
-        Parent=parent,
-    })
-    corner(row, 6)
-
-    -- Left colour stripe
-    mk("Frame",{
-        Size=UDim2.new(0,4,0,20),
-        Position=UDim2.new(0,4,0.5,-10),
-        BackgroundColor3=col,
-        BorderSizePixel=0, ZIndex=6,
-        Parent=row,
-    })
-
-    -- Category label
-    Lbl(row, item.cat,
-        UDim2.new(0,14,0,0), UDim2.new(0,90,1,0),
-        9, col, Enum.Font.Gotham, Enum.TextXAlignment.Left, 6)
-
-    -- Item name
-    Lbl(row, item.name,
-        UDim2.new(0,108,0,0), UDim2.new(1,-220,1,0),
-        13, T.TEXT, Enum.Font.GothamSemiBold, Enum.TextXAlignment.Left, 6)
-
-    -- Owned tick
-    local tick = Lbl(row, "",
-        UDim2.new(1,-110,0,0), UDim2.new(0,18,1,0),
-        14, T.OK, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 6)
-    ownedTicks[item.name] = tick
-
-    -- Equip button
-    local eBtn = mk("TextButton",{
-        Size=UDim2.new(0,84,0,22),
-        Position=UDim2.new(1,-90,0.5,-11),
-        BackgroundColor3=T.TABSEL,
-        Text="Equip",
-        TextColor3=col,
-        Font=Enum.Font.GothamBold,
-        TextSize=11,
-        BorderSizePixel=0, ZIndex=7,
-        AutoButtonColor=false,
-        Parent=row,
-    })
-    corner(eBtn, 5)
-    eBtn.MouseEnter:Connect(function()
-        TweenService:Create(eBtn,TweenInfo.new(0.1),{BackgroundColor3=T.SEP}):Play()
-    end)
-    eBtn.MouseLeave:Connect(function()
-        TweenService:Create(eBtn,TweenInfo.new(0.1),{BackgroundColor3=T.TABSEL}):Play()
-    end)
-    eBtn.MouseButton1Click:Connect(function()
-        local ok, msg = equipWeapon(item.name, item.cat)
-        giveItem(item.name)
-        if ownedTicks[item.name] then ownedTicks[item.name].Text = "✓" end
-        setProgress(1,1, (ok and "✓ " or "⚠ ")..msg)
-    end)
-
-    return row
-end
-
--- Scrollable item list panel
--- yTop = Y offset from page top where the scroll starts
--- listHeight = pixel height of the scroll area
-local function makeItemList(page, items, yTop, listHeight)
-    -- Fallback error label (shows if list build fails)
-    local errLbl = Lbl(page, "",
-        UDim2.new(0,12,0,yTop+8), UDim2.new(1,-24,0,20),
-        12, T.ERR, Enum.Font.Gotham, Enum.TextXAlignment.Left, 5)
-
-    if #items == 0 then
-        errLbl.Text = "⚠  No items in this category."
-        return nil
-    end
-
-    -- Scroll frame
-    local scroll = mk("ScrollingFrame",{
-        Size=UDim2.new(1,0,0,listHeight),
-        Position=UDim2.new(0,0,0,yTop),
-        BackgroundColor3=T.SCROLL,
-        BorderSizePixel=0,
-        CanvasSize=UDim2.new(0,0,0,0),
-        AutomaticCanvasSize=Enum.AutomaticSize.Y,
-        ScrollBarThickness=5,
-        ScrollBarImageColor3=T.SEP,
-        ZIndex=4,
-        Parent=page,
-    })
-    corner(scroll, 0)
-
-    local layout = mk("UIListLayout",{
-        SortOrder=Enum.SortOrder.LayoutOrder,
-        Padding=UDim.new(0,3),
-        Parent=scroll,
-    })
-    mk("UIPadding",{
-        PaddingTop=UDim.new(0,4), PaddingBottom=UDim.new(0,4),
-        PaddingLeft=UDim.new(0,4), PaddingRight=UDim.new(0,4),
-        Parent=scroll,
-    })
-
-    local ok, err = pcall(function()
-        for i, item in ipairs(items) do
-            makeItemRow(scroll, item, i)
-        end
-    end)
-    if not ok then
-        errLbl.Text = "⚠  List build error: "..(err or "unknown")
-        warn("[MM2GodlyHub] List build error:", err)
-        return scroll
-    end
-
-    -- Search filter
-    local function applySearch(query)
-        for _, child in pairs(scroll:GetChildren()) do
-            if child:IsA("Frame") then
-                if query == "" then
-                    child.Visible = true
-                else
-                    -- Find name label (the wider one, starts at UDim2 0,108)
-                    local matched = false
-                    for _, lbl2 in pairs(child:GetChildren()) do
-                        if lbl2:IsA("TextLabel") then
-                            if lbl2.Text:lower():find(query, 1, true) then
-                                matched = true; break
-                            end
-                        end
-                    end
-                    child.Visible = matched
-                end
-            end
-        end
-    end
-
-    return scroll, applySearch
-end
-
--- Action bar (Give-All + category shortcuts)
-local function makeActionBar(page, label, giveList, giveLabel)
-    local bar = mk("Frame",{
-        Size=UDim2.new(1,0,0,44),
-        Position=UDim2.new(0,0,0,0),
-        BackgroundColor3=T.BAR,
-        BorderSizePixel=0, ZIndex=5, Parent=page,
-    })
-
-    local batchRunning = false
-    local giveBtn = mk("TextButton",{
-        Size=UDim2.new(0.54,-6,0,30),
-        Position=UDim2.new(0,6,0,7),
-        BackgroundColor3=T.GOLD,
-        Text="⚔  "..label,
-        TextColor3=C(10,10,14),
-        Font=Enum.Font.GothamBold,
-        TextSize=11,
-        BorderSizePixel=0, ZIndex=6,
-        AutoButtonColor=false,
-        Parent=bar,
-    })
-    corner(giveBtn, 7)
-    giveBtn.MouseEnter:Connect(function()
-        TweenService:Create(giveBtn,TweenInfo.new(0.1),{BackgroundColor3=T.GOLD2}):Play()
-    end)
-    giveBtn.MouseLeave:Connect(function()
-        TweenService:Create(giveBtn,TweenInfo.new(0.1),{BackgroundColor3=T.GOLD}):Play()
-    end)
-
-    giveBtn.MouseButton1Click:Connect(function()
-        if batchRunning then return end
-        batchRunning = true
-        task.spawn(function()
-            local total, added, dupes = #giveList, 0, 0
-            for i, item in ipairs(giveList) do
-                if giveItem(item.name) then
-                    added = added + 1
-                    if ownedTicks[item.name] then ownedTicks[item.name].Text = "✓" end
-                else
-                    dupes = dupes + 1
-                end
-                if i % 10 == 0 then
-                    setProgress(i, total, giveLabel.." — "..i.."/"..total)
-                    task.wait(0.04)
-                end
-            end
-            setProgress(total, total,
-                "✅  Done! "..added.." added, "..dupes.." already owned")
-            pcall(function()
-                StarterGui:SetCore("SendNotification",{
-                    Title="MM2 Godly Hub",
-                    Text=added.." Godlies marked — hit Equip on any to wear it",
-                    Duration=5,
-                })
-            end)
-            task.wait(0.8)
-            batchRunning = false
-        end)
-    end)
-
-    return bar
-end
-
--- ════════════════════════════════════════════════════════════════════════════
---  BUILD EACH PAGE
--- ════════════════════════════════════════════════════════════════════════════
-local BODY_H = WIN_H - 74 - 24  -- height of mainBody
-
--- ─── ALL GODLIES ─────────────────────────────────────────────────────────────
-do
-    local pg = pageFrames["all"]
-
-    -- Action bar (Give All + shortcut btns)
-    local bar = makeActionBar(pg,
-        "GIVE ALL GODLIES ("..#ALL_ITEMS..")", ALL_ITEMS, "All Godlies")
-
-    -- Shortcut buttons inside the bar
-    local shortcuts = {
-        {label="🗡 Knives", col=T.GOLD,  cat="Knife"},
-        {label="🔫 Guns",   col=T.BLUE,  cat="Gun"},
-        {label="✨ Chroma", col=T.PRPL,  cat="Chroma"},
-        {label="🗑 Clear",  col=T.RED,   cat="clear"},
-    }
-    local btnW = 0.11
-    for i, sc in ipairs(shortcuts) do
-        local xPct = 0.55 + (i-1)*0.1125
-        local sb = mk("TextButton",{
-            Size=UDim2.new(0.105,-2,0,30),
-            Position=UDim2.new(xPct, 1, 0, 7),
-            BackgroundColor3=T.TABSEL,
-            Text=sc.label,
-            TextColor3=sc.col,
-            Font=Enum.Font.GothamBold,
-            TextSize=9,
-            BorderSizePixel=0, ZIndex=6,
-            AutoButtonColor=false,
-            Parent=bar,
-        })
-        corner(sb, 5)
-        sb.MouseButton1Click:Connect(function()
-            if sc.cat == "clear" then
-                OWNED = {}
-                for _, lbl2 in pairs(ownedTicks) do lbl2.Text = "" end
-                setProgress(0,0,"🗑  Session cleared")
-            else
-                local list = {}
-                for _, item in ipairs(ALL_ITEMS) do
-                    if item.cat:find(sc.cat) then table.insert(list, item) end
-                end
-                -- reuse giveBtn logic via spawn
-                task.spawn(function()
-                    local total, added = #list, 0
-                    for i, item in ipairs(list) do
-                        if giveItem(item.name) then
-                            added = added + 1
-                            if ownedTicks[item.name] then ownedTicks[item.name].Text = "✓" end
-                        end
-                        if i%10==0 then
-                            setProgress(i,total,sc.label.." — "..i.."/"..total)
-                            task.wait(0.04)
-                        end
-                    end
-                    setProgress(total,total,"✅  "..added.." "..sc.label.." added")
-                end)
-            end
-        end)
-    end
-
-    -- Search bar
-    local searchBar, searchApply = nil, nil
-    local searchFrame = makeSearchBox(pg, 44, function(q)
-        if searchApply then searchApply(q) end
-    end)
-
-    -- Item list (below bar=44 + search=34 = 78px, fills to bottom)
-    local listH = BODY_H - 78
-    local scroll, applyFn = makeItemList(pg, ALL_ITEMS, 78, listH)
-    searchApply = applyFn
-end
-
--- ─── KNIVES ──────────────────────────────────────────────────────────────────
-do
-    local pg = pageFrames["knives"]
-    local kItems = {}
-    for _, n in ipairs(GODLY_KNIVES) do table.insert(kItems,{name=n,cat="Knife"}) end
-
-    makeActionBar(pg, "GIVE ALL KNIVES ("..#kItems..")", kItems, "Godly Knives")
-    local searchApply
-    makeSearchBox(pg, 44, function(q) if searchApply then searchApply(q) end end)
-    local _, fn = makeItemList(pg, kItems, 78, BODY_H-78)
-    searchApply = fn
-end
-
--- ─── GUNS ────────────────────────────────────────────────────────────────────
-do
-    local pg = pageFrames["guns"]
-    local gItems = {}
-    for _, n in ipairs(GODLY_GUNS) do table.insert(gItems,{name=n,cat="Gun"}) end
-
-    makeActionBar(pg, "GIVE ALL GUNS ("..#gItems..")", gItems, "Godly Guns")
-    local searchApply
-    makeSearchBox(pg, 44, function(q) if searchApply then searchApply(q) end end)
-    local _, fn = makeItemList(pg, gItems, 78, BODY_H-78)
-    searchApply = fn
-end
-
--- ─── CHROMAS ─────────────────────────────────────────────────────────────────
-do
-    local pg = pageFrames["chroma"]
-    local cItems = {}
-    for _, n in ipairs(CHROMA_KNIVES) do table.insert(cItems,{name=n,cat="Chroma Knife"}) end
-    for _, n in ipairs(CHROMA_GUNS)   do table.insert(cItems,{name=n,cat="Chroma Gun"})   end
-
-    makeActionBar(pg, "GIVE ALL CHROMAS ("..#cItems..")", cItems, "Chromas")
-
-    -- Chroma info badge
-    local badge = mk("Frame",{
-        Size=UDim2.new(1,-12,0,22),
-        Position=UDim2.new(0,6,0,46),
-        BackgroundColor3=C(50,20,80),
-        BackgroundTransparency=0.4,
-        BorderSizePixel=0, ZIndex=5, Parent=pg,
-    })
-    corner(badge,5)
-    Lbl(badge,"  ✨  Chroma items get animated rainbow effect when equipped",
-        UDim2.new(0,0,0,0),UDim2.new(1,0,1,0),10,T.PRPL,Enum.Font.Gotham,
-        Enum.TextXAlignment.Left,6)
-
-    local searchApply
-    makeSearchBox(pg, 70, function(q) if searchApply then searchApply(q) end end)
-    local _, fn = makeItemList(pg, cItems, 104, BODY_H-104)
-    searchApply = fn
-end
-
--- ─── SETTINGS ────────────────────────────────────────────────────────────────
-do
-    local pg = pageFrames["settings"]
-
-    -- Section: Save/Load loadout
-    mk("Frame",{
-        Size=UDim2.new(1,-12,0,22), Position=UDim2.new(0,6,0,6),
-        BackgroundColor3=T.TABSEL, BorderSizePixel=0, ZIndex=5, Parent=pg,
-    })
-    Lbl(pg,"  💾  SESSION LOADOUT SYSTEM",
-        UDim2.new(0,6,0,6),UDim2.new(1,-12,0,22),
-        11,T.GOLD,Enum.Font.GothamBold,Enum.TextXAlignment.Left,6)
-
-    local saveInput = mk("TextBox",{
-        Size=UDim2.new(0.58,-10,0,28),
-        Position=UDim2.new(0,8,0,34),
-        BackgroundColor3=T.INPUT,
-        Text="",
-        PlaceholderText="Loadout name...",
-        TextColor3=T.TEXT,
-        PlaceholderColor3=T.DIM,
-        Font=Enum.Font.GothamSemiBold,
-        TextSize=12,
-        BorderSizePixel=0, ZIndex=6, Parent=pg,
-        ClearTextOnFocus=false,
-    })
-    corner(saveInput,6)
-
-    local saveBtn = Btn(pg,"💾 Save",
-        UDim2.new(0.60,0,0,34),UDim2.new(0.19,-4,0,28),
-        T.TABSEL,T.GOLD,11,6,6)
-    local loadList = mk("ScrollingFrame",{
-        Size=UDim2.new(1,-12,0,80),
-        Position=UDim2.new(0,6,0,68),
-        BackgroundColor3=T.SCROLL,
-        BorderSizePixel=0,
-        CanvasSize=UDim2.new(0,0,0,0),
-        AutomaticCanvasSize=Enum.AutomaticSize.Y,
-        ScrollBarThickness=4,
-        ScrollBarImageColor3=T.SEP,
-        ZIndex=5, Parent=pg,
-    })
-    corner(loadList,7)
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=loadList})
-    mk("UIPadding",{PaddingTop=UDim.new(0,3),PaddingLeft=UDim.new(0,3),PaddingRight=UDim.new(0,3),Parent=loadList})
-
-    local function refreshLoadList()
-        for _, c in pairs(loadList:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
-        local idx = 0
-        for name, items in pairs(LOADOUTS) do
-            idx=idx+1
-            local r = mk("Frame",{
-                Size=UDim2.new(1,0,0,26),BackgroundColor3=T.ROW,
-                BorderSizePixel=0, LayoutOrder=idx, ZIndex=6, Parent=loadList,
-            })
-            corner(r,5)
-            Lbl(r," "..name.." ("..#items..")",
-                UDim2.new(0,0,0,0),UDim2.new(1,-60,1,0),11,T.GOLD,Enum.Font.Gotham,
-                Enum.TextXAlignment.Left,7)
-            local lb2 = Btn(r,"Load",
-                UDim2.new(1,-56,0.5,-11),UDim2.new(0,50,0,22),
-                T.TABSEL,T.GOLD,10,5,7)
-            lb2.MouseButton1Click:Connect(function()
-                task.spawn(function()
-                    for i,iname in ipairs(items) do
-                        giveItem(iname)
-                        if ownedTicks[iname] then ownedTicks[iname].Text="✓" end
-                        if i%10==0 then task.wait(0.02) end
-                    end
-                    setProgress(#items,#items,"Loaded: "..name)
-                end)
-            end)
-        end
-    end
-
-    saveBtn.MouseButton1Click:Connect(function()
-        local n = saveInput.Text:gsub("^%s+",""):gsub("%s+$","")
-        if n=="" then return end
-        LOADOUTS[n]={}
-        for name in pairs(OWNED) do table.insert(LOADOUTS[n],name) end
-        setProgress(1,1,"💾 Saved '"..n.."' ("..#LOADOUTS[n].." items)")
-        refreshLoadList()
-    end)
-
-    -- Info section
-    mk("Frame",{
-        Size=UDim2.new(1,-12,0,1), Position=UDim2.new(0,6,0,155),
-        BackgroundColor3=T.SEP, BorderSizePixel=0, ZIndex=5, Parent=pg,
-    })
-    Lbl(pg,"  ℹ  HOW IT WORKS",
-        UDim2.new(0,6,0,161),UDim2.new(1,-12,0,20),
-        11,T.GOLD,Enum.Font.GothamBold,Enum.TextXAlignment.Left,5)
-
-    local notes = {
-        "• Click Equip on any row → your character wears the weapon.",
-        "• Equipped weapon IS visible to other players (character replicates).",
-        "• Give All marks items owned this session for loadout saving.",
-        "• Inventory is session-based: MM2's DataStore is server-authoritative.",
-        "• Chroma items cycle through rainbow colour when equipped.",
-        "• Use the search box to filter 175 items instantly.",
-    }
-    for i, note in ipairs(notes) do
-        Lbl(pg, note,
-            UDim2.new(0,10,0,181+(i-1)*20),
-            UDim2.new(1,-20,0,18),
-            10, i==4 and T.WARN or T.DIM,
-            Enum.Font.Gotham, Enum.TextXAlignment.Left, 5)
-    end
-
-    -- Live owned counter
-    local counterLbl = Lbl(pg,
-        "Owned this session: 0 / "..#ALL_ITEMS,
-        UDim2.new(0,10,0,305),UDim2.new(1,-20,0,18),
-        11,T.OK,Enum.Font.GothamBold,Enum.TextXAlignment.Left,5)
-
+    LocalPlayer.ReplicationFocus = Workspace
     RunService.Heartbeat:Connect(function()
-        local n=0; for _ in pairs(OWNED) do n=n+1 end
-        counterLbl.Text = "Owned this session: "..n.." / "..#ALL_ITEMS
+        pcall(function()
+            sethiddenproperty(LocalPlayer,"SimulationRadius",100000)
+            sethiddenproperty(LocalPlayer,"MaxSimulationRadius",100000)
+        end)
+        for _,p in pairs(N.BaseParts) do
+            if p:IsDescendantOf(Workspace) and p.Parent then
+                p.Velocity = N.Velocity
+            end
+        end
     end)
 end
 
--- ════════════════════════════════════════════════════════════════════════════
---  BOOT — force All tab visible + layout refresh
--- ════════════════════════════════════════════════════════════════════════════
--- Immediate switch
-switchTab("all")
+local function playSound(id)
+    local s=Instance.new("Sound")
+    s.SoundId="rbxassetid://"..id; s.Parent=SoundService; s:Play()
+    s.Ended:Connect(function() s:Destroy() end)
+end
+playSound("2865227271")
 
--- Force refresh after one frame so the ScrollingFrame measures itself correctly
-task.delay(0.1, function()
-    -- Re-hide then re-show the active page to trigger layout
-    local pg = pageFrames["all"]
-    if pg then
-        pg.Visible = false
-        task.wait()
-        pg.Visible = true
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- ─── 500-POINT REALISTIC LONGSWORD TARGET TABLE ───────────────────────────────
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- tip up (+62), pommel down (-58), total ~120 studs
+
+local TARGETS = {}
+
+local function push(x,y,z) table.insert(TARGETS,{x=x,y=y,z=z}) end
+
+local function fullRing(cx,cy,cz,rx,rz,n)
+    for i=0,n-1 do
+        local a=2*math.pi*i/n
+        push(cx+rx*math.cos(a), cy, cz+rz*math.sin(a))
     end
-    setProgress(0, #ALL_ITEMS,
-        "  ✅  "..#ALL_ITEMS.." Godlies loaded — select Equip on any item")
+end
+
+local function bladeHW(y)
+    if y<=-14 then return 2.0 end
+    if y>=62  then return 0.0 end
+    local t=(y+14)/76
+    return 2.0*(1-t)^1.3
+end
+
+local function bladeHD(y)
+    if y<=-14 then return 0.55 end
+    if y>=62  then return 0.0  end
+    local t=(y+14)/76
+    return 0.55*(1-t)^1.1
+end
+
+-- 1. POMMEL  ~38 pts  -58 to -52
+fullRing(0,-55,0, 4.2,3.0, 20)
+fullRing(0,-56,0, 3.2,2.4, 16)
+fullRing(0,-58,0, 2.0,1.6, 12)
+fullRing(0,-52,0, 2.2,1.8, 12)
+for r=1,2 do local fr=r/3 fullRing(0,-55.5,0,fr*4.2,fr*3.0,math.max(6,math.floor(fr*16+4))) end
+push(0,-55,0) push(0,-57,0) push(0,-53,0)
+
+-- 2. GRIP  ~72 pts  -52 to -28
+for i=0,10 do
+    local t=i/10; local y=-52+t*24
+    local r=0.85+0.18*math.sin(t*math.pi)
+    for j=0,9 do local a=2*math.pi*j/10 push(r*math.cos(a),y,r*0.75*math.sin(a)) end
+end
+for i=0,39 do
+    local t=i/39; local y=-52+t*24; local a=2*math.pi*t*2
+    push(1.05*math.cos(a),y,1.05*0.75*math.sin(a))
+end
+
+-- 3. CROSSGUARD  ~52 pts  -28 to -22
+for _,dy in ipairs({-27,-25,-23}) do
+    for i=0,24 do
+        local t=i/24; local x=-14+t*28
+        local flare=1+0.4*(math.abs(t-0.5)*2)^2
+        push(x,dy,0); push(x,dy,0.6*flare); push(x,dy,-0.6*flare)
+    end
+end
+for _,side in ipairs({-1,1}) do
+    for i=0,7 do
+        local a=math.pi/2+side*(i/7)*math.pi
+        push(side*14+1.4*math.cos(a),-25,0.7*math.sin(a))
+    end
+end
+for i=0,5 do push(0,-28+(i/5)*6,0) end
+
+-- 4. RICASSO  ~32 pts  -22 to -14
+for i=0,7 do
+    local t=i/7; local y=-22+t*8
+    push(-2.0,y,0); push(2.0,y,0)
+    push(0,y,0.55);  push(0,y,-0.55)
+end
+
+-- 5. BLADE FORTE  ~84 pts  -14 to 20
+for i=0,14 do
+    local t=i/14; local y=-14+t*34
+    local hw=bladeHW(y); local hd=bladeHD(y)
+    push(-hw,y,0); push(hw,y,0)
+    push(0,y,hd);  push(0,y,-hd)
+    push(0.4,y,hd*0.55); push(-0.4,y,hd*0.55)
+end
+
+-- 6. BLADE MID  ~64 pts  20 to 48
+for i=0,15 do
+    local t=i/15; local y=20+t*28
+    local hw=bladeHW(y); local hd=bladeHD(y)
+    push(-hw,y,0); push(hw,y,0)
+    push(0,y,hd);  push(0,y,-hd)
+end
+
+-- 7. BLADE FOIBLE  ~32 pts  48 to 58
+for i=0,7 do
+    local t=i/7; local y=48+t*10
+    local hw=bladeHW(y); local hd=bladeHD(y)
+    push(-hw,y,0); push(hw,y,0)
+    push(0,y,hd);  push(0,y,-hd)
+end
+
+-- 8. TIP  ~16 pts  58 to 62
+for i=0,7 do
+    local t=i/7; local y=58+t*4
+    local hw=bladeHW(y); local hd=bladeHD(y)
+    if hw>0.05 then push(-hw,y,0); push(hw,y,0); push(0,y,hd); push(0,y,-hd) end
+end
+push(0,62,0)
+
+-- 9. FACE FILLS  ~80 pts
+for _,y in ipairs({-10,0,10,20,30,40,48,52,56}) do
+    local hw=bladeHW(y); local hd=bladeHD(y)
+    if hw>0.1 then
+        for j=0,7 do
+            local a=2*math.pi*j/8
+            push(hw*math.cos(a)*math.abs(math.cos(a))^0.5,y,hd*math.sin(a)*math.abs(math.sin(a))^0.5)
+        end
+        push(-hw*0.5,y,0); push(hw*0.5,y,0)
+        push(0,y,hd*0.5);  push(0,y,-hd*0.5)
+    end
+end
+
+-- 10. PAD TO 500
+local extra=500-#TARGETS
+if extra>0 then
+    for i=1,extra do
+        local t=(i-1)/math.max(extra-1,1)
+        local y=-14+t*76
+        local hw=bladeHW(y)
+        push(((i%2==0)and 1 or -1)*hw,y,0)
+    end
+end
+while #TARGETS>500 do TARGETS[#TARGETS]=nil end
+while #TARGETS<500 do push(0,62,0) end
+
+local function getSlot(i) return TARGETS[((i-1)%500)+1] end
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- ─── SWORD ENGINE ────────────────────────────────────────────────────────────
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+local MAX_SWORDS       = 8
+local BASE_LEFT_STUDS  = 45
+local SWORD_SPREAD     = 4
+local partOwner        = {}
+local partCounter      = 0
+local activeSwordCount = 0
+local swords           = {}
+
+local moveAllEnabled   = false
+local moveAllActive    = false
+local moveAllTouch     = nil
+local moveAllOrigin    = Vector2.new()
+local moveAllDelta     = Vector2.new()
+local moveAllLockedY   = {}
+
+local trailEnabled     = false
+local trailDragging    = false
+local trailTouch       = nil
+local trailReturning   = false
+
+local HISTORY_SIZE     = 120
+local LAG_FRAMES       = 6
+local trailHistory     = {}
+local trailHead        = 0
+local returnTargets    = {}
+local returnConns      = {}
+
+local function trailHistoryInit()
+    local base = humanoidRootPart and humanoidRootPart.Position or Vector3.new()
+    for i=1,HISTORY_SIZE do trailHistory[i]=base end
+    trailHead = 0
+end
+
+local function trailHistoryPush(pos)
+    trailHead=(trailHead%HISTORY_SIZE)+1
+    trailHistory[trailHead]=pos
+end
+
+local function trailHistoryGet(framesAgo)
+    framesAgo=math.clamp(framesAgo,0,HISTORY_SIZE-1)
+    local idx=((trailHead-1-framesAgo)%HISTORY_SIZE)+1
+    return trailHistory[idx]
+end
+
+trailHistoryInit()
+
+local function createSword(slotIndex)
+    local sw={}
+    sw.slotIndex=slotIndex; sw.enabled=false
+    sw.fingerActive=false; sw.fingerTouch=nil
+    sw.yaw=0; sw.pitch=0; sw.parts={}
+    sw.centerPos=humanoidRootPart.Position
+
+    sw.folder=Instance.new("Folder",Workspace)
+    sw.anchor=Instance.new("Part",sw.folder)
+    sw.anchor.Anchored=true; sw.anchor.CanCollide=false
+    sw.anchor.Transparency=1; sw.anchor.Size=Vector3.new(1,1,1)
+    sw.anchor.Position=humanoidRootPart.Position
+
+    local TAG_A="SW"..slotIndex.."_Att"
+    local TAG_P="SW"..slotIndex.."_AP"
+    local TAG_T="SW"..slotIndex.."_Torq"
+
+    sw.getFollowPos=function()
+        if not humanoidRootPart then return sw.centerPos end
+        local cf=humanoidRootPart.CFrame
+        local left=-cf.RightVector
+        local dist=BASE_LEFT_STUDS+(slotIndex-1)*SWORD_SPREAD
+        return cf.Position+left*dist
+    end
+
+    sw.isEligible=function(p)
+        if not p:IsA("BasePart") then return false end
+        if p.Anchored then return false end
+        if not p:IsDescendantOf(Workspace) then return false end
+        for _,osw in ipairs(swords) do
+            if p:IsDescendantOf(osw.folder) then return false end
+        end
+        if LocalPlayer.Character and p:IsDescendantOf(LocalPlayer.Character) then return false end
+        local a=p.Parent
+        while a and a~=Workspace do
+            if a:FindFirstChild("Humanoid") or a:FindFirstChild("Head") then return false end
+            a=a.Parent
+        end
+        return true
+    end
+
+    sw.forcePart=function(p)
+        for _,x in next,p:GetChildren() do
+            if x:IsA("BodyAngularVelocity") or x:IsA("BodyForce") or x:IsA("BodyGyro")
+            or x:IsA("BodyPosition") or x:IsA("BodyThrust") or x:IsA("BodyVelocity")
+            or x:IsA("RocketPropulsion") then x:Destroy() end
+        end
+        for _,n in ipairs({TAG_A,TAG_P,TAG_T}) do
+            local c=p:FindFirstChild(n); if c then c:Destroy() end
+        end
+        p.CanCollide=false
+        local att=Instance.new("Attachment",p); att.Name=TAG_A
+        local torq=Instance.new("Torque",p); torq.Name=TAG_T
+        torq.Torque=Vector3.new(1e5,1e5,1e5); torq.Attachment0=att
+        local na=Instance.new("Attachment",sw.anchor)
+        local ap=Instance.new("AlignPosition",p); ap.Name=TAG_P
+        ap.MaxForce=math.huge; ap.MaxVelocity=math.huge
+        ap.Responsiveness=1000; ap.Attachment0=att; ap.Attachment1=na; ap.Parent=p
+    end
+
+    sw.cleanPart=function(p)
+        if not p or not p.Parent then return end
+        for _,n in ipairs({TAG_A,TAG_P,TAG_T}) do
+            local c=p:FindFirstChild(n); if c then c:Destroy() end
+        end
+    end
+
+    sw.addPart=function(p)
+        if not sw.enabled then return end
+        if not sw.isEligible(p) then return end
+        if table.find(sw.parts,p) then return end
+        local owner=partOwner[p]
+        if owner==nil then
+            if activeSwordCount==0 then return end
+            partCounter=partCounter+1
+            local assigned=((partCounter-1)%activeSwordCount)+1
+            partOwner[p]=assigned; owner=assigned
+        end
+        if owner~=slotIndex then return end
+        if getgenv().Network then getgenv().Network.RetainPart(p) end
+        sw.forcePart(p); table.insert(sw.parts,p)
+    end
+
+    sw.removePart=function(p)
+        local idx=table.find(sw.parts,p)
+        if idx then table.remove(sw.parts,idx) end
+        if partOwner[p]==slotIndex then partOwner[p]=nil end
+    end
+
+    sw.rot=function(x,y,z)
+        local cy,sy=math.cos(sw.yaw),math.sin(sw.yaw)
+        local cp,sp=math.cos(sw.pitch),math.sin(sw.pitch)
+        local rx=cy*x-sy*z; local rz=sy*x+cy*z
+        return rx,cp*y-sp*rz,sp*y+cp*rz
+    end
+
+    return sw
+end
+
+for i=1,MAX_SWORDS do table.insert(swords,createSword(i)) end
+
+local function resetPartitions()
+    for _,sw in ipairs(swords) do
+        for _,p in ipairs(sw.parts) do sw.cleanPart(p) end
+        sw.parts={}
+        for _,ch in ipairs(sw.anchor:GetChildren()) do
+            if ch:IsA("Attachment") then ch:Destroy() end
+        end
+    end
+    partOwner={}; partCounter=0
+    if activeSwordCount==0 then return end
+    local pool={}
+    for _,p in ipairs(Workspace:GetDescendants()) do
+        if p:IsA("BasePart") and not p.Anchored and p:IsDescendantOf(Workspace) then
+            local skip=false
+            for _,sw in ipairs(swords) do if p:IsDescendantOf(sw.folder) then skip=true; break end end
+            if not skip and LocalPlayer.Character and p:IsDescendantOf(LocalPlayer.Character) then skip=true end
+            if not skip then
+                local a=p.Parent
+                while a and a~=Workspace do
+                    if a:FindFirstChild("Humanoid") or a:FindFirstChild("Head") then skip=true; break end
+                    a=a.Parent
+                end
+            end
+            if not skip then table.insert(pool,p) end
+        end
+    end
+    for i,p in ipairs(pool) do
+        local assigned=((i-1)%activeSwordCount)+1
+        partOwner[p]=assigned; partCounter=i
+        local sw=swords[assigned]
+        if sw.enabled then
+            if getgenv().Network then getgenv().Network.RetainPart(p) end
+            sw.forcePart(p); table.insert(sw.parts,p)
+        end
+    end
+end
+
+local function globalAdd(p)
+    if activeSwordCount==0 then return end
+    if not p:IsA("BasePart") or p.Anchored then return end
+    if not p:IsDescendantOf(Workspace) then return end
+    for _,sw in ipairs(swords) do if p:IsDescendantOf(sw.folder) then return end end
+    if LocalPlayer.Character and p:IsDescendantOf(LocalPlayer.Character) then return end
+    local a=p.Parent
+    while a and a~=Workspace do
+        if a:FindFirstChild("Humanoid") or a:FindFirstChild("Head") then return end
+        a=a.Parent
+    end
+    if partOwner[p] then
+        local sw=swords[partOwner[p]]
+        if sw and sw.enabled and not table.find(sw.parts,p) then
+            sw.forcePart(p); table.insert(sw.parts,p) end
+        return
+    end
+    partCounter=partCounter+1
+    local assigned=((partCounter-1)%activeSwordCount)+1
+    partOwner[p]=assigned
+    local sw=swords[assigned]
+    if sw and sw.enabled then
+        if getgenv().Network then getgenv().Network.RetainPart(p) end
+        sw.forcePart(p); table.insert(sw.parts,p)
+    end
+end
+
+local function globalRemove(p)
+    for _,sw in ipairs(swords) do
+        local idx=table.find(sw.parts,p) if idx then table.remove(sw.parts,idx) end
+    end
+    partOwner[p]=nil
+end
+
+Workspace.DescendantAdded:Connect(globalAdd)
+Workspace.DescendantRemoving:Connect(globalRemove)
+RunService.Stepped:Connect(function()
+    for _,p in ipairs(Workspace:GetDescendants()) do
+        if p:IsA("BasePart") and not p.Anchored and not partOwner[p] then globalAdd(p) end
+    end
 end)
 
--- Startup notify
+-- ─── Shape engine ─────────────────────────────────────────────────────────────
+RunService.Heartbeat:Connect(function()
+    for _,sw in ipairs(swords) do
+        if sw.enabled then
+            for i,part in ipairs(sw.parts) do
+                if part.Parent and not part.Anchored then
+                    local s=getSlot(i)
+                    local rx,ry,rz=sw.rot(s.x,s.y,s.z)
+                    local target=sw.centerPos+Vector3.new(rx,ry,rz)
+                    local dir=target-part.Position
+                    if dir.Magnitude>0 then part.Velocity=dir.Unit*999999 end
+                end
+            end
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- ─── TRAIL MODE ENGINE ───────────────────────────────────────────────────────
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+local RETURN_SPEED = 8
+
+local function cancelReturn()
+    trailReturning=false
+    for _,c in ipairs(returnConns) do pcall(function() c:Disconnect() end) end
+    returnConns={}
+end
+
+local function startReturn()
+    cancelReturn()
+    trailReturning=true
+    for i,sw in ipairs(swords) do returnTargets[i]=sw.getFollowPos() end
+    local conn
+    conn=RunService.Heartbeat:Connect(function(dt)
+        if not trailReturning then conn:Disconnect() return end
+        local allDone=true
+        for i,sw in ipairs(swords) do
+            if sw.enabled then
+                local target=returnTargets[i]
+                if target then
+                    local newPos=sw.centerPos:Lerp(target,math.min(1,RETURN_SPEED*dt))
+                    sw.centerPos=newPos; sw.anchor.Position=newPos
+                    if (newPos-target).Magnitude>0.05 then allDone=false end
+                end
+            end
+        end
+        if allDone then
+            trailReturning=false; conn:Disconnect()
+            for i,sw in ipairs(swords) do
+                if sw.enabled then sw.centerPos=sw.getFollowPos(); sw.anchor.Position=sw.centerPos end
+            end
+        end
+    end)
+    table.insert(returnConns,conn)
+end
+
+local trailConn
+local function startTrailEngine()
+    if trailConn then trailConn:Disconnect() trailConn=nil end
+    trailConn=RunService.Heartbeat:Connect(function(dt)
+        if not trailEnabled then trailConn:Disconnect() trailConn=nil return end
+        if not trailDragging then return end
+        trailHistoryPush(swords[1].centerPos)
+        for i=2,MAX_SWORDS do
+            local sw=swords[i]
+            if sw.enabled then
+                local histPos=trailHistoryGet((i-1)*LAG_FRAMES)
+                local TRAIL_LERP=math.min(1,22*dt)
+                sw.centerPos=sw.centerPos:Lerp(histPos,TRAIL_LERP)
+                sw.anchor.Position=sw.centerPos
+            end
+        end
+    end)
+end
+
+local TRAIL_DEPTH=20
+
+local function screenToWorldTrail(sp)
+    local cam=Workspace.CurrentCamera; if not cam then return nil end
+    local ray=cam:ScreenPointToRay(sp.X,sp.Y)
+    return ray.Origin+ray.Direction*TRAIL_DEPTH
+end
+
+local function screenToWorld(sp,planeY)
+    local cam=Workspace.CurrentCamera; if not cam then return nil end
+    local ray=cam:ScreenPointToRay(sp.X,sp.Y)
+    local d=ray.Direction
+    if math.abs(d.Y)<0.0001 then return ray.Origin+d*200 end
+    local t=(planeY-ray.Origin.Y)/d.Y
+    if t<=0 then return ray.Origin+d*200 end
+    return ray.Origin+d*t
+end
+
+-- ─── Follow engine ────────────────────────────────────────────────────────────
+RunService.Heartbeat:Connect(function()
+    if trailEnabled then return end
+    if trailReturning then return end
+    for _,sw in ipairs(swords) do
+        if sw.enabled and not sw.fingerActive and not moveAllActive then
+            sw.centerPos=sw.getFollowPos()
+            sw.anchor.Position=sw.centerPos
+        end
+    end
+end)
+
+-- ─── Move-All engine ──────────────────────────────────────────────────────────
+RunService.Heartbeat:Connect(function()
+    if not moveAllEnabled or not moveAllActive then return end
+    if trailEnabled then return end
+    local cam=Workspace.CurrentCamera; if not cam then return end
+    local cf=cam.CFrame
+    local fwd=Vector3.new(cf.LookVector.X,0,cf.LookVector.Z)
+    if fwd.Magnitude<0.01 then return end
+    fwd=fwd.Unit
+    local rgt=Vector3.new(cf.RightVector.X,0,cf.RightVector.Z).Unit
+    local SPEED=0.55
+    local move=(rgt*moveAllDelta.X+fwd*(-moveAllDelta.Y))*SPEED
+    for i,sw in ipairs(swords) do
+        if sw.enabled then
+            local newPos=sw.centerPos+move
+            local lockedY=moveAllLockedY[i] or sw.centerPos.Y
+            sw.centerPos=Vector3.new(newPos.X,lockedY,newPos.Z)
+            sw.anchor.Position=sw.centerPos
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- ─── GUI ─────────────────────────────────────────────────────────────────────
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+local ScreenGui=Instance.new("ScreenGui")
+ScreenGui.Name="DevilsBlade8GUI"; ScreenGui.ResetOnSpawn=false
+ScreenGui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+
+local sharedOverlay=Instance.new("Frame")
+sharedOverlay.Size=UDim2.new(1,0,1,0); sharedOverlay.BackgroundTransparency=1
+sharedOverlay.BorderSizePixel=0; sharedOverlay.ZIndex=0
+sharedOverlay.Visible=true; sharedOverlay.Parent=ScreenGui
+
+local dotColors8={
+    Color3.fromRGB(220,40,40),  Color3.fromRGB(40,180,220),
+    Color3.fromRGB(80,220,80),  Color3.fromRGB(220,160,40),
+    Color3.fromRGB(200,40,220), Color3.fromRGB(40,220,160),
+    Color3.fromRGB(220,100,40), Color3.fromRGB(100,100,255),
+}
+local fingerDots={}
+for i=1,MAX_SWORDS do
+    local fd=Instance.new("Frame")
+    fd.Size=UDim2.new(0,24,0,24); fd.AnchorPoint=Vector2.new(0.5,0.5)
+    fd.BackgroundColor3=dotColors8[i]; fd.BackgroundTransparency=0.15
+    fd.BorderSizePixel=0; fd.Visible=false; fd.ZIndex=10; fd.Parent=ScreenGui
+    Instance.new("UICorner",fd).CornerRadius=UDim.new(1,0)
+    fingerDots[i]=fd
+end
+
+local touchToSword={}
+local swordDragY={}
+
+-- ─── Trail input ──────────────────────────────────────────────────────────────
+sharedOverlay.InputBegan:Connect(function(inp)
+    if not trailEnabled then return end
+    if inp.UserInputType~=Enum.UserInputType.Touch
+    and inp.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+    if trailDragging then return end
+    cancelReturn(); trailReturning=false
+    trailDragging=true; trailTouch=inp
+    local wp=screenToWorldTrail(Vector2.new(inp.Position.X,inp.Position.Y))
+    if wp and swords[1].enabled then
+        swords[1].centerPos=wp; swords[1].anchor.Position=wp
+        for hi=1,HISTORY_SIZE do trailHistory[hi]=wp end
+        trailHead=0
+    end
+    startTrailEngine()
+end)
+
+UserInputService.InputChanged:Connect(function(inp)
+    if trailEnabled and trailDragging and inp==trailTouch then
+        if inp.UserInputType~=Enum.UserInputType.Touch
+        and inp.UserInputType~=Enum.UserInputType.MouseMovement then return end
+        local wp=screenToWorldTrail(Vector2.new(inp.Position.X,inp.Position.Y))
+        if wp and swords[1].enabled then
+            swords[1].centerPos=wp; swords[1].anchor.Position=wp
+        end
+        return
+    end
+    local i=touchToSword[inp]
+    if i then
+        local sw=swords[i]; if not sw or not sw.fingerActive then return end
+        if inp.UserInputType~=Enum.UserInputType.Touch
+        and inp.UserInputType~=Enum.UserInputType.MouseMovement then return end
+        local lockedY=swordDragY[i] or sw.centerPos.Y
+        local wp=screenToWorld(Vector2.new(inp.Position.X,inp.Position.Y),lockedY)
+        if wp then
+            local locked=Vector3.new(wp.X,lockedY,wp.Z)
+            sw.centerPos=locked; sw.anchor.Position=locked
+            fingerDots[i].Position=UDim2.new(0,inp.Position.X,0,inp.Position.Y)
+            fingerDots[i].Visible=true
+        end
+    end
+    if moveAllActive and inp==moveAllTouch then
+        local function ck(d,m) local mg=d.Magnitude return mg>m and (d/mg*m) or d end
+        local d=Vector2.new(inp.Position.X,inp.Position.Y)-moveAllOrigin
+        local c=ck(d,42); moveAllDelta=c
+        if MAK then MAK.Position=UDim2.new(0.5,c.X-17,0.5,c.Y-17) end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+    if trailEnabled and inp==trailTouch then
+        trailDragging=false; trailTouch=nil; startReturn(); return
+    end
+    local i=touchToSword[inp]
+    if i then
+        local sw=swords[i]
+        if sw then
+            sw.fingerActive=false; sw.fingerTouch=nil; swordDragY[i]=nil
+            sw.centerPos=sw.getFollowPos(); sw.anchor.Position=sw.centerPos
+            fingerDots[i].Visible=false
+        end
+        touchToSword[inp]=nil
+    end
+    if inp==moveAllTouch then
+        moveAllActive=false; moveAllTouch=nil; moveAllDelta=Vector2.new()
+        if MAK then MAK.Position=UDim2.new(0.5,-17,0.5,-17) end
+    end
+    if inp==sjTouch then
+        sjActive=false; sjTouch=nil; sjDelta=Vector2.new()
+        if SK then SK.Position=UDim2.new(0.5,-17,0.5,-17) end
+    end
+end)
+
+-- individual drag begin
+sharedOverlay.InputBegan:Connect(function(inp)
+    if trailEnabled then return end
+    if moveAllEnabled then return end
+    if inp.UserInputType~=Enum.UserInputType.Touch
+    and inp.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+    for i,sw in ipairs(swords) do
+        if sw.enabled and not sw.fingerActive then
+            sw.fingerActive=true; sw.fingerTouch=inp; touchToSword[inp]=i
+            swordDragY[i]=sw.centerPos.Y
+            local wp=screenToWorld(Vector2.new(inp.Position.X,inp.Position.Y),swordDragY[i])
+            if wp then
+                local locked=Vector3.new(wp.X,swordDragY[i],wp.Z)
+                sw.centerPos=locked; sw.anchor.Position=locked
+                fingerDots[i].Position=UDim2.new(0,inp.Position.X,0,inp.Position.Y)
+                fingerDots[i].Visible=true
+            end
+            break
+        end
+    end
+end)
+
+-- ─── Main panel ───────────────────────────────────────────────────────────────
+local PANEL_H=750
+
+local MainFrame=Instance.new("Frame")
+MainFrame.Size=UDim2.new(0,260,0,PANEL_H)
+MainFrame.Position=UDim2.new(0.5,-130,0.5,-(PANEL_H/2))
+MainFrame.BackgroundColor3=Color3.fromRGB(12,3,3)
+MainFrame.BorderSizePixel=0; MainFrame.ZIndex=5; MainFrame.Parent=ScreenGui
+Instance.new("UICorner",MainFrame).CornerRadius=UDim.new(0,16)
+
+local pStroke=Instance.new("UIStroke"); pStroke.Color=Color3.fromRGB(180,30,30)
+pStroke.Thickness=1.5; pStroke.Parent=MainFrame
+
+local DragHandle=Instance.new("Frame")
+DragHandle.Size=UDim2.new(1,0,1,0); DragHandle.BackgroundTransparency=1
+DragHandle.BorderSizePixel=0; DragHandle.ZIndex=6; DragHandle.Parent=MainFrame
+
+local panelDragging=false; local panelTouchId=nil
+local panelDragStart=Vector2.new(); local panelStartPos=MainFrame.Position
+DragHandle.InputBegan:Connect(function(inp)
+    if inp.UserInputType~=Enum.UserInputType.MouseButton1
+    and inp.UserInputType~=Enum.UserInputType.Touch then return end
+    if panelDragging then return end
+    panelDragging=true; panelTouchId=inp
+    panelDragStart=Vector2.new(inp.Position.X,inp.Position.Y)
+    panelStartPos=MainFrame.Position
+end)
+UserInputService.InputChanged:Connect(function(inp)
+    if not panelDragging or inp~=panelTouchId then return end
+    if inp.UserInputType~=Enum.UserInputType.Touch
+    and inp.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    local dx=inp.Position.X-panelDragStart.X
+    local dy=inp.Position.Y-panelDragStart.Y
+    MainFrame.Position=UDim2.new(panelStartPos.X.Scale,panelStartPos.X.Offset+dx,
+        panelStartPos.Y.Scale,panelStartPos.Y.Offset+dy)
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp==panelTouchId then panelDragging=false; panelTouchId=nil end
+end)
+
+local function mkL(par,txt,y,ts,col)
+    local L=Instance.new("TextLabel")
+    L.Size=UDim2.new(1,-8,0,18); L.Position=UDim2.new(0,4,0,y)
+    L.Text=txt; L.TextColor3=col or Color3.fromRGB(255,180,180)
+    L.BackgroundTransparency=1; L.Font=Enum.Font.Fondamento
+    L.TextSize=ts or 12; L.TextXAlignment=Enum.TextXAlignment.Left
+    L.ZIndex=7; L.Parent=par; return L
+end
+local function mkB(par,txt,y,w,x,bg,tc,ts)
+    w=w or 0.8; x=x or 0.1
+    bg=bg or Color3.fromRGB(140,0,0); tc=tc or Color3.fromRGB(255,255,255)
+    local B=Instance.new("TextButton")
+    B.Size=UDim2.new(w,0,0,28); B.Position=UDim2.new(x,0,0,y)
+    B.Text=txt; B.BackgroundColor3=bg; B.TextColor3=tc
+    B.Font=Enum.Font.Fondamento; B.TextSize=ts or 13
+    B.BorderSizePixel=0; B.ZIndex=8; B.Parent=par
+    Instance.new("UICorner",B).CornerRadius=UDim.new(0,8)
+    return B
+end
+local function mkStepper(par,lbl,y,get,inc,dec)
+    mkL(par,lbl,y)
+    local d=mkB(par,"−",y+18,0.2,0.04,Color3.fromRGB(120,30,0))
+    local disp=Instance.new("TextLabel")
+    disp.Size=UDim2.new(0.46,0,0,28); disp.Position=UDim2.new(0.27,0,0,y+18)
+    disp.Text=tostring(get()); disp.BackgroundColor3=Color3.fromRGB(30,6,6)
+    disp.TextColor3=Color3.fromRGB(255,210,200); disp.Font=Enum.Font.Fondamento
+    disp.TextSize=13; disp.BorderSizePixel=0; disp.ZIndex=7; disp.Parent=par
+    Instance.new("UICorner",disp).CornerRadius=UDim.new(0,6)
+    local u=mkB(par,"+",y+18,0.2,0.76,Color3.fromRGB(180,20,0))
+    d.MouseButton1Click:Connect(function() dec();disp.Text=tostring(get());playSound("12221967") end)
+    u.MouseButton1Click:Connect(function() inc();disp.Text=tostring(get());playSound("12221967") end)
+    return disp
+end
+
+local Title=Instance.new("TextLabel")
+Title.Size=UDim2.new(1,0,0,36); Title.Text="Devil's Blade  ✦  8 Swords"
+Title.TextColor3=Color3.fromRGB(255,80,80); Title.BackgroundColor3=Color3.fromRGB(90,0,0)
+Title.Font=Enum.Font.Fondamento; Title.TextSize=14; Title.BorderSizePixel=0
+Title.ZIndex=7; Title.Parent=MainFrame
+Instance.new("UICorner",Title).CornerRadius=UDim.new(0,16)
+
+local minimized=false
+local MinBtn=mkB(MainFrame,"-",4,0,0,Color3.fromRGB(160,0,0))
+MinBtn.Size=UDim2.new(0,26,0,26); MinBtn.Position=UDim2.new(1,-30,0,5); MinBtn.ZIndex=10
+MinBtn.MouseButton1Click:Connect(function()
+    minimized=not minimized
+    for _,c in ipairs(MainFrame:GetChildren()) do
+        if c~=MinBtn and c.Name~="UICorner" and c~=DragHandle and c:IsA("GuiObject") then
+            c.Visible=not minimized end
+    end
+    MinBtn.Text=minimized and "+" or "-"
+    MainFrame.Size=minimized and UDim2.new(0,260,0,40) or UDim2.new(0,260,0,PANEL_H)
+end)
+
+mkL(MainFrame,"Summon Count",42,13)
+local countBtns={}
+local countColors8={
+    Color3.fromRGB(160,0,0),   Color3.fromRGB(0,100,160),
+    Color3.fromRGB(0,140,60),  Color3.fromRGB(160,80,0),
+    Color3.fromRGB(140,0,140), Color3.fromRGB(0,130,110),
+    Color3.fromRGB(100,60,0),  Color3.fromRGB(60,60,180),
+}
+for i=1,8 do
+    local col=((i-1)%4); local row=math.floor((i-1)/4)
+    local bx=col*0.24+0.02; local by=58+row*30
+    local b=mkB(MainFrame,tostring(i),by,0.2,bx,Color3.fromRGB(60,60,60),Color3.fromRGB(255,255,255),13)
+    countBtns[i]=b
+end
+
+local function setSwordCount(n)
+    activeSwordCount=n
+    for i=1,MAX_SWORDS do
+        swords[i].enabled=(i<=n)
+        countBtns[i].BackgroundColor3=(i<=n) and countColors8[i] or Color3.fromRGB(60,60,60)
+        fingerDots[i].Visible=false
+        swords[i].fingerActive=false; swords[i].fingerTouch=nil; swordDragY[i]=nil
+    end
+    touchToSword={}; resetPartitions()
+    for i=1,n do
+        swords[i].centerPos=swords[i].getFollowPos()
+        swords[i].anchor.Position=swords[i].centerPos
+    end
+    trailHistoryInit(); playSound("12221967")
+end
+for i=1,MAX_SWORDS do
+    countBtns[i].MouseButton1Click:Connect(function() setSwordCount(i) end)
+end
+
+-- Move All button
+local moveAllBtn=mkB(MainFrame,"🔗  Move All: OFF",122,0.9,0.05,
+    Color3.fromRGB(40,40,120),Color3.fromRGB(200,200,255),14)
+moveAllBtn.MouseButton1Click:Connect(function()
+    if trailEnabled then return end
+    moveAllEnabled=not moveAllEnabled
+    if moveAllEnabled then
+        for i,sw in ipairs(swords) do
+            if sw.fingerActive then sw.fingerActive=false; sw.fingerTouch=nil; fingerDots[i].Visible=false end
+        end
+        touchToSword={}
+        for i,sw in ipairs(swords) do moveAllLockedY[i]=sw.centerPos.Y end
+        moveAllBtn.Text="🔗  Move All: ON"
+        moveAllBtn.BackgroundColor3=Color3.fromRGB(0,160,80)
+        pStroke.Color=Color3.fromRGB(0,220,100)
+    else
+        moveAllActive=false; moveAllTouch=nil; moveAllDelta=Vector2.new(); moveAllLockedY={}
+        moveAllBtn.Text="🔗  Move All: OFF"
+        moveAllBtn.BackgroundColor3=Color3.fromRGB(40,40,120)
+        pStroke.Color=Color3.fromRGB(180,30,30)
+    end
+    playSound("12221967")
+end)
+
+local infoLbl=Instance.new("TextLabel")
+infoLbl.Size=UDim2.new(0.96,0,0,20); infoLbl.Position=UDim2.new(0.02,0,0,156)
+infoLbl.BackgroundColor3=Color3.fromRGB(40,8,8); infoLbl.TextColor3=Color3.fromRGB(255,160,160)
+infoLbl.Font=Enum.Font.Fondamento; infoLbl.TextSize=10
+infoLbl.Text="Move All uses green joystick (left) · Y locked"
+infoLbl.BorderSizePixel=0; infoLbl.ZIndex=7; infoLbl.Parent=MainFrame
+Instance.new("UICorner",infoLbl).CornerRadius=UDim.new(0,6)
+
+-- Trail button
+local trailBtn=mkB(MainFrame,"🐍  Snake Trail: OFF",178,0.9,0.05,
+    Color3.fromRGB(20,50,20),Color3.fromRGB(140,255,160),14)
+local trailStroke=Instance.new("UIStroke",trailBtn)
+trailStroke.Color=Color3.fromRGB(0,180,60); trailStroke.Thickness=1.5
+
+local trailInfoLbl=Instance.new("TextLabel")
+trailInfoLbl.Size=UDim2.new(0.96,0,0,28); trailInfoLbl.Position=UDim2.new(0.02,0,0,210)
+trailInfoLbl.BackgroundColor3=Color3.fromRGB(8,22,8)
+trailInfoLbl.TextColor3=Color3.fromRGB(140,220,140)
+trailInfoLbl.Font=Enum.Font.Fondamento; trailInfoLbl.TextSize=9
+trailInfoLbl.Text="Trail: 1 finger drags lead · others snake behind\nY free · X free · release returns to formation"
+trailInfoLbl.BorderSizePixel=0; trailInfoLbl.ZIndex=7
+trailInfoLbl.TextWrapped=true; trailInfoLbl.Parent=MainFrame
+Instance.new("UICorner",trailInfoLbl).CornerRadius=UDim.new(0,6)
+
+trailBtn.MouseButton1Click:Connect(function()
+    trailEnabled=not trailEnabled
+    if trailEnabled then
+        if moveAllEnabled then
+            moveAllEnabled=false; moveAllActive=false; moveAllTouch=nil
+            moveAllDelta=Vector2.new(); moveAllLockedY={}
+            moveAllBtn.Text="🔗  Move All: OFF"
+            moveAllBtn.BackgroundColor3=Color3.fromRGB(40,40,120)
+        end
+        for i,sw in ipairs(swords) do
+            sw.fingerActive=false; sw.fingerTouch=nil; fingerDots[i].Visible=false
+        end
+        touchToSword={}; trailDragging=false; trailTouch=nil
+        cancelReturn(); trailHistoryInit()
+        trailBtn.Text="🐍  Snake Trail: ON"
+        trailBtn.BackgroundColor3=Color3.fromRGB(0,100,20)
+        trailBtn.TextColor3=Color3.fromRGB(180,255,180)
+        trailStroke.Color=Color3.fromRGB(80,255,120)
+        pStroke.Color=Color3.fromRGB(0,220,80)
+        trailInfoLbl.TextColor3=Color3.fromRGB(100,255,140)
+    else
+        if trailDragging then trailDragging=false; trailTouch=nil end
+        if trailConn then trailConn:Disconnect() trailConn=nil end
+        cancelReturn()
+        for i,sw in ipairs(swords) do
+            if sw.enabled then sw.centerPos=sw.getFollowPos(); sw.anchor.Position=sw.centerPos end
+        end
+        trailBtn.Text="🐍  Snake Trail: OFF"
+        trailBtn.BackgroundColor3=Color3.fromRGB(20,50,20)
+        trailBtn.TextColor3=Color3.fromRGB(140,255,160)
+        trailStroke.Color=Color3.fromRGB(0,180,60)
+        pStroke.Color=Color3.fromRGB(180,30,30)
+        trailInfoLbl.TextColor3=Color3.fromRGB(140,220,140)
+    end
+    playSound("12221967")
+end)
+
+-- All swords yaw/pitch
+mkL(MainFrame,"─── ALL SWORDS ───",244,12)
+local allYawDeg=0
+mkStepper(MainFrame,"All Yaw (deg)",260,function() return allYawDeg end,
+    function() allYawDeg=(allYawDeg+15)%360; for _,sw in ipairs(swords) do if sw.enabled then sw.yaw=math.rad(allYawDeg) end end end,
+    function() allYawDeg=(allYawDeg-15+360)%360; for _,sw in ipairs(swords) do if sw.enabled then sw.yaw=math.rad(allYawDeg) end end end)
+local allPitchDeg=0
+mkStepper(MainFrame,"All Pitch (deg)",306,function() return allPitchDeg end,
+    function() allPitchDeg=math.clamp(allPitchDeg+15,-80,80); for _,sw in ipairs(swords) do if sw.enabled then sw.pitch=math.rad(allPitchDeg) end end end,
+    function() allPitchDeg=math.clamp(allPitchDeg-15,-80,80); for _,sw in ipairs(swords) do if sw.enabled then sw.pitch=math.rad(allPitchDeg) end end end)
+
+-- Individual sword panels
+local SWORD_LABELS={"①","②","③","④","⑤","⑥","⑦","⑧"}
+local yBase=358; local perSwordH=50
+
+for i=1,MAX_SWORDS do
+    local sw=swords[i]; local yOff=yBase+(i-1)*perSwordH; local col=countColors8[i]
+    local hdr=Instance.new("Frame")
+    hdr.Size=UDim2.new(0.96,0,0,16); hdr.Position=UDim2.new(0.02,0,0,yOff)
+    hdr.BackgroundColor3=col; hdr.BorderSizePixel=0; hdr.ZIndex=7; hdr.Parent=MainFrame
+    Instance.new("UICorner",hdr).CornerRadius=UDim.new(0,5)
+    local hLbl=Instance.new("TextLabel")
+    hLbl.Size=UDim2.new(1,0,1,0); hLbl.BackgroundTransparency=1
+    hLbl.Text=SWORD_LABELS[i].." Sword "..i.." — "..(BASE_LEFT_STUDS+(i-1)*SWORD_SPREAD).."st left"
+    hLbl.TextColor3=Color3.fromRGB(255,255,255); hLbl.Font=Enum.Font.Fondamento
+    hLbl.TextSize=11; hLbl.ZIndex=8; hLbl.Parent=hdr
+    local swYawDeg=0
+    local yDisp=mkB(MainFrame,"Y:0°",yOff+20,0.18,0.02,Color3.fromRGB(30,30,30),Color3.fromRGB(255,200,200),9)
+    yDisp.Active=false
+    mkB(MainFrame,"<",yOff+20,0.11,0.22,Color3.fromRGB(80,30,0),nil,11).MouseButton1Click:Connect(function()
+        swYawDeg=(swYawDeg-15+360)%360; sw.yaw=math.rad(swYawDeg)
+        yDisp.Text="Y:"..swYawDeg.."°"; playSound("12221967")
+    end)
+    mkB(MainFrame,">",yOff+20,0.11,0.34,Color3.fromRGB(120,20,0),nil,11).MouseButton1Click:Connect(function()
+        swYawDeg=(swYawDeg+15)%360; sw.yaw=math.rad(swYawDeg)
+        yDisp.Text="Y:"..swYawDeg.."°"; playSound("12221967")
+    end)
+    local swPitchDeg=0
+    local pDisp=mkB(MainFrame,"P:0°",yOff+20,0.18,0.48,Color3.fromRGB(30,30,30),Color3.fromRGB(255,200,200),9)
+    pDisp.Active=false
+    mkB(MainFrame,"P-",yOff+20,0.1,0.68,Color3.fromRGB(80,30,0),nil,10).MouseButton1Click:Connect(function()
+        swPitchDeg=math.clamp(swPitchDeg-15,-80,80); sw.pitch=math.rad(swPitchDeg)
+        pDisp.Text="P:"..swPitchDeg.."°"; playSound("12221967")
+    end)
+    mkB(MainFrame,"P+",yOff+20,0.1,0.79,Color3.fromRGB(120,20,0),nil,10).MouseButton1Click:Connect(function()
+        swPitchDeg=math.clamp(swPitchDeg+15,-80,80); sw.pitch=math.rad(swPitchDeg)
+        pDisp.Text="P:"..swPitchDeg.."°"; playSound("12221967")
+    end)
+    mkB(MainFrame,"↩",yOff+20,0.08,0.90,Color3.fromRGB(0,70,140),nil,11).MouseButton1Click:Connect(function()
+        if humanoidRootPart then
+            sw.centerPos=sw.getFollowPos(); sw.anchor.Position=sw.centerPos; playSound("12221967")
+        end
+    end)
+end
+
+local Wm=Instance.new("TextLabel"); Wm.Size=UDim2.new(1,0,0,14)
+Wm.Position=UDim2.new(0,0,1,-16)
+Wm.Text="Devil's Blade 8 — DieStupidNinja by Zeus!"
+Wm.TextColor3=Color3.fromRGB(180,80,80); Wm.BackgroundTransparency=1
+Wm.Font=Enum.Font.Fondamento; Wm.TextSize=10; Wm.BorderSizePixel=0
+Wm.ZIndex=7; Wm.Parent=MainFrame
+
+-- ─── Rotate joystick (bottom-right) ──────────────────────────────────────────
+local SP=Instance.new("Frame")
+SP.Size=UDim2.new(0,100,0,100); SP.Position=UDim2.new(1,-120,1,-120)
+SP.BackgroundColor3=Color3.fromRGB(80,20,20); SP.BackgroundTransparency=0.55
+SP.BorderSizePixel=0; SP.ZIndex=10; SP.Parent=ScreenGui
+Instance.new("UICorner",SP).CornerRadius=UDim.new(1,0)
+local SK=Instance.new("Frame"); SK.Size=UDim2.new(0,34,0,34)
+SK.Position=UDim2.new(0.5,-17,0.5,-17)
+SK.BackgroundColor3=Color3.fromRGB(220,40,40); SK.BackgroundTransparency=0.15
+SK.BorderSizePixel=0; SK.ZIndex=11; SK.Parent=SP
+Instance.new("UICorner",SK).CornerRadius=UDim.new(1,0)
+local SL=Instance.new("TextLabel"); SL.Size=UDim2.new(1,0,0,13)
+SL.Position=UDim2.new(0,0,1,3); SL.Text="rotate all"
+SL.TextColor3=Color3.fromRGB(255,160,160); SL.BackgroundTransparency=1
+SL.Font=Enum.Font.Fondamento; SL.TextSize=9; SL.ZIndex=11; SL.Parent=SP
+
+local sjActive=false; local sjTouch=nil; local sjDelta=Vector2.new()
+local function ck(d,m) local mg=d.Magnitude return mg>m and (d/mg*m) or d end
+
+SP.InputBegan:Connect(function(inp)
+    if (inp.UserInputType==Enum.UserInputType.Touch
+    or inp.UserInputType==Enum.UserInputType.MouseButton1) and not sjActive then
+        sjActive=true; sjTouch=inp
+        local origin=Vector2.new(inp.Position.X,inp.Position.Y)
+        UserInputService.InputChanged:Connect(function(i2)
+            if sjActive and i2==sjTouch then
+                local d=Vector2.new(i2.Position.X,i2.Position.Y)-origin
+                local c=ck(d,42); sjDelta=c; SK.Position=UDim2.new(0.5,c.X-17,0.5,c.Y-17)
+            end
+        end)
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not sjActive then return end
+    for _,sw in ipairs(swords) do
+        if sw.enabled then
+            sw.yaw=sw.yaw+sjDelta.X*0.022
+            sw.pitch=math.clamp(sw.pitch+sjDelta.Y*0.022,-math.pi*0.88,math.pi*0.88)
+        end
+    end
+    allYawDeg=math.floor(math.deg(swords[1].yaw)%360+0.5)
+    allPitchDeg=math.floor(math.deg(swords[1].pitch)+0.5)
+end)
+
+-- ─── Move-All joystick (bottom-left) ─────────────────────────────────────────
+local MA=Instance.new("Frame")
+MA.Size=UDim2.new(0,100,0,100); MA.Position=UDim2.new(0,20,1,-120)
+MA.BackgroundColor3=Color3.fromRGB(0,80,40); MA.BackgroundTransparency=0.55
+MA.BorderSizePixel=0; MA.ZIndex=10; MA.Parent=ScreenGui
+Instance.new("UICorner",MA).CornerRadius=UDim.new(1,0)
+local MAK=Instance.new("Frame"); MAK.Size=UDim2.new(0,34,0,34)
+MAK.Position=UDim2.new(0.5,-17,0.5,-17)
+MAK.BackgroundColor3=Color3.fromRGB(40,200,100); MAK.BackgroundTransparency=0.15
+MAK.BorderSizePixel=0; MAK.ZIndex=11; MAK.Parent=MA
+Instance.new("UICorner",MAK).CornerRadius=UDim.new(1,0)
+local MAL=Instance.new("TextLabel"); MAL.Size=UDim2.new(1,0,0,13)
+MAL.Position=UDim2.new(0,0,1,3); MAL.Text="move all  ●  OFF"
+MAL.TextColor3=Color3.fromRGB(140,255,180); MAL.BackgroundTransparency=1
+MAL.Font=Enum.Font.Fondamento; MAL.TextSize=9; MAL.ZIndex=11; MAL.Parent=MA
+
+RunService.Heartbeat:Connect(function()
+    if trailEnabled then
+        MAL.Text="trail mode active"
+        MAL.TextColor3=Color3.fromRGB(140,255,140)
+        MA.BackgroundTransparency=0.85; return
+    end
+    MAL.Text=moveAllEnabled and "move all  ●  ON" or "move all  ●  OFF"
+    MAL.TextColor3=moveAllEnabled and Color3.fromRGB(80,255,140) or Color3.fromRGB(140,200,160)
+    MA.BackgroundTransparency=moveAllEnabled and 0.35 or 0.70
+end)
+
+MA.InputBegan:Connect(function(inp)
+    if not moveAllEnabled or trailEnabled then return end
+    if (inp.UserInputType==Enum.UserInputType.Touch
+    or inp.UserInputType==Enum.UserInputType.MouseButton1) and not moveAllActive then
+        moveAllActive=true; moveAllTouch=inp
+        moveAllOrigin=Vector2.new(inp.Position.X,inp.Position.Y)
+        for i,sw in ipairs(swords) do
+            if sw.enabled then moveAllLockedY[i]=sw.centerPos.Y end
+        end
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(nc)
+    character=nc; humanoidRootPart=nc:WaitForChild("HumanoidRootPart")
+    humanoid=nc:WaitForChild("Humanoid")
+    trailHistoryInit()
+end)
+
 pcall(function()
     StarterGui:SetCore("SendNotification",{
-        Title="MM2 Godly Hub v2",
-        Text=#ALL_ITEMS.." Godlies ready — use Equip for weapon visible to others",
-        Duration=5,
-    })
+        Title="Devil's Blade — 8 Swords + Trail",
+        Text="🐍 Snake Trail · 🔗 Move All · realistic sword shape",
+        Duration=5})
 end)
-
-print("╔═══════════════════════════════════════════╗")
-print("║  MM2 GODLY HUB  v2.0 — GUI FIX APPLIED  ║")
-print("║  All pages: visible  ·  Items: "..#ALL_ITEMS.."        ║")
-print("║  Knives: "..#GODLY_KNIVES.."  Guns: "..#GODLY_GUNS.."  Chromas: "..(#CHROMA_KNIVES+#CHROMA_GUNS).."     ║")
-print("╚═══════════════════════════════════════════╝")
