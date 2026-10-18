@@ -1,0 +1,981 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX PHOTO PORTAL  ·  Camera Exploit                       ║
+║   Take photos · Place portals · Walk through them            ║
+╠══════════════════════════════════════════════════════════════╣
+║   CONTROLS                                                   ║
+║   Click [CAM] in inventory bar  → equip camera               ║
+║   LMB (camera equipped)         → take photo                 ║
+║   1-4 keys or click photo slot  → select photo to place      ║
+║   LMB (place mode)              → place portal               ║
+║   R                             → rotate portal preview      ║
+║   G                             → delete last placed portal  ║
+║   ESC                           → cancel / unequip           ║
+║   Walk into portal              → teleport to captured spot  ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Players          = game:GetService("Players")
+local Workspace        = game:GetService("Workspace")
+local Debris           = game:GetService("Debris")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+local Cam  = Workspace.CurrentCamera
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexPhoto then
+    pcall(function() ENV.ApexPhoto:Destroy() end)
+end
+if ENV.ApexPhotoLoops then
+    for _, c in pairs(ENV.ApexPhotoLoops) do
+        pcall(function() c:Disconnect() end)
+    end
+end
+ENV.ApexPhotoLoops = {}
+
+-- THEME
+local T = {
+    Glass      = Color3.fromRGB(8,   8,   14),
+    GlassMid   = Color3.fromRGB(12,  12,  20),
+    GlassSurf  = Color3.fromRGB(18,  16,  28),
+    GlassHov   = Color3.fromRGB(26,  22,  42),
+    Violet     = Color3.fromRGB(138, 80,  255),
+    VioletBr   = Color3.fromRGB(172, 120, 255),
+    Cyan       = Color3.fromRGB(0,   220, 255),
+    Green      = Color3.fromRGB(0,   240, 148),
+    Yellow     = Color3.fromRGB(255, 200, 0),
+    Red        = Color3.fromRGB(255, 50,  80),
+    TxtPri     = Color3.fromRGB(240, 238, 255),
+    TxtSec     = Color3.fromRGB(150, 144, 178),
+    TxtDim     = Color3.fromRGB(75,  72,  98),
+    Border     = Color3.fromRGB(0,   0,   0),
+    BorderGlow = Color3.fromRGB(90,  55,  200),
+    PanelTr    = 0.22,
+    FontBold   = Enum.Font.GothamBold,
+    FontMed    = Enum.Font.Gotham,
+    FontMono   = Enum.Font.RobotoMono,
+    Fast       = TweenInfo.new(0.10, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+    Med        = TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+    Slow       = TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+    R          = UDim.new(0, 6),
+    RLg        = UDim.new(0, 10),
+    RPill      = UDim.new(0, 16),
+}
+
+-- UTILITY
+local U = {}
+
+function U.Tween(inst, info, props)
+    local tw = TweenService:Create(inst, info, props)
+    tw:Play(); return tw
+end
+
+function U.Corner(p, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = r or T.R
+    c.Parent = p; return c
+end
+
+function U.Stroke(p, col, thick, tr)
+    local s = Instance.new("UIStroke")
+    s.Color           = col   or T.Border
+    s.Thickness       = thick or 1.5
+    s.Transparency    = tr    or 0
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent = p; return s
+end
+
+function U.Frame(props)
+    local f = Instance.new("Frame")
+    f.BackgroundColor3       = props.bg   or T.GlassSurf
+    f.BackgroundTransparency = props.tr   or 0
+    f.BorderSizePixel        = 0
+    f.Size                   = props.size or UDim2.new(1,0,0,30)
+    f.Position               = props.pos  or UDim2.new(0,0,0,0)
+    f.ClipsDescendants       = props.clip or false
+    f.ZIndex                 = props.z    or 1
+    if props.name   then f.Name   = props.name   end
+    if props.parent then f.Parent = props.parent end
+    return f
+end
+
+function U.Label(props)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text           = props.text or ""
+    l.TextColor3     = props.col  or T.TxtPri
+    l.Font           = props.font or T.FontMed
+    l.TextSize       = props.sz   or 12
+    l.TextXAlignment = props.xa   or Enum.TextXAlignment.Center
+    l.TextYAlignment = props.ya   or Enum.TextYAlignment.Center
+    l.TextWrapped    = props.wrap or false
+    l.Size           = props.size or UDim2.new(1,0,1,0)
+    l.Position       = props.pos  or UDim2.new(0,0,0,0)
+    l.ZIndex         = props.z    or 2
+    if props.parent then l.Parent = props.parent end
+    return l
+end
+
+function U.Button(props)
+    local b = Instance.new("TextButton")
+    b.BackgroundColor3       = props.bg   or T.GlassHov
+    b.BackgroundTransparency = props.tr   or 0
+    b.BorderSizePixel        = 0
+    b.Text                   = props.text or ""
+    b.TextColor3             = props.col  or T.TxtPri
+    b.Font                   = props.font or T.FontBold
+    b.TextSize               = props.sz   or 12
+    b.AutoButtonColor        = false
+    b.Size                   = props.size or UDim2.new(1,0,0,30)
+    b.Position               = props.pos  or UDim2.new(0,0,0,0)
+    b.ZIndex                 = props.z    or 2
+    if props.parent then b.Parent = props.parent end
+    return b
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- STATE
+-- ════════════════════════════════════════════════════════════════
+local Photos         = {}   -- array of photo data tables
+local NextId         = 1
+local CameraEquipped = false
+local PlaceMode      = false
+local PlacingPhoto   = nil
+local PlaceRotation  = 0
+
+local PORTAL_WIDTH   = 6
+local PORTAL_HEIGHT  = 9
+local PORTAL_DEPTH   = 0.15
+local CLONE_RADIUS   = 150
+local CLONE_LIMIT    = 350
+local PLACE_DIST     = 20
+
+local function GetChar()  return LP.Character end
+local function GetRoot()
+    local c = GetChar()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- SCREEN GUI
+-- ════════════════════════════════════════════════════════════════
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name           = "ApexPhotoPortal"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder   = 99
+ScreenGui.Parent         = PGui
+ENV.ApexPhoto            = ScreenGui
+
+-- ── FULL-SCREEN FLASH (shutter)
+local Flash = Instance.new("Frame")
+Flash.BackgroundColor3       = Color3.new(1,1,1)
+Flash.BackgroundTransparency = 1
+Flash.BorderSizePixel        = 0
+Flash.Size                   = UDim2.new(1,0,1,0)
+Flash.ZIndex                 = 100
+Flash.Parent                 = ScreenGui
+
+local function DoFlash()
+    Flash.BackgroundTransparency = 0
+    U.Tween(Flash,
+        TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {BackgroundTransparency=1})
+end
+
+-- ── FULL-SCREEN FADE (portal teleport)
+local Fade = Instance.new("Frame")
+Fade.BackgroundColor3       = Color3.new(0,0,0)
+Fade.BackgroundTransparency = 1
+Fade.BorderSizePixel        = 0
+Fade.Size                   = UDim2.new(1,0,1,0)
+Fade.ZIndex                 = 101
+Fade.Parent                 = ScreenGui
+
+local function DoFade(callback)
+    U.Tween(Fade,
+        TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+        {BackgroundTransparency=0})
+    task.delay(0.20, function()
+        if callback then callback() end
+        U.Tween(Fade,
+            TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {BackgroundTransparency=1})
+    end)
+end
+
+-- ── CROSSHAIR (camera mode overlay)
+local CrosshairRoot = U.Frame({
+    bg=Color3.new(0,0,0), tr=1,
+    size=UDim2.new(1,0,1,0), z=90,
+    parent=ScreenGui,
+})
+CrosshairRoot.Visible = false
+
+-- Thin cross lines
+local function CLine(w, h, ax, ay)
+    local f = Instance.new("Frame")
+    f.BackgroundColor3       = Color3.new(1,1,1)
+    f.BackgroundTransparency = 0.15
+    f.BorderSizePixel        = 0
+    f.Size                   = UDim2.new(0,w,0,h)
+    f.Position               = UDim2.new(0.5,0,0.5,0)
+    f.AnchorPoint            = Vector2.new(ax,ay)
+    f.ZIndex                 = 91
+    f.Parent                 = CrosshairRoot
+    return f
+end
+
+CLine(24, 2, 0.5, 0.5)
+CLine(2, 24, 0.5, 0.5)
+-- Center dot
+local cdot = Instance.new("Frame")
+cdot.BackgroundColor3       = T.Cyan
+cdot.BackgroundTransparency = 0
+cdot.BorderSizePixel        = 0
+cdot.Size                   = UDim2.new(0,4,0,4)
+cdot.Position               = UDim2.new(0.5,-2,0.5,-2)
+cdot.ZIndex                 = 92
+U.Corner(cdot, UDim.new(1,0))
+cdot.Parent = CrosshairRoot
+
+-- Corner bracket generator
+local function CBracket(anchorX, anchorY, posX, posY)
+    local g = Instance.new("Frame")
+    g.BackgroundTransparency = 1
+    g.BorderSizePixel        = 0
+    g.Size                   = UDim2.new(0,18,0,18)
+    g.Position               = UDim2.new(0.5, posX, 0.5, posY)
+    g.AnchorPoint            = Vector2.new(anchorX, anchorY)
+    g.ZIndex                 = 91
+    g.Parent                 = CrosshairRoot
+
+    local h = Instance.new("Frame")
+    h.BackgroundColor3 = T.Cyan; h.BorderSizePixel=0
+    h.Size  = UDim2.new(0,8,0,2)
+    h.Position = UDim2.new(anchorX,0,anchorY,0)
+    h.AnchorPoint = Vector2.new(anchorX,anchorY)
+    h.ZIndex = 92; h.Parent = g
+
+    local v = Instance.new("Frame")
+    v.BackgroundColor3 = T.Cyan; v.BorderSizePixel=0
+    v.Size  = UDim2.new(0,2,0,8)
+    v.Position = UDim2.new(anchorX,0,anchorY,0)
+    v.AnchorPoint = Vector2.new(anchorX,anchorY)
+    v.ZIndex = 92; v.Parent = g
+end
+
+CBracket(1, 1, -30, -30)
+CBracket(0, 1,  30, -30)
+CBracket(1, 0, -30,  30)
+CBracket(0, 0,  30,  30)
+
+-- Camera mode label
+U.Label({
+    text="PHOTO MODE  |  LMB: Capture  |  ESC: Unequip",
+    col=T.Cyan, font=T.FontBold, sz=11,
+    size=UDim2.new(0,420,0,18),
+    pos=UDim2.new(0.5,-210,0.88,0),
+    z=92, parent=CrosshairRoot,
+})
+
+-- ── INVENTORY BAR (bottom center)
+local InvBar = U.Frame({
+    name="InvBar", bg=T.GlassMid, tr=0.18,
+    size=UDim2.new(0,350,0,74),
+    pos=UDim2.new(0.5,-175,1,-82),
+    z=10, parent=ScreenGui,
+})
+U.Corner(InvBar, T.RLg)
+U.Stroke(InvBar, T.BorderGlow, 1.5, 0.4)
+
+U.Label({
+    text="INVENTORY", col=T.TxtDim, font=T.FontBold, sz=9,
+    size=UDim2.new(1,0,0,14), pos=UDim2.new(0,0,0,2),
+    z=11, parent=InvBar,
+})
+
+-- Camera equip slot
+local CameraSlot = U.Button({
+    bg=T.GlassSurf, tr=0.05,
+    size=UDim2.new(0,56,0,52),
+    pos=UDim2.new(0,8,0,12),
+    z=11, parent=InvBar,
+})
+U.Corner(CameraSlot, T.R)
+U.Stroke(CameraSlot, T.BorderGlow, 1.5, 0.35)
+U.Label({text="[o]", col=T.Cyan, font=T.FontBold, sz=20, z=12, parent=CameraSlot})
+U.Label({
+    text="CAM", col=T.TxtDim, font=T.FontBold, sz=8,
+    size=UDim2.new(1,0,0,12), pos=UDim2.new(0,0,1,-12), z=12, parent=CameraSlot,
+})
+
+-- 4 photo slots
+local PhotoSlots = {}
+for i = 1, 4 do
+    local slot = U.Frame({
+        bg=T.GlassSurf, tr=0.25,
+        size=UDim2.new(0,56,0,52),
+        pos=UDim2.new(0, 8 + i*64, 0, 12),
+        z=11, parent=InvBar,
+    })
+    U.Corner(slot, T.R)
+    U.Stroke(slot, T.Border, 1, 0.6)
+
+    -- ViewportFrame for photo thumbnail
+    local vp = Instance.new("ViewportFrame")
+    vp.BackgroundColor3       = Color3.new(0,0,0)
+    vp.BackgroundTransparency = 0.1
+    vp.Size                   = UDim2.new(1,-4,1,-16)
+    vp.Position               = UDim2.new(0,2,0,1)
+    vp.ZIndex                 = 12
+    vp.Ambient                = Color3.new(1,1,1)
+    vp.LightDirection         = Vector3.new(-1,-2,-1)
+    vp.Parent                 = slot
+
+    local vpCam = Instance.new("Camera")
+    vpCam.Parent       = vp
+    vp.CurrentCamera   = vpCam
+
+    local emptyLbl = U.Label({
+        text="empty", col=T.TxtDim, font=T.FontBold, sz=8,
+        z=12, parent=vp,
+    })
+
+    U.Label({
+        text="["..i.."]", col=T.TxtDim, font=T.FontBold, sz=8,
+        size=UDim2.new(1,0,0,12), pos=UDim2.new(0,0,1,-12), z=12, parent=slot,
+    })
+
+    -- invisible click overlay (built per-photo)
+    PhotoSlots[i] = {
+        frame    = slot,
+        vp       = vp,
+        vpCam    = vpCam,
+        emptyLbl = emptyLbl,
+        clickBtn = nil,
+    }
+end
+
+-- ── PLACE MODE HINT (top center)
+local PlaceHint = U.Frame({
+    bg=T.GlassMid, tr=0.18,
+    size=UDim2.new(0,400,0,30),
+    pos=UDim2.new(0.5,-200,0,10),
+    z=20, parent=ScreenGui,
+})
+U.Corner(PlaceHint, T.RPill)
+U.Stroke(PlaceHint, T.BorderGlow, 1.5, 0.3)
+U.Label({
+    text="PLACE MODE  |  LMB: Place  |  R: Rotate  |  ESC: Cancel",
+    col=T.Yellow, font=T.FontBold, sz=10, z=21, parent=PlaceHint,
+})
+PlaceHint.Visible = false
+
+-- ── PHOTO COUNTER
+local CountFrame = U.Frame({
+    bg=T.GlassMid, tr=0.2,
+    size=UDim2.new(0,150,0,26),
+    pos=UDim2.new(0.5,-75,0.92,0),
+    z=10, parent=ScreenGui,
+})
+U.Corner(CountFrame, T.RPill)
+U.Stroke(CountFrame, T.BorderGlow, 1.5, 0.5)
+local CountLabel = U.Label({
+    text="0 / 4 photos", col=T.TxtSec, font=T.FontBold, sz=10,
+    z=11, parent=CountFrame,
+})
+
+-- ── KEYBIND REFERENCE (left edge)
+local HintBox = U.Frame({
+    bg=T.GlassMid, tr=0.18,
+    size=UDim2.new(0,228,0,100),
+    pos=UDim2.new(0,10,0.5,-50),
+    z=10, parent=ScreenGui,
+})
+U.Corner(HintBox, T.R)
+U.Stroke(HintBox, T.BorderGlow, 1.5, 0.5)
+
+local hintLines = {
+    {"APEX PHOTO PORTAL", T.Cyan},
+    {"Click [CAM]  equip camera",   T.TxtSec},
+    {"LMB          take photo",      T.TxtSec},
+    {"1-4 / slot   place photo",     T.TxtSec},
+    {"R            rotate preview",  T.TxtSec},
+    {"G            delete last",     T.TxtSec},
+    {"Walk through portal  ->  TP",  T.Green},
+}
+for i, line in ipairs(hintLines) do
+    U.Label({
+        text=line[1], col=line[2], font=T.FontBold, sz=9,
+        size=UDim2.new(1,-10,0,12),
+        pos=UDim2.new(0,6,0,2+(i-1)*13),
+        xa=Enum.TextXAlignment.Left,
+        z=11, parent=HintBox,
+    })
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- VIEWPORT SCENE BUILDER
+-- Clones nearby BaseParts into a ViewportFrame for photo rendering
+-- ════════════════════════════════════════════════════════════════
+local function BuildViewportScene(vp, capturedCF)
+    -- remove old scene container
+    for _, ch in ipairs(vp:GetChildren()) do
+        if ch:IsA("Folder") then ch:Destroy() end
+    end
+
+    local origin    = capturedCF.Position
+    local container = Instance.new("Folder")
+    container.Name  = "_Scene"
+    container.Parent = vp
+
+    local count = 0
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if count >= CLONE_LIMIT then break end
+        if obj:IsA("BasePart")
+        and obj.Transparency < 0.95
+        and not obj:IsDescendantOf(GetChar() or Instance.new("Model"))
+        then
+            local dist = (obj.Position - origin).Magnitude
+            if dist <= CLONE_RADIUS then
+                local ok, clone = pcall(function() return obj:Clone() end)
+                if ok and clone then
+                    -- strip scripts from clone
+                    for _, ch in ipairs(clone:GetDescendants()) do
+                        if ch:IsA("LuaSourceContainer") then ch:Destroy() end
+                    end
+                    clone.Anchored   = true
+                    clone.CanCollide = false
+                    clone.CastShadow = false
+                    clone.Parent     = container
+                    count            = count + 1
+                end
+            end
+        end
+    end
+    return count
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- PHOTO SLOT MANAGEMENT
+-- ════════════════════════════════════════════════════════════════
+local function RefreshSlot(idx, photo)
+    local s = PhotoSlots[idx]
+    if not s then return end
+
+    -- clear old click button
+    if s.clickBtn then
+        s.clickBtn:Destroy()
+        s.clickBtn = nil
+    end
+
+    if not photo then
+        s.frame.BackgroundTransparency = 0.25
+        U.Stroke(s.frame, T.Border, 1, 0.6)
+        s.emptyLbl.Visible = true
+        -- clear viewport scene
+        for _, ch in ipairs(s.vp:GetChildren()) do
+            if ch:IsA("Folder") then ch:Destroy() end
+        end
+        return
+    end
+
+    s.emptyLbl.Visible = false
+    s.frame.BackgroundTransparency = 0.05
+    U.Stroke(s.frame, T.Violet, 2, 0.1)
+
+    -- render thumbnail
+    task.spawn(function()
+        BuildViewportScene(s.vp, photo.capturedCF)
+        s.vpCam.CFrame = photo.capturedCF
+    end)
+
+    -- click area → enter place mode
+    local btn = U.Button({
+        bg=Color3.new(0,0,0), tr=1,
+        size=UDim2.new(1,0,1,0), z=14,
+        parent=s.frame,
+    })
+    btn.MouseButton1Click:Connect(function()
+        PlacingPhoto          = photo
+        PlaceMode             = true
+        PlaceHint.Visible     = true
+        CameraEquipped        = false
+        CrosshairRoot.Visible = false
+        U.Stroke(CameraSlot, T.BorderGlow, 1.5, 0.35)
+    end)
+    s.clickBtn = btn
+end
+
+local function RefreshAllSlots()
+    for i = 1, 4 do
+        RefreshSlot(i, Photos[i])
+    end
+    CountLabel.Text = #Photos.." / 4 photos"
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- TAKE PHOTO
+-- ════════════════════════════════════════════════════════════════
+local function TakePhoto()
+    if #Photos >= 4 then
+        -- flash red to signal full
+        Flash.BackgroundColor3 = T.Red
+        DoFlash()
+        Flash.BackgroundColor3 = Color3.new(1,1,1)
+        return nil
+    end
+
+    DoFlash()
+
+    -- shutter sound
+    pcall(function()
+        local snd = Instance.new("Sound")
+        snd.SoundId = "rbxassetid://3200504521"
+        snd.Volume  = 0.5
+        snd.Parent  = Cam
+        snd:Play()
+        Debris:AddItem(snd, 3)
+    end)
+
+    local photo = {
+        id          = NextId,
+        capturedCF  = Cam.CFrame,
+        portalModel = nil,
+        portalFrame = nil,
+        touchConn   = nil,
+    }
+    NextId = NextId + 1
+    table.insert(Photos, photo)
+    RefreshAllSlots()
+    return photo
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- BUILD PORTAL PART
+-- Creates the physical portal in Workspace at the given CFrame
+-- ════════════════════════════════════════════════════════════════
+local function BuildPortal(photo, placeCF)
+    -- destroy old portal if re-placing
+    if photo.touchConn   then photo.touchConn:Disconnect()    end
+    if photo.portalModel then photo.portalModel:Destroy()     end
+    photo.touchConn   = nil
+    photo.portalModel = nil
+    photo.portalFrame = nil
+
+    local model   = Instance.new("Model")
+    model.Name    = "ApexPortal_"..photo.id
+    model.Parent  = Workspace
+
+    -- Glass panel (the actual walkable portal surface)
+    local panel = Instance.new("Part")
+    panel.Name         = "PortalPanel"
+    panel.Size         = Vector3.new(PORTAL_WIDTH, PORTAL_HEIGHT, PORTAL_DEPTH)
+    panel.CFrame       = placeCF
+    panel.Anchored     = true
+    panel.CanCollide   = false
+    panel.CastShadow   = false
+    panel.Material     = Enum.Material.Glass
+    panel.Transparency = 0.08
+    panel.Color        = Color3.fromRGB(5, 5, 18)
+    panel.Parent       = model
+
+    -- Neon frame edges
+    local edgeDefs = {
+        { sz=Vector3.new(PORTAL_WIDTH+0.4, 0.25, 0.25), off=Vector3.new(0,  PORTAL_HEIGHT/2 + 0.1, 0) },
+        { sz=Vector3.new(PORTAL_WIDTH+0.4, 0.25, 0.25), off=Vector3.new(0, -PORTAL_HEIGHT/2 - 0.1, 0) },
+        { sz=Vector3.new(0.25, PORTAL_HEIGHT+0.4, 0.25), off=Vector3.new(-PORTAL_WIDTH/2 - 0.1, 0, 0) },
+        { sz=Vector3.new(0.25, PORTAL_HEIGHT+0.4, 0.25), off=Vector3.new( PORTAL_WIDTH/2 + 0.1, 0, 0) },
+    }
+    local edgeParts = {}
+    for _, ed in ipairs(edgeDefs) do
+        local e = Instance.new("Part")
+        e.Size        = ed.sz
+        e.CFrame      = placeCF * CFrame.new(ed.off)
+        e.Anchored    = true
+        e.CanCollide  = false
+        e.CastShadow  = false
+        e.Material    = Enum.Material.Neon
+        e.Color       = T.Violet
+        e.Parent      = model
+        table.insert(edgeParts, e)
+    end
+
+    -- Corner accent diamonds
+    local cornerOffsets = {
+        Vector3.new(-PORTAL_WIDTH/2, -PORTAL_HEIGHT/2, 0),
+        Vector3.new( PORTAL_WIDTH/2, -PORTAL_HEIGHT/2, 0),
+        Vector3.new(-PORTAL_WIDTH/2,  PORTAL_HEIGHT/2, 0),
+        Vector3.new( PORTAL_WIDTH/2,  PORTAL_HEIGHT/2, 0),
+    }
+    for _, coff in ipairs(cornerOffsets) do
+        local d = Instance.new("Part")
+        d.Size       = Vector3.new(0.5, 0.5, 0.5)
+        d.CFrame     = placeCF * CFrame.new(coff)
+        d.Anchored   = true
+        d.CanCollide = false
+        d.CastShadow = false
+        d.Material   = Enum.Material.Neon
+        d.Color      = T.Cyan
+        d.Shape      = Enum.PartType.Ball
+        d.Parent     = model
+    end
+
+    -- SurfaceGui with ViewportFrame on front face
+    local sg = Instance.new("SurfaceGui")
+    sg.Adornee        = panel
+    sg.Face           = Enum.NormalId.Front
+    sg.SizingMode     = Enum.SurfaceGuiSizingMode.PixelsPerStud
+    sg.PixelsPerStud  = 60
+    sg.AlwaysOnTop    = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent         = panel
+
+    local vp = Instance.new("ViewportFrame")
+    vp.BackgroundColor3       = Color3.new(0,0,0)
+    vp.BackgroundTransparency = 0
+    vp.Size                   = UDim2.new(1,0,1,-20)
+    vp.Ambient                = Color3.new(0.7, 0.7, 0.7)
+    vp.LightDirection         = Vector3.new(-1,-2,-1)
+    vp.Parent                 = sg
+
+    local vpCam = Instance.new("Camera")
+    vpCam.CFrame     = photo.capturedCF
+    vpCam.FieldOfView = 70
+    vpCam.Parent     = vp
+    vp.CurrentCamera = vpCam
+
+    -- Photo info strip at bottom of portal
+    local strip = Instance.new("Frame")
+    strip.BackgroundColor3       = T.GlassMid
+    strip.BackgroundTransparency = 0.25
+    strip.BorderSizePixel        = 0
+    strip.Size                   = UDim2.new(1,0,0,20)
+    strip.Position               = UDim2.new(0,0,1,-20)
+    strip.ZIndex                 = 2
+    strip.Parent                 = sg
+
+    local stripLbl = Instance.new("TextLabel")
+    stripLbl.BackgroundTransparency = 1
+    stripLbl.Text      = "PHOTO #"..photo.id.."   WALK THROUGH TO PORTAL"
+    stripLbl.TextColor3 = T.Cyan
+    stripLbl.Font      = Enum.Font.GothamBold
+    stripLbl.TextSize  = 9
+    stripLbl.Size      = UDim2.new(1,0,1,0)
+    stripLbl.ZIndex    = 3
+    stripLbl.Parent    = strip
+
+    -- Clone scene asynchronously
+    task.spawn(function()
+        local count = BuildViewportScene(vp, photo.capturedCF)
+        vpCam.CFrame    = photo.capturedCF
+        stripLbl.Text   = "PHOTO #"..photo.id.."  |  "..count.." parts  |  WALK THROUGH"
+    end)
+
+    -- Rainbow neon pulse on edges
+    task.spawn(function()
+        local hue = 0
+        while model and model.Parent do
+            hue = (hue + 0.007) % 1
+            local col = Color3.fromHSV(hue, 0.75, 1)
+            for _, ep in ipairs(edgeParts) do
+                pcall(function() ep.Color = col end)
+            end
+            task.wait(0.05)
+        end
+    end)
+
+    photo.portalModel = model
+    photo.portalFrame = panel
+
+    -- ── TOUCH PORTAL LOGIC
+    -- Debounce table per player
+    local debounce = {}
+
+    photo.touchConn = panel.Touched:Connect(function(hit)
+        local char = GetChar()
+        if not char then return end
+        if not hit:IsDescendantOf(char) then return end
+
+        -- per-character debounce
+        local userId = tostring(LP.UserId)
+        if debounce[userId] then return end
+        debounce[userId] = true
+
+        local root = GetRoot()
+        if not root then
+            debounce[userId] = nil
+            return
+        end
+
+        DoFade(function()
+            local r = GetRoot()
+            if not r then return end
+            -- place player slightly behind the captured camera position
+            -- so they appear at that spot facing the same direction
+            local targetCF = photo.capturedCF
+            local spawnPos = targetCF.Position
+                + targetCF.LookVector * (-3.5)
+                + Vector3.new(0, -3, 0)
+            r.CFrame = CFrame.new(spawnPos)
+                * CFrame.Angles(0, math.atan2(-targetCF.LookVector.X, -targetCF.LookVector.Z), 0)
+        end)
+
+        task.delay(1.5, function()
+            debounce[userId] = nil
+        end)
+    end)
+
+    return model
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- DELETE PHOTO
+-- ════════════════════════════════════════════════════════════════
+local function DeletePhoto(idx)
+    local photo = Photos[idx]
+    if not photo then return end
+    if photo.touchConn   then photo.touchConn:Disconnect()   end
+    if photo.portalModel then photo.portalModel:Destroy()    end
+    table.remove(Photos, idx)
+    RefreshAllSlots()
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- PLACEMENT PREVIEW
+-- A ghost portal that follows the camera raycast
+-- ════════════════════════════════════════════════════════════════
+local PreviewModel = nil
+
+local function GetPlaceCF()
+    local vpSize = Cam.ViewportSize
+    local ray    = Cam:ScreenPointToRay(vpSize.X/2, vpSize.Y/2)
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local char = GetChar()
+    if char then
+        params.FilterDescendantsInstances = {char}
+    end
+
+    -- also exclude existing portals
+    local excludeList = char and {char} or {}
+    for _, photo in ipairs(Photos) do
+        if photo.portalModel then
+            table.insert(excludeList, photo.portalModel)
+        end
+    end
+    params.FilterDescendantsInstances = excludeList
+
+    local result = Workspace:Raycast(ray.Origin, ray.Direction * PLACE_DIST, params)
+
+    local hitPos, hitNorm
+    if result then
+        hitPos  = result.Position
+        hitNorm = result.Normal
+    else
+        hitPos  = ray.Origin + ray.Direction * (PLACE_DIST * 0.6)
+        hitNorm = -ray.Direction
+    end
+
+    -- build upright CFrame oriented to hit normal
+    local up    = Vector3.new(0,1,0)
+    local right = hitNorm:Cross(up)
+    if right.Magnitude < 0.001 then
+        right = hitNorm:Cross(Vector3.new(1,0,0))
+    end
+    right = right.Unit
+    local trueUp = right:Cross(hitNorm).Unit
+
+    local baseCF = CFrame.fromMatrix(hitPos, right, trueUp, -hitNorm)
+        * CFrame.new(0, PORTAL_HEIGHT/2 + 0.1, 0)
+        * CFrame.Angles(0, math.rad(PlaceRotation), 0)
+
+    return baseCF
+end
+
+local function UpdatePreview()
+    local cf = GetPlaceCF()
+
+    if not PreviewModel then
+        PreviewModel      = Instance.new("Model")
+        PreviewModel.Name = "ApexPortalPreview"
+        PreviewModel.Parent = Workspace
+
+        local pp = Instance.new("Part")
+        pp.Name        = "PreviewPanel"
+        pp.Size        = Vector3.new(PORTAL_WIDTH, PORTAL_HEIGHT, PORTAL_DEPTH)
+        pp.Anchored    = true
+        pp.CanCollide  = false
+        pp.CastShadow  = false
+        pp.Material    = Enum.Material.Glass
+        pp.Transparency = 0.55
+        pp.Color       = T.Violet
+        pp.Parent      = PreviewModel
+
+        local edgeDefs2 = {
+            { sz=Vector3.new(PORTAL_WIDTH+0.4,0.2,0.2),  off=Vector3.new(0,  PORTAL_HEIGHT/2+0.1, 0) },
+            { sz=Vector3.new(PORTAL_WIDTH+0.4,0.2,0.2),  off=Vector3.new(0, -PORTAL_HEIGHT/2-0.1, 0) },
+            { sz=Vector3.new(0.2,PORTAL_HEIGHT+0.4,0.2), off=Vector3.new(-PORTAL_WIDTH/2-0.1,0, 0)   },
+            { sz=Vector3.new(0.2,PORTAL_HEIGHT+0.4,0.2), off=Vector3.new( PORTAL_WIDTH/2+0.1,0, 0)   },
+        }
+        for _, ed in ipairs(edgeDefs2) do
+            local e = Instance.new("Part")
+            e.Size        = ed.sz
+            e.Anchored    = true
+            e.CanCollide  = false
+            e.CastShadow  = false
+            e.Material    = Enum.Material.Neon
+            e.Color       = T.VioletBr
+            e.Transparency = 0.3
+            e.Parent      = PreviewModel
+        end
+    end
+
+    local parts = PreviewModel:GetChildren()
+    if parts[1] then parts[1].CFrame = cf end
+
+    local offsets = {
+        Vector3.new(0,  PORTAL_HEIGHT/2+0.1, 0),
+        Vector3.new(0, -PORTAL_HEIGHT/2-0.1, 0),
+        Vector3.new(-PORTAL_WIDTH/2-0.1, 0, 0),
+        Vector3.new( PORTAL_WIDTH/2+0.1, 0, 0),
+    }
+    for i, off in ipairs(offsets) do
+        if parts[i+1] then
+            parts[i+1].CFrame = cf * CFrame.new(off)
+        end
+    end
+end
+
+local function DestroyPreview()
+    if PreviewModel then
+        PreviewModel:Destroy()
+        PreviewModel = nil
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- PLACE PHOTO
+-- ════════════════════════════════════════════════════════════════
+local function PlacePhoto(photo)
+    local cf = GetPlaceCF()
+    DestroyPreview()
+    BuildPortal(photo, cf)
+
+    PlaceMode             = false
+    PlacingPhoto          = nil
+    PlaceRotation         = 0
+    PlaceHint.Visible     = false
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- INPUT HANDLING
+-- ════════════════════════════════════════════════════════════════
+CameraSlot.MouseButton1Click:Connect(function()
+    CameraEquipped        = not CameraEquipped
+    CrosshairRoot.Visible = CameraEquipped
+
+    if CameraEquipped then
+        PlaceMode         = false
+        PlacingPhoto      = nil
+        PlaceHint.Visible = false
+        DestroyPreview()
+        U.Stroke(CameraSlot, T.Cyan, 2, 0)
+    else
+        U.Stroke(CameraSlot, T.BorderGlow, 1.5, 0.35)
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+
+    -- ESC: cancel everything
+    if inp.KeyCode == Enum.KeyCode.Escape then
+        if PlaceMode then
+            PlaceMode         = false
+            PlacingPhoto      = nil
+            PlaceHint.Visible = false
+            PlaceRotation     = 0
+            DestroyPreview()
+        elseif CameraEquipped then
+            CameraEquipped        = false
+            CrosshairRoot.Visible = false
+            U.Stroke(CameraSlot, T.BorderGlow, 1.5, 0.35)
+        end
+        return
+    end
+
+    -- R: rotate portal preview
+    if inp.KeyCode == Enum.KeyCode.R and PlaceMode then
+        PlaceRotation = (PlaceRotation + 45) % 360
+        return
+    end
+
+    -- G: delete last portal
+    if inp.KeyCode == Enum.KeyCode.G then
+        if #Photos > 0 then
+            DeletePhoto(#Photos)
+        end
+        return
+    end
+
+    -- Number keys 1-4: select photo slot → place mode
+    local numMap = {
+        [Enum.KeyCode.One]=1, [Enum.KeyCode.Two]=2,
+        [Enum.KeyCode.Three]=3, [Enum.KeyCode.Four]=4,
+    }
+    local idx = numMap[inp.KeyCode]
+    if idx then
+        if Photos[idx] then
+            PlacingPhoto          = Photos[idx]
+            PlaceMode             = true
+            PlaceHint.Visible     = true
+            CameraEquipped        = false
+            CrosshairRoot.Visible = false
+            U.Stroke(CameraSlot, T.BorderGlow, 1.5, 0.35)
+        end
+        return
+    end
+
+    -- LMB
+    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+        if PlaceMode and PlacingPhoto then
+            PlacePhoto(PlacingPhoto)
+            return
+        end
+        if CameraEquipped then
+            TakePhoto()
+            return
+        end
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- RENDER LOOP
+-- ════════════════════════════════════════════════════════════════
+local renderConn = RunService.RenderStepped:Connect(function()
+    if PlaceMode and PlacingPhoto then
+        UpdatePreview()
+    elseif not PlaceMode and PreviewModel then
+        DestroyPreview()
+    end
+end)
+table.insert(ENV.ApexPhotoLoops, renderConn)
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+RefreshAllSlots()
+
+print("[ApexPhotoPortal] Loaded.")
+print("  Click [CAM] to equip camera")
+print("  LMB to take photo  |  1-4 to place  |  walk through portal to TP")
