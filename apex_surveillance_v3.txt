@@ -1,0 +1,1231 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX SURVEILLANCE  ·  v3  ·  REAL CAMERA POV SWITCHING      ║
+╠══════════════════════════════════════════════════════════════╣
+║   Replaced the ViewportFrame clone-based feed system entirely.  ║
+║   That's what "bad graphics" was: a cloned scene (no shadows,    ║
+║   Archivable-safe copies, a guaranteed flat-color backdrop as a   ║
+║   fallback) can never match the real game's rendering. Instead,    ║
+║   the Tablet now shows a simple button list — tapping a camera      ║
+║   sets Workspace.CurrentCamera to Scriptable and moves the REAL       ║
+║   camera to that CCTV's lens position. You're now looking through      ║
+║   Roblox's actual render pipeline: full lighting, full detail, real     ║
+║   players moving in real time. No cloning needed at all.                 ║
+║                                                                             ║
+║   While viewing, a D-pad pans/tilts that camera's aim (persisted per        ║
+║   camera — it remembers where you last pointed it), a pulsing "● REC"        ║
+║   indicator confirms you're in camera POV, and EXIT returns you to            ║
+║   your own player's camera. Unequipping the Tablet, deleting the               ║
+║   camera you're currently viewing, or respawning all safely exit POV            ║
+║   too, so you can't get stuck in a frozen Scriptable camera.                     ║
+║                                                                                     ║
+║   Also fixed: re-equipping the Tablet a second time showed nothing —               ║
+║   the old grid rebuild destroyed tile Frames that the live ViewportFrames           ║
+║   were parented inside, killing them, while the camera's saved reference             ║
+║   kept pointing at the now-dead instance. Moot now that the whole system              ║
+║   is gone, but that was the root cause.                                                ║
+║                                                                                           ║
+║   Character movement is paused (WalkSpeed 0) while viewing a camera, restored            ║
+║   on exit — otherwise you'd be walking around blind while watching a feed.                ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Players          = game:GetService("Players")
+local Workspace        = game:GetService("Workspace")
+local Debris           = game:GetService("Debris")
+local StarterGui       = game:GetService("StarterGui")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+local function GetCamera()
+    return Workspace.CurrentCamera
+end
+
+local function GetBackpack()
+    local bp = LP:FindFirstChildOfClass("Backpack")
+    if bp then return bp end
+    local ok, result = pcall(function() return LP:WaitForChild("Backpack", 10) end)
+    if ok and result then return result end
+    warn("[ApexSurveillance] Could not find Backpack after 10s — retrying indefinitely.")
+    return LP:WaitForChild("Backpack")
+end
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexSurv then pcall(function() ENV.ApexSurv:Destroy() end) end
+if ENV.ApexSurvTablet then pcall(function() ENV.ApexSurvTablet:Destroy() end) end
+if ENV.ApexSurvLoops then
+    for _, c in pairs(ENV.ApexSurvLoops) do pcall(function() c:Disconnect() end) end
+end
+if ENV.ApexSurvTools then
+    for _, t in pairs(ENV.ApexSurvTools) do pcall(function() t:Destroy() end) end
+end
+ENV.ApexSurvLoops = {}
+ENV.ApexSurvTools = {}
+
+-- Leftover camera fixtures from a previous run would otherwise sit
+-- frozen in Workspace forever (the guard above only cleans up GUI
+-- and Tools, not physical placed models).
+for _, inst in ipairs(Workspace:GetChildren()) do
+    if inst:IsA("Model") and inst.Name:match("^ApexCam_") then
+        pcall(function() inst:Destroy() end)
+    end
+end
+
+local IsTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local function ForceBackpackVisible()
+    pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true) end)
+end
+ForceBackpackVisible()
+local coreguiLoop = task.spawn(function()
+    while true do ForceBackpackVisible(); task.wait(3) end
+end)
+table.insert(ENV.ApexSurvLoops, {Disconnect=function() task.cancel(coreguiLoop) end})
+
+-- THEME
+local T = {
+    Glass      = Color3.fromRGB(8,   8,   14),
+    GlassMid   = Color3.fromRGB(12,  12,  20),
+    GlassSurf  = Color3.fromRGB(18,  16,  28),
+    Violet     = Color3.fromRGB(138, 80,  255),
+    VioletBr   = Color3.fromRGB(172, 120, 255),
+    Cyan       = Color3.fromRGB(0,   220, 255),
+    Green      = Color3.fromRGB(0,   240, 148),
+    Yellow     = Color3.fromRGB(255, 200, 0),
+    Red        = Color3.fromRGB(255, 50,  80),
+    TxtPri     = Color3.fromRGB(240, 238, 255),
+    TxtSec     = Color3.fromRGB(150, 144, 178),
+    TxtDim     = Color3.fromRGB(75,  72,  98),
+    Border     = Color3.fromRGB(0,   0,   0),
+    BorderGlow = Color3.fromRGB(90,  55,  200),
+    FontBold   = Enum.Font.GothamBold,
+    FontMed    = Enum.Font.Gotham,
+    R          = UDim.new(0, 6),
+    RLg        = UDim.new(0, 10),
+    RPill      = UDim.new(0, 16),
+}
+
+-- UTILITY
+local U = {}
+function U.Tween(inst, info, props) local tw=TweenService:Create(inst,info,props); tw:Play(); return tw end
+function U.Corner(p, r) local c=Instance.new("UICorner"); c.CornerRadius=r or T.R; c.Parent=p; return c end
+function U.Stroke(p, col, thick, tr)
+    local s=Instance.new("UIStroke")
+    s.Color=col or T.Border; s.Thickness=thick or 1.5; s.Transparency=tr or 0
+    s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=p; return s
+end
+function U.Frame(props)
+    local f=Instance.new("Frame")
+    f.BackgroundColor3=props.bg or T.GlassSurf
+    f.BackgroundTransparency=props.tr or 0
+    f.BorderSizePixel=0
+    f.Size=props.size or UDim2.new(1,0,0,30)
+    f.Position=props.pos or UDim2.new(0,0,0,0)
+    f.ClipsDescendants=props.clip or false
+    f.ZIndex=props.z or 1
+    if props.name then f.Name=props.name end
+    if props.parent then f.Parent=props.parent end
+    return f
+end
+function U.Label(props)
+    local l=Instance.new("TextLabel")
+    l.BackgroundTransparency=1
+    l.Text=props.text or ""
+    l.TextColor3=props.col or T.TxtPri
+    l.Font=props.font or T.FontMed
+    l.TextSize=props.sz or 12
+    l.TextXAlignment=props.xa or Enum.TextXAlignment.Center
+    l.TextYAlignment=props.ya or Enum.TextYAlignment.Center
+    l.TextWrapped=props.wrap or false
+    l.Size=props.size or UDim2.new(1,0,1,0)
+    l.Position=props.pos or UDim2.new(0,0,0,0)
+    l.ZIndex=props.z or 2
+    if props.parent then l.Parent=props.parent end
+    return l
+end
+function U.Button(props)
+    local b=Instance.new("TextButton")
+    b.BackgroundColor3=props.bg or T.GlassSurf
+    b.BackgroundTransparency=props.tr or 0
+    b.BorderSizePixel=0
+    b.Text=props.text or ""
+    b.TextColor3=props.col or T.TxtPri
+    b.Font=props.font or T.FontBold
+    b.TextSize=props.sz or 12
+    b.AutoButtonColor=false
+    b.Size=props.size or UDim2.new(1,0,0,30)
+    b.Position=props.pos or UDim2.new(0,0,0,0)
+    b.ZIndex=props.z or 2
+    if props.parent then b.Parent=props.parent end
+    return b
+end
+
+local function WeldTo(base, part)
+    local w = Instance.new("WeldConstraint")
+    w.Part0 = base
+    w.Part1 = part
+    w.Parent = base
+end
+
+
+local function WeldTo(base, part)
+    local w = Instance.new("WeldConstraint")
+    w.Part0 = base
+    w.Part1 = part
+    w.Parent = base
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- STATE
+-- ════════════════════════════════════════════════════════════════
+local Cameras      = {}
+local NextCamId     = 1
+local MAX_CAMERAS   = 6
+local RAY_MAX_DIST  = 1000
+
+local PlaceYaw   = 0
+local PlacePitch = 0
+local PreviewModel = nil
+local TabletOpen    = false
+
+-- POV switching state. ActivePOVCam is the camData currently being
+-- viewed through (nil = normal player view). Pan/tilt live on each
+-- camData itself (camData.povYaw/povPitch) so aim persists across
+-- separate viewing sessions, like a real adjustable PTZ camera.
+local ActivePOVCam     = nil
+local SavedCameraType  = nil
+local SavedCameraCF    = nil
+local SavedFOV         = nil
+local SavedWalkSpeed   = nil
+local POV_PAN_STEP     = 15
+local POV_TILT_STEP    = 10
+
+-- Geometry reference points shared between model-building and
+-- POV-camera positioning, so the view always sits exactly where the
+-- physical lens actually is. Z is consistently "forward, away from
+-- the wall" throughout the whole model and matches tool.GripForward
+-- below. Do not reintroduce X-forward offsets in BuildCCTVGeometry.
+local CCTV_HOUSING_OFFSET = Vector3.new(0, -0.1, 2.35)
+local CCTV_LENS_TIP_LOCAL = CCTV_HOUSING_OFFSET + Vector3.new(0, 0, 1.3)
+
+local function GetChar() return LP.Character end
+local function GetRoot()
+    local c = GetChar()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function GetHum()
+    local c = GetChar()
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- MAIN HUD (crosshair, placement UI, counters) — separate from the
+-- Tablet's own ScreenGui, which is built further down.
+-- ════════════════════════════════════════════════════════════════
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name           = "ApexSurveillanceHUD"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder   = 99
+ScreenGui.Parent         = PGui
+ENV.ApexSurv             = ScreenGui
+
+local Flash = Instance.new("Frame")
+Flash.BackgroundColor3=Color3.new(1,1,1); Flash.BackgroundTransparency=1
+Flash.BorderSizePixel=0; Flash.Size=UDim2.new(1,0,1,0); Flash.ZIndex=100
+Flash.Parent=ScreenGui
+
+local function DoFlash(col)
+    Flash.BackgroundColor3 = col or Color3.new(1,1,1)
+    Flash.BackgroundTransparency = 1
+    Flash.BackgroundTransparency = 0
+    U.Tween(Flash, TweenInfo.new(0.4,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),
+        {BackgroundTransparency=1})
+end
+
+-- Reactive crosshair: shown while Camera Placer is equipped, color
+-- and distance readout update live based on whether the screen
+-- center is currently over a valid mountable surface.
+local CrosshairRoot = U.Frame({bg=Color3.new(0,0,0), tr=1, size=UDim2.new(1,0,1,0), z=90, parent=ScreenGui})
+CrosshairRoot.Visible = false
+
+local CrosshairPieces = {}
+local function CLine(w,h,ax,ay)
+    local f=Instance.new("Frame")
+    f.BackgroundColor3=Color3.new(1,1,1); f.BackgroundTransparency=0.15
+    f.BorderSizePixel=0; f.Size=UDim2.new(0,w,0,h)
+    f.Position=UDim2.new(0.5,0,0.5,0); f.AnchorPoint=Vector2.new(ax,ay)
+    f.ZIndex=91; f.Parent=CrosshairRoot
+    table.insert(CrosshairPieces, f)
+    return f
+end
+CLine(24,2,0.5,0.5); CLine(2,24,0.5,0.5)
+
+local cdot=Instance.new("Frame")
+cdot.BackgroundColor3=T.Cyan; cdot.BorderSizePixel=0
+cdot.Size=UDim2.new(0,4,0,4); cdot.Position=UDim2.new(0.5,-2,0.5,-2)
+cdot.ZIndex=92; U.Corner(cdot,UDim.new(1,0)); cdot.Parent=CrosshairRoot
+
+local CrosshairDistLabel = U.Label({
+    text="", col=T.TxtDim, font=T.FontBold, sz=10,
+    size=UDim2.new(0,160,0,16), pos=UDim2.new(0.5,-80,0.5,16),
+    xa=Enum.TextXAlignment.Center, z=92, parent=CrosshairRoot,
+})
+
+U.Label({
+    text = IsTouch and "CAMERA PLACER  |  Tap fire to preview/mount"
+                     or "CAMERA PLACER  |  Click to preview/mount",
+    col=T.Cyan, font=T.FontBold, sz=11,
+    size=UDim2.new(0,440,0,18), pos=UDim2.new(0.5,-220,0.86,0),
+    z=92, parent=CrosshairRoot,
+})
+
+local PlaceHint = U.Frame({
+    bg=T.GlassMid, tr=0.18, size=UDim2.new(0,430,0,30),
+    pos=UDim2.new(0.5,-215,0,10), z=20, parent=ScreenGui,
+})
+U.Corner(PlaceHint, T.RPill)
+U.Stroke(PlaceHint, T.BorderGlow, 1.5, 0.3)
+U.Label({
+    text = IsTouch and "AIMING  |  Tap fire=confirm  |  Use D-pad to aim"
+                     or "AIMING  |  Click=confirm  |  Arrows aim  Esc cancel",
+    col=T.Yellow, font=T.FontBold, sz=10, z=21, parent=PlaceHint,
+})
+PlaceHint.Visible = false
+
+local CountFrame = U.Frame({
+    bg=T.GlassMid, tr=0.2, size=UDim2.new(0,170,0,26),
+    pos=UDim2.new(0.5,-85,0.03,30), z=10, parent=ScreenGui,
+})
+U.Corner(CountFrame, T.RPill)
+U.Stroke(CountFrame, T.BorderGlow, 1.5, 0.5)
+local CountLabel = U.Label({text="0 / "..MAX_CAMERAS.." cameras", col=T.TxtSec, font=T.FontBold, sz=10, z=11, parent=CountFrame})
+
+local StatusBox = U.Frame({
+    bg=T.GlassMid, tr=0.2, size=UDim2.new(0,280,0,22),
+    pos=UDim2.new(0.5,-140,0.03,58), z=10, parent=ScreenGui,
+})
+U.Corner(StatusBox, T.RPill)
+U.Stroke(StatusBox, T.BorderGlow, 1.5, 0.5)
+local StatusLabel = U.Label({text="Binding to Backpack...", col=T.TxtDim, font=T.FontBold, sz=9, z=11, parent=StatusBox})
+
+if not IsTouch then
+    local HintBox = U.Frame({
+        bg=T.GlassMid, tr=0.18, size=UDim2.new(0,260,0,120),
+        pos=UDim2.new(0,10,0.5,-60), z=10, parent=ScreenGui,
+    })
+    U.Corner(HintBox, T.R)
+    U.Stroke(HintBox, T.BorderGlow, 1.5, 0.5)
+    local lines = {
+        {"APEX SURVEILLANCE", T.Cyan},
+        {"Equip Camera Placer -> click", T.TxtSec},
+        {"  1st click = preview", T.TxtSec},
+        {"  2nd click = mount", T.TxtSec},
+        {"Left/Right  yaw camera", T.TxtSec},
+        {"Up/Down     tilt camera", T.TxtSec},
+        {"G delete last | H show inv", T.TxtSec},
+        {"Equip Tablet to view feeds", T.Green},
+    }
+    for i, line in ipairs(lines) do
+        U.Label({
+            text=line[1], col=line[2], font=T.FontBold, sz=9,
+            size=UDim2.new(1,-10,0,13), pos=UDim2.new(0,6,0,2+(i-1)*14),
+            xa=Enum.TextXAlignment.Left, z=11, parent=HintBox,
+        })
+    end
+end
+
+-- Left cluster: Delete / Show Inv
+local LeftControls = U.Frame({
+    bg=Color3.new(0,0,0), tr=1,
+    size=UDim2.new(0,160,0,80),
+    pos=UDim2.new(0,14,1,-180), z=30, parent=ScreenGui,
+})
+
+local DeleteBtn = U.Button({
+    bg=T.GlassMid, tr=0.1,
+    size=UDim2.new(0,72,0,72), pos=UDim2.new(0,0,0,0),
+    text="DELETE\nLAST", col=T.Red, sz=10, z=31, parent=LeftControls,
+})
+U.Corner(DeleteBtn, UDim.new(1,0))
+U.Stroke(DeleteBtn, T.Red, 2, 0.3)
+DeleteBtn.TextWrapped = true
+
+local ShowInvBtn = U.Button({
+    bg=T.GlassMid, tr=0.1,
+    size=UDim2.new(0,72,0,72), pos=UDim2.new(0,84,0,0),
+    text="SHOW\nINV", col=T.Green, sz=10, z=31, parent=LeftControls,
+})
+U.Corner(ShowInvBtn, UDim.new(1,0))
+U.Stroke(ShowInvBtn, T.Green, 2, 0.3)
+ShowInvBtn.TextWrapped = true
+
+ShowInvBtn.MouseButton1Click:Connect(function()
+    ForceBackpackVisible()
+    StatusLabel.Text = "Forced inventory visible"
+    StatusLabel.TextColor3 = T.Green
+end)
+
+-- Right cluster: aim D-pad (yaw / pitch), place-mode only
+local AimPad = U.Frame({
+    bg=Color3.new(0,0,0), tr=1,
+    size=UDim2.new(0,190,0,130),
+    pos=UDim2.new(1,-204,1,-230), z=30, parent=ScreenGui,
+})
+AimPad.Visible = false
+
+local function PadBtn(text, pos, col)
+    local b = U.Button({
+        bg=T.GlassMid, tr=0.1, size=UDim2.new(0,58,0,58), pos=pos,
+        text=text, col=col, sz=13, z=31, parent=AimPad,
+    })
+    U.Corner(b, UDim.new(1,0))
+    U.Stroke(b, col, 2, 0.3)
+    b.TextWrapped = true
+    return b
+end
+
+local TiltUpBtn    = PadBtn("TILT\n^", UDim2.new(0,66,0,0),  T.Cyan)
+local YawLeftBtn   = PadBtn("YAW\n<",  UDim2.new(0,0,0,66),  T.Cyan)
+local YawRightBtn  = PadBtn("YAW\n>",  UDim2.new(0,132,0,66),T.Cyan)
+local TiltDownBtn  = PadBtn("TILT\nv", UDim2.new(0,66,0,66), T.Cyan)
+
+local function AdjustYaw(delta)   PlaceYaw   = (PlaceYaw + delta) % 360 end
+local function AdjustPitch(delta) PlacePitch = math.clamp(PlacePitch + delta, -85, 85) end
+
+YawLeftBtn.MouseButton1Click:Connect(function()  AdjustYaw(-30) end)
+YawRightBtn.MouseButton1Click:Connect(function() AdjustYaw(30)  end)
+TiltUpBtn.MouseButton1Click:Connect(function()   AdjustPitch(-15) end)
+TiltDownBtn.MouseButton1Click:Connect(function() AdjustPitch(15)  end)
+
+local function IsDescendantOfAny(obj, list)
+    for _, m in ipairs(list) do
+        if m and obj:IsDescendantOf(m) then return true end
+    end
+    return false
+end
+
+local function BuildExcludeList()
+    local excludeList = {}
+    local char = GetChar()
+    if char then table.insert(excludeList, char) end
+    for _, cam in ipairs(Cameras) do
+        if cam.model then table.insert(excludeList, cam.model) end
+    end
+    if PreviewModel then table.insert(excludeList, PreviewModel) end
+    return excludeList
+end
+
+local function RaycastFromCamera(maxDist)
+    local camera = GetCamera()
+    local vpSize = camera.ViewportSize
+    local ray = camera:ScreenPointToRay(vpSize.X/2, vpSize.Y/2)
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = BuildExcludeList()
+    params.IgnoreWater = true
+
+    local result = Workspace:Raycast(ray.Origin, ray.Direction * maxDist, params)
+
+    print(("[ApexSurveillance] Raycast  origin=%s  dir=%s  hit=%s"):format(
+        tostring(ray.Origin), tostring(ray.Direction), result and tostring(result.Position) or "NONE"))
+
+    return result, ray, camera
+end
+
+local function CrosshairSilentRaycast()
+    local camera = GetCamera()
+    local vpSize = camera.ViewportSize
+    local ray = camera:ScreenPointToRay(vpSize.X/2, vpSize.Y/2)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = BuildExcludeList()
+    params.IgnoreWater = true
+    return Workspace:Raycast(ray.Origin, ray.Direction * RAY_MAX_DIST, params), camera
+end
+
+local function UpdateCrosshairFeedback()
+    if not CrosshairRoot.Visible then return end
+    local hit, camera = CrosshairSilentRaycast()
+    local col
+    if hit then
+        local dist = (hit.Position - camera.CFrame.Position).Magnitude
+        col = T.Green
+        CrosshairDistLabel.Text = string.format("%.0f studs", dist)
+        CrosshairDistLabel.TextColor3 = T.Green
+    else
+        col = T.Red
+        CrosshairDistLabel.Text = "no surface"
+        CrosshairDistLabel.TextColor3 = T.Red
+    end
+    cdot.BackgroundColor3 = col
+    for _, piece in ipairs(CrosshairPieces) do piece.BackgroundColor3 = col end
+end
+
+local function BuildCCTVGeometry(mode, container, baseCFrame)
+    local bodyColor  = Color3.fromRGB(42, 46, 54)
+    local bodyDark   = Color3.fromRGB(22, 24, 30)
+    local metalColor = Color3.fromRGB(152, 157, 167)
+    local darkMetal  = Color3.fromRGB(32, 34, 40)
+    local lensGlass  = Color3.fromRGB(8, 20, 35)
+    local ledRed     = Color3.fromRGB(255, 40, 40)
+    local ledIR      = Color3.fromRGB(95, 22, 22)
+
+    baseCFrame = baseCFrame or CFrame.new(0,0,0)
+    local parts = {}
+
+    local function NewPart(name, kind, size, localCF, material, color, extraProps)
+        local p
+        if kind == "cylinder" or kind == "box" then
+            p = Instance.new("Part")
+            if kind == "cylinder" then p.Shape = Enum.PartType.Cylinder end
+        elseif kind == "ball" then
+            p = Instance.new("Part")
+            p.Shape = Enum.PartType.Ball
+        end
+        p.Name = name
+        p.Size = size
+        p.Anchored = (mode == "fixture")
+        p.CanCollide = false
+        p.CastShadow = true
+        p.Material = material
+        p.Color = color
+        if extraProps then
+            for k, v in pairs(extraProps) do p[k] = v end
+        end
+
+        if mode == "fixture" then
+            p.CFrame = baseCFrame * localCF
+            p.Parent = container
+        else
+            p.CFrame = localCF
+            p.Parent = container
+        end
+
+        table.insert(parts, p)
+        return p
+    end
+
+    -- Root wall plate (also the Tool's required "Handle" in tool mode).
+    -- Z is the thin dimension — the plate sits flush against the wall,
+    -- with everything else extending forward along +Z from here.
+    local root = NewPart(mode=="tool" and "Handle" or "MountPlate", "box",
+        Vector3.new(0.9, 1.1, 0.18), CFrame.new(0,0,0), Enum.Material.Metal, darkMetal)
+
+    -- corner rivets (on the forward-facing side of the plate)
+    for _, off in ipairs({
+        Vector3.new(0.35, 0.45, 0.1), Vector3.new(-0.35, 0.45, 0.1),
+        Vector3.new(0.35, -0.45, 0.1), Vector3.new(-0.35, -0.45, 0.1),
+    }) do
+        NewPart("Rivet", "ball", Vector3.new(0.08,0.08,0.08), CFrame.new(off), Enum.Material.Metal, metalColor)
+    end
+
+    -- swivel joints + angled mount arm (reference: articulated bracket).
+    -- The Arm cylinder's own Size.X is its length regardless of which
+    -- world axis it's rotated to point along — rotating it ~90° around
+    -- Y converts its local length axis to point along Z (forward),
+    -- with a small extra tilt for a slightly bent, less robotic look.
+    NewPart("Joint1", "ball", Vector3.new(0.34,0.34,0.34),
+        CFrame.new(0, 0, 0.25), Enum.Material.Metal, metalColor)
+    NewPart("Arm", "cylinder", Vector3.new(1.1, 0.2, 0.2),
+        CFrame.new(0, -0.05, 0.75) * CFrame.Angles(math.rad(10), math.rad(90), 0),
+        Enum.Material.Metal, metalColor)
+    NewPart("Joint2", "ball", Vector3.new(0.3,0.3,0.3),
+        CFrame.new(0, -0.1, 1.35), Enum.Material.Metal, metalColor)
+
+    -- bullet housing — long dimension now along Z
+    NewPart("Housing", "box", Vector3.new(0.68, 0.68, 1.9),
+        CFrame.new(CCTV_HOUSING_OFFSET), Enum.Material.SmoothPlastic, bodyColor)
+    NewPart("HousingPanel", "box", Vector3.new(0.55, 0.55, 0.5),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0,0,0.85)), Enum.Material.SmoothPlastic, bodyDark)
+
+    -- lens — cylinders rotated to point along Z, positioned along Z;
+    -- these now actually agree with each other
+    NewPart("LensRing", "cylinder", Vector3.new(0.18, 0.5, 0.5),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0,0,1.15)) * CFrame.Angles(0, math.rad(90), 0),
+        Enum.Material.Metal, darkMetal)
+    NewPart("LensGlass", "cylinder", Vector3.new(0.08, 0.4, 0.4),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0,0,1.28)) * CFrame.Angles(0, math.rad(90), 0),
+        Enum.Material.Glass, lensGlass, {Transparency=0.2})
+
+    -- IR LED ring around the lens — ring now sits in the XY plane at a
+    -- fixed Z depth, perpendicular to the forward axis as intended
+    for i = 0, 5 do
+        local ang = math.rad(i * 60)
+        local off = Vector3.new(math.sin(ang)*0.22, math.cos(ang)*0.22, 1.2)
+        NewPart("IRLed", "ball", Vector3.new(0.06,0.06,0.06),
+            CFrame.new(CCTV_HOUSING_OFFSET + off), Enum.Material.Neon, ledIR)
+    end
+
+    -- status/recording LED (caller animates its Transparency to blink)
+    local statusLed = NewPart("StatusLED", "ball", Vector3.new(0.1,0.1,0.1),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0, 0.3, 0.3)), Enum.Material.Neon, ledRed)
+
+    if mode == "tool" then
+        for _, p in ipairs(parts) do
+            if p ~= root then WeldTo(root, p) end
+        end
+    end
+
+    return root, parts, statusLed
+end
+
+local function StartLedBlink(led, getAlive)
+    task.spawn(function()
+        while getAlive() do
+            led.Transparency = 0
+            task.wait(0.6)
+            if not getAlive() then break end
+            led.Transparency = 0.7
+            task.wait(0.6)
+        end
+    end)
+end
+
+local function GetCameraPlaceCF()
+    local result, ray, camera = RaycastFromCamera(RAY_MAX_DIST)
+    local hitPos, hitNorm
+    if result then
+        hitPos = result.Position
+        hitNorm = result.Normal
+    else
+        hitPos = ray.Origin + ray.Direction * (RAY_MAX_DIST * 0.05)
+        hitNorm = -ray.Direction
+        warn("[ApexSurveillance] Placement raycast missed — using fallback point in front of camera.")
+    end
+
+    -- Mount flush to the surface, lens pointing outward along its
+    -- normal (works the same for walls, ceilings, or a floor-standing
+    -- mount), then let the player fine-tune with yaw/pitch.
+    local baseCF = CFrame.new(hitPos, hitPos + hitNorm)
+    local adjustedCF = baseCF * CFrame.Angles(math.rad(PlacePitch), math.rad(PlaceYaw), 0)
+    return adjustedCF, result ~= nil
+end
+
+local function UpdateCameraPreview()
+    local cf = GetCameraPlaceCF()
+
+    if not PreviewModel then
+        PreviewModel = Instance.new("Model")
+        PreviewModel.Name = "ApexCamPreview"
+        PreviewModel.Parent = Workspace
+
+        local box = Instance.new("Part")
+        box.Name = "PreviewHousing"
+        box.Size = Vector3.new(1.9, 0.68, 0.68)
+        box.Anchored = true; box.CanCollide = false; box.CastShadow = false
+        box.Material = Enum.Material.Glass; box.Transparency = 0.5; box.Color = T.Violet
+        box.Parent = PreviewModel
+
+        local lens = Instance.new("Part")
+        lens.Name = "PreviewLens"
+        lens.Shape = Enum.PartType.Cylinder
+        lens.Size = Vector3.new(0.2, 0.5, 0.5)
+        lens.Anchored = true; lens.CanCollide = false; lens.CastShadow = false
+        lens.Material = Enum.Material.Neon; lens.Transparency = 0.3; lens.Color = T.Cyan
+        lens.Parent = PreviewModel
+    end
+
+    local parts = PreviewModel:GetChildren()
+    local box, lens = parts[1], parts[2]
+    if box then box.CFrame = cf * CFrame.new(CCTV_HOUSING_OFFSET) end
+    if lens then
+        lens.CFrame = cf * CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0,0,1.15)) * CFrame.Angles(0, math.rad(90), 0)
+    end
+end
+
+local function DestroyPreview()
+    if PreviewModel then PreviewModel:Destroy(); PreviewModel=nil end
+end
+
+local function BuildCameraFixture(camData, placeCF)
+    if camData.model then camData.model:Destroy() end
+    local model = Instance.new("Model")
+    model.Name = "ApexCam_"..camData.id
+    model.Parent = Workspace
+
+    local root, parts, led = BuildCCTVGeometry("fixture", model, placeCF)
+    camData.model = model
+    camData.mountCFrame = placeCF
+    camData.root = root
+
+    StartLedBlink(led, function() return model and model.Parent ~= nil end)
+
+    print(("[ApexSurveillance] Camera #%d mounted at %s facing %s")
+        :format(camData.id, tostring(placeCF.Position), tostring(placeCF.LookVector)))
+end
+
+local function ConfirmCameraPlacement()
+    local cf = GetCameraPlaceCF()
+    DestroyPreview()
+
+    local camData = {
+        id = NextCamId,
+        model = nil,
+        mountCFrame = nil,
+        root = nil,
+        povYaw = 0,
+        povPitch = 0,
+        listBtn = nil,
+    }
+    NextCamId = NextCamId + 1
+    table.insert(Cameras, camData)
+    CountLabel.Text = #Cameras.." / "..MAX_CAMERAS.." cameras"
+
+    BuildCameraFixture(camData, cf)
+
+    PlaceYaw = 0
+    PlacePitch = 0
+end
+
+local ExitCameraPOV -- forward declare, defined in the POV section below
+local RebuildTabletList -- forward declare, defined in the Tablet GUI section below
+
+local function DeleteLastCamera()
+    local camData = table.remove(Cameras)
+    if not camData then return end
+    if ActivePOVCam == camData and ExitCameraPOV then
+        ExitCameraPOV()
+    end
+    if camData.model then camData.model:Destroy() end
+    CountLabel.Text = #Cameras.." / "..MAX_CAMERAS.." cameras"
+    if RebuildTabletList then RebuildTabletList() end
+end
+
+DeleteBtn.MouseButton1Click:Connect(function()
+    if #Cameras > 0 then DeleteLastCamera() end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- TABLET GUI — a button list of placed cameras. Tapping one switches
+-- the REAL player camera into that CCTV's POV (CameraType.Scriptable)
+-- instead of rendering a cloned scene, so what you see is exactly as
+-- good as the game's actual rendering, including real players moving
+-- around in real time.
+-- ════════════════════════════════════════════════════════════════
+local TabletGui = Instance.new("ScreenGui")
+TabletGui.Name = "ApexSurveillanceTablet"
+TabletGui.ResetOnSpawn = false
+TabletGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+TabletGui.IgnoreGuiInset = true
+TabletGui.DisplayOrder = 98
+TabletGui.Enabled = false
+TabletGui.Parent = PGui
+ENV.ApexSurvTablet = TabletGui
+
+local TabletScreen = U.Frame({
+    bg=T.Glass, tr=0.04,
+    size=UDim2.new(0.92, 0, 0.82, 0), pos=UDim2.new(0.04, 0, 0.09, 0),
+    clip=true, z=1, parent=TabletGui,
+})
+U.Corner(TabletScreen, T.RLg)
+U.Stroke(TabletScreen, T.BorderGlow, 2, 0.3)
+
+local TabletTitle = U.Frame({bg=T.GlassMid, tr=0.1, size=UDim2.new(1,0,0,40), z=2, parent=TabletScreen})
+U.Label({
+    text="APEX SURVEILLANCE", col=T.Cyan, font=T.FontBold, sz=14,
+    xa=Enum.TextXAlignment.Left, size=UDim2.new(1,-20,1,0), pos=UDim2.new(0,14,0,0),
+    z=3, parent=TabletTitle,
+})
+local TabletCamCount = U.Label({
+    text="0 cams", col=T.TxtSec, font=T.FontBold, sz=11,
+    xa=Enum.TextXAlignment.Right, size=UDim2.new(0,100,1,0), pos=UDim2.new(1,-114,0,0),
+    z=3, parent=TabletTitle,
+})
+
+-- LIST VIEW
+local ListHolder = U.Frame({
+    bg=Color3.new(0,0,0), tr=1,
+    size=UDim2.new(1,-24,1,-52), pos=UDim2.new(0,12,0,46),
+    z=2, parent=TabletScreen,
+})
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.Padding = UDim.new(0,8)
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout.Parent = ListHolder
+
+local NoCamsLabel = U.Label({
+    text="No cameras placed yet.\nEquip the Camera Placer to mount one.",
+    col=T.TxtDim, font=T.FontBold, sz=13, wrap=true,
+    size=UDim2.new(1,0,0,60), pos=UDim2.new(0,0,0,10),
+    z=3, parent=TabletScreen,
+})
+NoCamsLabel.Visible = false
+
+-- POV HUD (shown instead of the list while actively viewing a camera)
+local PovHud = U.Frame({
+    bg=Color3.new(0,0,0), tr=1,
+    size=UDim2.new(1,-24,1,-52), pos=UDim2.new(0,12,0,46),
+    z=4, parent=TabletScreen,
+})
+PovHud.Visible = false
+
+local RecRow = U.Frame({bg=T.GlassMid, tr=0.1, size=UDim2.new(1,0,0,36), z=5, parent=PovHud})
+U.Corner(RecRow, T.R)
+U.Stroke(RecRow, T.Red, 1.5, 0.4)
+local RecLabel = U.Label({
+    text="\xe2\x97\x8f REC", col=T.Red, font=T.FontBold, sz=14,
+    xa=Enum.TextXAlignment.Left, size=UDim2.new(0,80,1,0), pos=UDim2.new(0,12,0,0),
+    z=6, parent=RecRow,
+})
+local CamNameLabel = U.Label({
+    text="CAM #0", col=T.TxtPri, font=T.FontBold, sz=13,
+    xa=Enum.TextXAlignment.Right, size=UDim2.new(0,150,1,0), pos=UDim2.new(1,-162,0,0),
+    z=6, parent=RecRow,
+})
+
+local function PovPadBtn(text, pos, col)
+    local b = U.Button({
+        bg=T.GlassMid, tr=0.1, size=UDim2.new(0,56,0,56), pos=pos,
+        text=text, col=col, sz=12, z=6, parent=PovHud,
+    })
+    U.Corner(b, UDim.new(1,0))
+    U.Stroke(b, col, 2, 0.3)
+    b.TextWrapped = true
+    return b
+end
+
+local PovTiltUp   = PovPadBtn("TILT\n^", UDim2.new(0,62,0,46))
+local PovYawLeft  = PovPadBtn("YAW\n<",  UDim2.new(0,0,0,108))
+local PovYawRight = PovPadBtn("YAW\n>",  UDim2.new(0,124,0,108))
+local PovTiltDown = PovPadBtn("TILT\nv", UDim2.new(0,62,0,108))
+
+local PovSwitchRow = U.Frame({
+    bg=Color3.new(0,0,0), tr=1,
+    size=UDim2.new(0,160,0,170), pos=UDim2.new(1,-160,0,46),
+    z=5, parent=PovHud,
+})
+local PovSwitchLayout = Instance.new("UIListLayout")
+PovSwitchLayout.Padding = UDim.new(0,6)
+PovSwitchLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PovSwitchLayout.Parent = PovSwitchRow
+
+local PovExitBtn = U.Button({
+    text="EXIT TO PLAYER POV", col=T.Red, font=T.FontBold, sz=13,
+    bg=T.GlassMid, tr=0.1,
+    size=UDim2.new(1,0,0,42), pos=UDim2.new(0,0,1,-42),
+    z=5, parent=PovHud,
+})
+U.Corner(PovExitBtn, T.RPill)
+U.Stroke(PovExitBtn, T.Red, 2, 0.3)
+
+local function ComputePovCFrame(camData)
+    local lensCF = camData.mountCFrame * CFrame.new(CCTV_LENS_TIP_LOCAL)
+    return lensCF * CFrame.Angles(math.rad(camData.povPitch), math.rad(camData.povYaw), 0)
+end
+
+local RecBlinkAlive = false
+local EnterCameraPOV -- forward declare (referenced by switch-row/list buttons below)
+
+local function RebuildPovSwitchRow(excludeCamData)
+    for _, ch in ipairs(PovSwitchRow:GetChildren()) do
+        if ch:IsA("TextButton") then ch:Destroy() end
+    end
+    for i, camData in ipairs(Cameras) do
+        if camData ~= excludeCamData then
+            local b = U.Button({
+                text="CAM #"..camData.id, col=T.TxtSec, font=T.FontBold, sz=11,
+                bg=T.GlassSurf, tr=0.1, size=UDim2.new(1,0,0,30), z=6, parent=PovSwitchRow,
+            })
+            b.LayoutOrder = i
+            U.Corner(b, T.R)
+            U.Stroke(b, T.BorderGlow, 1.5, 0.5)
+            b.MouseButton1Click:Connect(function()
+                if EnterCameraPOV then EnterCameraPOV(camData) end
+            end)
+        end
+    end
+end
+
+-- RebuildTabletList and ExitCameraPOV were forward-declared earlier
+-- (in the placement section, since DeleteLastCamera needs to call
+-- them) — assigning here, not re-declaring, so DeleteLastCamera's
+-- closure correctly sees the real implementations.
+RebuildTabletList = function()
+    for _, ch in ipairs(ListHolder:GetChildren()) do
+        if ch:IsA("TextButton") then ch:Destroy() end
+    end
+    TabletCamCount.Text = #Cameras.." cams"
+    NoCamsLabel.Visible = (#Cameras == 0) and not PovHud.Visible
+
+    for i, camData in ipairs(Cameras) do
+        local btn = U.Button({
+            text="VIEW CAM #"..camData.id, col=T.Cyan, font=T.FontBold, sz=13,
+            bg=T.GlassSurf, tr=0.05, size=UDim2.new(1,0,0,46),
+            z=3, parent=ListHolder,
+        })
+        btn.LayoutOrder = i
+        U.Corner(btn, T.R)
+        U.Stroke(btn, T.BorderGlow, 1.5, 0.4)
+        camData.listBtn = btn
+        btn.MouseButton1Click:Connect(function()
+            if EnterCameraPOV then EnterCameraPOV(camData) end
+        end)
+    end
+end
+
+EnterCameraPOV = function(camData)
+    local camera = GetCamera()
+
+    if not ActivePOVCam then
+        -- first entry this session: remember what to restore on exit
+        SavedCameraType = camera.CameraType
+        SavedCameraCF   = camera.CFrame
+        SavedFOV        = camera.FieldOfView
+        local hum = GetHum()
+        if hum then
+            SavedWalkSpeed = hum.WalkSpeed
+            hum.WalkSpeed = 0
+        end
+    end
+
+    ActivePOVCam = camData
+    camera.CameraType = Enum.CameraType.Scriptable
+    camera.FieldOfView = 70
+    camera.CFrame = ComputePovCFrame(camData)
+
+    CamNameLabel.Text = "CAM #"..camData.id
+    ListHolder.Visible = false
+    NoCamsLabel.Visible = false
+    PovHud.Visible = true
+    RebuildPovSwitchRow(camData)
+
+    RecBlinkAlive = true
+    task.spawn(function()
+        while RecBlinkAlive do
+            RecLabel.TextTransparency = 0
+            task.wait(0.5)
+            if not RecBlinkAlive then break end
+            RecLabel.TextTransparency = 0.75
+            task.wait(0.5)
+        end
+    end)
+
+    print("[ApexSurveillance] Entered POV of camera #"..camData.id)
+end
+
+ExitCameraPOV = function()
+    if not ActivePOVCam then return end
+    local camera = GetCamera()
+    local exitedId = ActivePOVCam.id
+
+    RecBlinkAlive = false
+    RecLabel.TextTransparency = 0
+
+    camera.CameraType = SavedCameraType or Enum.CameraType.Custom
+    if SavedFOV then camera.FieldOfView = SavedFOV end
+
+    local hum = GetHum()
+    if hum and SavedWalkSpeed then hum.WalkSpeed = SavedWalkSpeed end
+
+    ActivePOVCam = nil
+
+    PovHud.Visible = false
+    ListHolder.Visible = true
+    NoCamsLabel.Visible = (#Cameras == 0)
+
+    print("[ApexSurveillance] Exited POV of camera #"..exitedId)
+end
+
+PovExitBtn.MouseButton1Click:Connect(ExitCameraPOV)
+
+PovYawLeft.MouseButton1Click:Connect(function()
+    if ActivePOVCam then ActivePOVCam.povYaw = (ActivePOVCam.povYaw - POV_PAN_STEP) % 360 end
+end)
+PovYawRight.MouseButton1Click:Connect(function()
+    if ActivePOVCam then ActivePOVCam.povYaw = (ActivePOVCam.povYaw + POV_PAN_STEP) % 360 end
+end)
+PovTiltUp.MouseButton1Click:Connect(function()
+    if ActivePOVCam then ActivePOVCam.povPitch = math.clamp(ActivePOVCam.povPitch - POV_TILT_STEP, -80, 80) end
+end)
+PovTiltDown.MouseButton1Click:Connect(function()
+    if ActivePOVCam then ActivePOVCam.povPitch = math.clamp(ActivePOVCam.povPitch + POV_TILT_STEP, -80, 80) end
+end)
+
+local function BuildTabletHandle(tool)
+    local Handle = Instance.new("Part")
+    Handle.Name = "Handle"
+    Handle.Size = Vector3.new(0.15, 1.6, 1.0)
+    Handle.CFrame = CFrame.new(0,0,0)
+    Handle.Anchored = false; Handle.CanCollide = false; Handle.CastShadow = true
+    Handle.Material = Enum.Material.SmoothPlastic
+    Handle.Color = Color3.fromRGB(20, 20, 24)
+    Handle.Parent = tool
+
+    local bezel = Instance.new("Part")
+    bezel.Name = "Bezel"
+    bezel.Size = Vector3.new(0.03, 1.46, 0.86)
+    bezel.CFrame = Handle.CFrame * CFrame.new(0.09, 0, 0)
+    bezel.Anchored=false; bezel.CanCollide=false; bezel.CastShadow=false
+    bezel.Material = Enum.Material.SmoothPlastic
+    bezel.Color = Color3.fromRGB(8, 8, 10)
+    bezel.Parent = tool
+    WeldTo(Handle, bezel)
+
+    local screen = Instance.new("Part")
+    screen.Name = "Screen"
+    screen.Size = Vector3.new(0.02, 1.3, 0.74)
+    screen.CFrame = Handle.CFrame * CFrame.new(0.11, 0, 0)
+    screen.Anchored=false; screen.CanCollide=false; screen.CastShadow=false
+    screen.Material = Enum.Material.Neon
+    screen.Color = Color3.fromRGB(10, 40, 60)
+    screen.Transparency = 0.15
+    screen.Parent = tool
+    WeldTo(Handle, screen)
+
+    local frontCam = Instance.new("Part")
+    frontCam.Name = "FrontCam"
+    frontCam.Shape = Enum.PartType.Cylinder
+    frontCam.Size = Vector3.new(0.02, 0.06, 0.06)
+    frontCam.CFrame = Handle.CFrame * CFrame.new(0.13, 0.68, 0) * CFrame.Angles(0, math.rad(90), 0)
+    frontCam.Anchored=false; frontCam.CanCollide=false; frontCam.CastShadow=false
+    frontCam.Material = Enum.Material.Neon
+    frontCam.Color = Color3.fromRGB(10,10,10)
+    frontCam.Parent = tool
+    WeldTo(Handle, frontCam)
+
+    local homeBtn = Instance.new("Part")
+    homeBtn.Name = "HomeButton"
+    homeBtn.Shape = Enum.PartType.Cylinder
+    homeBtn.Size = Vector3.new(0.02, 0.1, 0.1)
+    homeBtn.CFrame = Handle.CFrame * CFrame.new(0.13, -0.68, 0) * CFrame.Angles(0, math.rad(90), 0)
+    homeBtn.Anchored=false; homeBtn.CanCollide=false; homeBtn.CastShadow=false
+    homeBtn.Material = Enum.Material.Metal
+    homeBtn.Color = Color3.fromRGB(82, 82, 88)
+    homeBtn.Parent = tool
+    WeldTo(Handle, homeBtn)
+
+    return Handle
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- TOOL FACTORY — CAMERA PLACER (single reusable tool)
+-- ════════════════════════════════════════════════════════════════
+local function BindToolToBackpack(tool, attempt)
+    attempt = attempt or 1
+    local bp = GetBackpack()
+    tool.Parent = bp
+    task.wait(0.1)
+    if tool.Parent == bp then
+        StatusLabel.Text = "Inventory bound OK ("..#bp:GetChildren().." items)"
+        StatusLabel.TextColor3 = T.Green
+        return true
+    end
+    if attempt < 5 then
+        task.wait(0.3)
+        return BindToolToBackpack(tool, attempt+1)
+    end
+    StatusLabel.Text = "Backpack bind FAILED — tap SHOW INV"
+    StatusLabel.TextColor3 = T.Red
+    warn("[ApexSurveillance] Failed to parent tool to Backpack after 5 attempts: "..tool.Name)
+    return false
+end
+
+local function CreateCameraPlacerTool()
+    local tool = Instance.new("Tool")
+    tool.Name = "Apex Camera Placer"
+    tool.RequiresHandle = true
+    tool.CanBeDropped = false
+    tool.ToolTip = "Click to preview a mounting spot, click again to mount a camera there"
+    table.insert(ENV.ApexSurvTools, tool)
+
+    local _, _, led = BuildCCTVGeometry("tool", tool, nil)
+    StartLedBlink(led, function() return tool and tool.Parent ~= nil end)
+
+    -- Applied up front this time: Roblox's default grip treats local
+    -- -Z as "away from player," but the lens stack here runs along
+    -- local +Z. Flipping Forward AND Right together is a clean 180°
+    -- turn (not a mirror), so the model holds facing the right way.
+    tool.GripForward = Vector3.new(0, 0, 1)
+    tool.GripRight   = Vector3.new(-1, 0, 0)
+    tool.GripUp      = Vector3.new(0, 1, 0)
+    tool.GripPos     = Vector3.new(0, -0.15, -0.3)
+
+    local placing = false
+
+    tool.Equipped:Connect(function()
+        CrosshairRoot.Visible = true
+    end)
+
+    tool.Unequipped:Connect(function()
+        CrosshairRoot.Visible = false
+        if placing then
+            PlaceYaw = 0; PlacePitch = 0
+            PlaceHint.Visible = false
+            AimPad.Visible = false
+            DestroyPreview()
+            placing = false
+        end
+    end)
+
+    tool.Activated:Connect(function()
+        if #Cameras >= MAX_CAMERAS then
+            DoFlash(T.Red)
+            warn("[ApexSurveillance] Camera limit reached ("..MAX_CAMERAS..").")
+            return
+        end
+
+        if not placing then
+            local result = RaycastFromCamera(RAY_MAX_DIST)
+            if not result then
+                DoFlash(T.Red)
+                return
+            end
+            placing = true
+            PlaceYaw = 0; PlacePitch = 0
+            PlaceHint.Visible = true
+            AimPad.Visible = true
+        else
+            ConfirmCameraPlacement()
+            PlaceHint.Visible = false
+            AimPad.Visible = false
+            placing = false
+        end
+    end)
+
+    BindToolToBackpack(tool)
+    return tool
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- TOOL FACTORY — TABLET
+-- ════════════════════════════════════════════════════════════════
+local function CreateTabletTool()
+    local tool = Instance.new("Tool")
+    tool.Name = "Apex Tablet"
+    tool.RequiresHandle = true
+    tool.CanBeDropped = false
+    tool.ToolTip = "Click to view and switch between placed cameras"
+    table.insert(ENV.ApexSurvTools, tool)
+
+    BuildTabletHandle(tool)
+    tool.GripForward = Vector3.new(1, 0, 0)
+    tool.GripRight   = Vector3.new(0, 0, -1)
+    tool.GripUp      = Vector3.new(0, 1, 0)
+    tool.GripPos     = Vector3.new(0, -0.1, 0)
+
+    tool.Equipped:Connect(function()
+        TabletOpen = true
+        TabletGui.Enabled = true
+        RebuildTabletList()
+    end)
+
+    tool.Unequipped:Connect(function()
+        TabletOpen = false
+        TabletGui.Enabled = false
+        if ActivePOVCam then ExitCameraPOV() end
+    end)
+
+    BindToolToBackpack(tool)
+    return tool
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- PC KEYBOARD SUPPORT
+-- ════════════════════════════════════════════════════════════════
+UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+
+    if inp.KeyCode == Enum.KeyCode.Escape then
+        if ActivePOVCam then
+            ExitCameraPOV()
+            return
+        end
+        if PlaceHint.Visible then
+            PlaceYaw = 0; PlacePitch = 0
+            PlaceHint.Visible = false
+            AimPad.Visible = false
+            DestroyPreview()
+            local hum = GetHum()
+            if hum then hum:UnequipTools() end
+        end
+        return
+    end
+
+    if ActivePOVCam then
+        if inp.KeyCode == Enum.KeyCode.Left then
+            ActivePOVCam.povYaw = (ActivePOVCam.povYaw - POV_PAN_STEP) % 360; return
+        elseif inp.KeyCode == Enum.KeyCode.Right then
+            ActivePOVCam.povYaw = (ActivePOVCam.povYaw + POV_PAN_STEP) % 360; return
+        elseif inp.KeyCode == Enum.KeyCode.Up then
+            ActivePOVCam.povPitch = math.clamp(ActivePOVCam.povPitch - POV_TILT_STEP, -80, 80); return
+        elseif inp.KeyCode == Enum.KeyCode.Down then
+            ActivePOVCam.povPitch = math.clamp(ActivePOVCam.povPitch + POV_TILT_STEP, -80, 80); return
+        end
+    end
+
+    if PlaceHint.Visible then
+        if inp.KeyCode == Enum.KeyCode.Left then AdjustYaw(-30); return
+        elseif inp.KeyCode == Enum.KeyCode.Right then AdjustYaw(30); return
+        elseif inp.KeyCode == Enum.KeyCode.Up then AdjustPitch(-15); return
+        elseif inp.KeyCode == Enum.KeyCode.Down then AdjustPitch(15); return
+        end
+    end
+
+    if inp.KeyCode == Enum.KeyCode.G then
+        if #Cameras > 0 then DeleteLastCamera() end
+        return
+    end
+
+    if inp.KeyCode == Enum.KeyCode.H then
+        ForceBackpackVisible()
+        StatusLabel.Text = "Forced inventory visible"
+        StatusLabel.TextColor3 = T.Green
+        return
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- RENDER LOOP
+-- While ActivePOVCam is set, the real camera CFrame is pinned here
+-- every frame, so pan/tilt button presses take effect immediately
+-- and nothing else can knock the Scriptable camera out of position.
+-- ════════════════════════════════════════════════════════════════
+local renderConn = RunService.RenderStepped:Connect(function()
+    if ActivePOVCam then
+        GetCamera().CFrame = ComputePovCFrame(ActivePOVCam)
+    elseif PlaceHint.Visible then
+        UpdateCameraPreview()
+    elseif PreviewModel then
+        DestroyPreview()
+    end
+    UpdateCrosshairFeedback()
+end)
+table.insert(ENV.ApexSurvLoops, renderConn)
+
+-- ════════════════════════════════════════════════════════════════
+-- CHARACTER RESPAWN HANDLING
+-- ════════════════════════════════════════════════════════════════
+LP.CharacterAdded:Connect(function()
+    if ActivePOVCam then ExitCameraPOV() end
+    task.wait(0.5)
+    ForceBackpackVisible()
+    local bp = GetBackpack()
+    for _, t in pairs(ENV.ApexSurvTools) do
+        if t and t.Parent ~= bp and t.Parent ~= GetChar() then
+            pcall(function() t.Parent = bp end)
+        end
+    end
+    print("[ApexSurveillance] Character respawned.")
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+CreateCameraPlacerTool()
+CreateTabletTool()
+
+print("[ApexSurveillance v3] Loaded.")
+print("  Camera Placer and Tablet are in your Backpack/hotbar.")
+print("  Tablet now shows a button list, not a rendered feed grid.")
+print("  Tapping a camera switches your REAL camera to its POV — full quality, real players, no cloning.")
+print("  Pan/tilt with the D-pad while viewing; aim persists per camera between viewing sessions.")
+print("  EXIT TO PLAYER POV, unequipping the Tablet, deleting the viewed camera, or respawning all safely return you to normal.")
