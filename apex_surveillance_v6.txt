@@ -1,0 +1,1612 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX SURVEILLANCE  ·  v6  ·  COMPACT FLOATING PANEL          ║
+╠══════════════════════════════════════════════════════════════╣
+║   One small panel replaces every old on-screen widget (the big   ║
+║   tablet bezel, count/status pills, hint box, loose buttons).     ║
+║                                                                     ║
+║   • Drag it by the title bar. Drag position is remembered.          ║
+║   • [-] collapses it to a small floating icon; tap the icon          ║
+║     to bring it back. The icon is draggable too.                      ║
+║   • [...] opens settings: opacity slider + reset position.            ║
+║   • It auto-minimizes when you're not using it, and the icon            ║
+║     fades after a few more seconds so it stays out of the way.           ║
+║   • It never parks over the screen center (crosshair zone) and           ║
+║     is clamped to the screen edges.                                       ║
+║   • Camera controls (pan/tilt, flashlight, exit) live in the same         ║
+║     small panel while you're viewing a camera. Hold a pan/tilt             ║
+║     button to keep panning.                                                 ║
+║   • PC keys: P toggle panel, arrows pan/aim, Esc exit/cancel,                ║
+║     G delete last, H show inventory.                                          ║
+║                                                                                 ║
+║   Also fixed: pan/tilt directions were inverted in earlier versions              ║
+║   (left button turned right, up looked down). And UIGradient tints                ║
+║   button TEXT as well as the background, so the dark gradients added               ║
+║   in v5 were likely dimming labels — gradients are gone.                            ║
+║                                                                                       ║
+║   The camera model (BuildCCTVGeometry) and the tablet handle are                       ║
+║   copied over unchanged.                                                                ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Players          = game:GetService("Players")
+local Workspace        = game:GetService("Workspace")
+local StarterGui       = game:GetService("StarterGui")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+local function GetCamera()
+    return Workspace.CurrentCamera
+end
+
+local function GetBackpack()
+    local bp = LP:FindFirstChildOfClass("Backpack")
+    if bp then return bp end
+    local ok, result = pcall(function() return LP:WaitForChild("Backpack", 10) end)
+    if ok and result then return result end
+    warn("[ApexSurveillance] Could not find Backpack after 10s — retrying indefinitely.")
+    return LP:WaitForChild("Backpack")
+end
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexSurv then pcall(function() ENV.ApexSurv:Destroy() end) end
+if ENV.ApexSurvTablet then pcall(function() ENV.ApexSurvTablet:Destroy() end); ENV.ApexSurvTablet = nil end
+if ENV.ApexSurvLoops then
+    for _, c in pairs(ENV.ApexSurvLoops) do pcall(function() c:Disconnect() end) end
+end
+if ENV.ApexSurvTools then
+    for _, t in pairs(ENV.ApexSurvTools) do pcall(function() t:Destroy() end) end
+end
+ENV.ApexSurvLoops = {}
+ENV.ApexSurvTools = {}
+
+-- Leftover fixtures / lamp from a previous run would otherwise sit in
+-- Workspace forever (the guard above only cleans GUI, tools, loops).
+for _, inst in ipairs(Workspace:GetChildren()) do
+    if inst:IsA("Model") and inst.Name:match("^ApexCam_") then
+        pcall(function() inst:Destroy() end)
+    end
+    if inst:IsA("BasePart") and inst.Name == "ApexFlashlight" then
+        pcall(function() inst:Destroy() end)
+    end
+end
+
+-- Every connection goes through Track so the next reload can clean up.
+local function Track(conn)
+    table.insert(ENV.ApexSurvLoops, conn)
+    return conn
+end
+
+local IsTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local function ForceBackpackVisible()
+    pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true) end)
+end
+ForceBackpackVisible()
+local coreguiLoop = task.spawn(function()
+    while true do ForceBackpackVisible(); task.wait(3) end
+end)
+table.insert(ENV.ApexSurvLoops, {Disconnect=function() task.cancel(coreguiLoop) end})
+
+-- THEME
+local T = {
+    Glass      = Color3.fromRGB(10,  10,  18),
+    GlassSurf  = Color3.fromRGB(18,  16,  28),
+    BtnBase    = Color3.fromRGB(34,  36,  56),
+    BtnSel     = Color3.fromRGB(0,   84,  112),
+    Violet     = Color3.fromRGB(138, 80,  255),
+    VioletBr   = Color3.fromRGB(172, 120, 255),
+    Cyan       = Color3.fromRGB(0,   220, 255),
+    Green      = Color3.fromRGB(0,   240, 148),
+    Yellow     = Color3.fromRGB(255, 200, 0),
+    Red        = Color3.fromRGB(255, 70,  90),
+    TxtPri     = Color3.fromRGB(240, 238, 255),
+    TxtSec     = Color3.fromRGB(165, 160, 195),
+    TxtDim     = Color3.fromRGB(105, 102, 132),
+    Border     = Color3.fromRGB(0,   0,   0),
+    BorderGlow = Color3.fromRGB(90,  55,  200),
+    FontBold   = Enum.Font.GothamBold,
+    FontMed    = Enum.Font.Gotham,
+    RPill      = UDim.new(0, 16),
+}
+
+-- UTILITY
+local U = {}
+function U.Corner(p, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = r or UDim.new(0, 6)
+    c.Parent = p
+    return c
+end
+function U.Stroke(p, col, thick, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col or T.Border
+    s.Thickness = thick or 1.5
+    s.Transparency = tr or 0
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent = p
+    return s
+end
+function U.Frame(props)
+    local f = Instance.new("Frame")
+    f.BackgroundColor3 = props.bg or T.GlassSurf
+    f.BackgroundTransparency = props.tr or 0
+    f.BorderSizePixel = 0
+    f.Size = props.size or UDim2.new(1, 0, 0, 30)
+    f.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    f.ZIndex = props.z or 1
+    if props.name then f.Name = props.name end
+    if props.parent then f.Parent = props.parent end
+    return f
+end
+-- All UI text gets a faint dark outline so it stays readable even when
+-- the panel is turned mostly transparent over a bright scene.
+function U.Label(props)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = props.text or ""
+    l.TextColor3 = props.col or T.TxtPri
+    l.Font = props.font or T.FontMed
+    l.TextSize = props.sz or 12
+    l.TextXAlignment = props.xa or Enum.TextXAlignment.Center
+    l.TextYAlignment = props.ya or Enum.TextYAlignment.Center
+    l.TextWrapped = props.wrap or false
+    l.RichText = props.rich or false
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+    l.TextStrokeTransparency = 0.65
+    l.TextStrokeColor3 = Color3.new(0, 0, 0)
+    l.Size = props.size or UDim2.new(1, 0, 1, 0)
+    l.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    l.ZIndex = props.z or 2
+    if props.parent then l.Parent = props.parent end
+    return l
+end
+function U.Button(props)
+    local b = Instance.new("TextButton")
+    b.BackgroundColor3 = props.bg or T.BtnBase
+    b.BackgroundTransparency = props.tr or 0
+    b.BorderSizePixel = 0
+    b.Text = props.text or ""
+    b.TextColor3 = props.col or T.TxtPri
+    b.Font = props.font or T.FontBold
+    b.TextSize = props.sz or 12
+    b.TextStrokeTransparency = 0.65
+    b.TextStrokeColor3 = Color3.new(0, 0, 0)
+    b.AutoButtonColor = false
+    b.Size = props.size or UDim2.new(1, 0, 0, 30)
+    b.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    b.ZIndex = props.z or 2
+    if props.parent then b.Parent = props.parent end
+    return b
+end
+-- A small circular indicator light that blinks via Transparency.
+function U.PulseDot(parent, col, size, pos)
+    local dot = Instance.new("Frame")
+    dot.BackgroundColor3 = col
+    dot.BorderSizePixel = 0
+    dot.Size = UDim2.new(0, size or 10, 0, size or 10)
+    dot.Position = pos or UDim2.new(0, 0, 0, 0)
+    dot.ZIndex = 20
+    U.Corner(dot, UDim.new(1, 0))
+    dot.Parent = parent
+    local alive = true
+    task.spawn(function()
+        while alive and dot.Parent do
+            dot.BackgroundTransparency = 0
+            task.wait(0.5)
+            if not (alive and dot.Parent) then break end
+            dot.BackgroundTransparency = 0.75
+            task.wait(0.5)
+        end
+    end)
+    return dot, function() alive = false end
+end
+
+local function WeldTo(base, part)
+    local w = Instance.new("WeldConstraint")
+    w.Part0 = base
+    w.Part1 = part
+    w.Parent = base
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- STATE
+-- ════════════════════════════════════════════════════════════════
+local Cameras        = {}
+local NextCamId       = 1
+local MAX_CAMERAS     = 6
+local RAY_MAX_DIST    = 1000
+
+local PlaceYaw, PlacePitch = 0, 0
+local PreviewModel    = nil
+local TabletOpen      = false   -- Tablet tool equipped
+local PlacerEquipped  = false   -- Camera Placer tool equipped
+local PlacingPreview  = false   -- previewing a mounting spot
+local ActivePOVCam    = nil     -- camData currently viewed through
+local SavedCameraType, SavedFOV, SavedWalkSpeed = nil, nil, nil
+
+-- Tap = one discrete step; hold = small step repeated while pressed.
+local POV_PAN_TAP, POV_TILT_TAP   = 10, 8
+local POV_PAN_HOLD, POV_TILT_HOLD = 3.5, 2.5
+
+-- Z is consistently "forward, away from the wall" throughout the whole
+-- model and matches tool.GripForward. Do not reintroduce X-forward
+-- offsets in BuildCCTVGeometry.
+local CCTV_HOUSING_OFFSET = Vector3.new(0, -0.1, 2.35)
+local CCTV_LENS_TIP_LOCAL = CCTV_HOUSING_OFFSET + Vector3.new(0, 0, 1.3)
+
+local function GetChar() return LP.Character end
+local function GetHum()
+    local c = GetChar()
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- UI — forward declarations (assigned further down)
+-- ════════════════════════════════════════════════════════════════
+local EnterCameraPOV, ExitCameraPOV, DeleteLastCamera, CancelPreview
+local PadAction, ToggleFlashlight
+local RefreshUI, Expand, Collapse, SetIconDim
+
+-- Settings survive re-running the script in the same session.
+local Saved = ENV.ApexSurvSaved
+if type(Saved) ~= "table" then Saved = {}; ENV.ApexSurvSaved = Saved end
+
+local MIN_OPACITY = 0.25
+local Opacity = math.clamp(tonumber(Saved.opacity) or 0.85, MIN_OPACITY, 1)
+
+local PanelExpanded = true
+local IconDim       = false
+local DraggingNow   = false
+local SliderActive  = false
+local LastInteract  = os.clock()
+
+local function Bump()
+    LastInteract = os.clock()
+    if IconDim and SetIconDim then SetIconDim(false) end
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ApexSurveillanceUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 99
+ScreenGui.Parent = PGui
+ENV.ApexSurv = ScreenGui
+
+local function ScreenSize()
+    local s = ScreenGui.AbsoluteSize
+    if s.X < 50 or s.Y < 50 then
+        local cam = GetCamera()
+        if cam then s = cam.ViewportSize end
+    end
+    return s
+end
+
+local SS         = ScreenSize()
+local PANEL_W    = math.clamp(math.floor(SS.X * 0.29), 188, 236)
+local INNER_W    = PANEL_W - 16
+local GAP        = 4
+local BTN_H      = IsTouch and 34 or 30
+local CHIP_H     = IsTouch and 32 or 28
+local CHIP_W     = math.floor((INNER_W - GAP * 5) / 6)
+local HEADER_H   = 32
+local ICON_SIZE  = 42
+local DEFAULT_POS = Vector2.new(8, 64)
+
+local PanelPos = Vector2.new(tonumber(Saved.x) or DEFAULT_POS.X, tonumber(Saved.y) or DEFAULT_POS.Y)
+
+-- ── Opacity: every translucent background registers here so one
+-- slider controls them all. Text and outlines stay fully opaque.
+local GlassItems = {}
+local function Glass(inst, minTr, maxTr)
+    GlassItems[#GlassItems + 1] = {inst = inst, minTr = minTr, maxTr = maxTr}
+    inst.BackgroundTransparency = minTr + (maxTr - minTr) * (1 - Opacity)
+    return inst
+end
+local function ApplyOpacity()
+    local alive = {}
+    for _, g in ipairs(GlassItems) do
+        if g.inst.Parent then
+            g.inst.BackgroundTransparency = g.minTr + (g.maxTr - g.minTr) * (1 - Opacity)
+            alive[#alive + 1] = g
+        end
+    end
+    GlassItems = alive
+end
+
+local function MakeBtn(p)
+    local b = U.Button({
+        text = p.text, col = p.col or T.TxtPri, font = T.FontBold, sz = p.sz or 12,
+        bg = p.bg or T.BtnBase, tr = 0.15, size = p.size, pos = p.pos,
+        z = p.z or 12, parent = p.parent,
+    })
+    U.Corner(b, UDim.new(0, 6))
+    local st = U.Stroke(b, p.col or T.BorderGlow, 1.25, 0.5)
+    Glass(b, 0.1, 0.72)
+    return b, st
+end
+
+-- ── Panel
+local Panel = Instance.new("Frame")
+Panel.Name = "Panel"
+Panel.AutomaticSize = Enum.AutomaticSize.Y
+Panel.Size = UDim2.new(0, PANEL_W, 0, 0)
+Panel.BackgroundColor3 = T.Glass
+Panel.BorderSizePixel = 0
+Panel.Active = true
+Panel.ZIndex = 10
+Panel.Parent = ScreenGui
+U.Corner(Panel, UDim.new(0, 10))
+U.Stroke(Panel, T.BorderGlow, 1.5, 0.35)
+Glass(Panel, 0.05, 0.9)
+
+local PanelLayout = Instance.new("UIListLayout")
+PanelLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PanelLayout.Parent = Panel
+
+-- ── Header (drag handle)
+local Header = U.Frame({bg = T.Glass, tr = 1, size = UDim2.new(1, 0, 0, HEADER_H), z = 11, parent = Panel})
+Header.Active = true
+Header.LayoutOrder = 1
+
+U.Label({
+    text = "APEX CAM", col = T.Cyan, font = T.FontBold, sz = 12,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(0, 74, 1, 0), pos = UDim2.new(0, 10, 0, 0),
+    z = 12, parent = Header,
+})
+local CountLabel = U.Label({
+    text = "0/" .. MAX_CAMERAS, col = T.TxtSec, font = T.FontBold, sz = 11,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(0, 40, 1, 0), pos = UDim2.new(0, 84, 0, 0),
+    z = 12, parent = Header,
+})
+local SettingsBtn = MakeBtn({text = "...", col = T.TxtSec, sz = 14,
+    size = UDim2.new(0, 26, 0, 24), pos = UDim2.new(1, -58, 0.5, -12), parent = Header})
+local CollapseBtn = MakeBtn({text = "-", col = T.TxtSec, sz = 16,
+    size = UDim2.new(0, 26, 0, 24), pos = UDim2.new(1, -30, 0.5, -12), parent = Header})
+
+U.Frame({bg = T.BorderGlow, tr = 0.65, size = UDim2.new(1, -16, 0, 1),
+    pos = UDim2.new(0, 8, 1, -1), z = 12, parent = Header})
+
+-- ── Body
+local Body = Instance.new("Frame")
+Body.Name = "Body"
+Body.BackgroundTransparency = 1
+Body.BorderSizePixel = 0
+Body.AutomaticSize = Enum.AutomaticSize.Y
+Body.Size = UDim2.new(1, 0, 0, 0)
+Body.LayoutOrder = 2
+Body.ZIndex = 11
+Body.Parent = Panel
+
+local BodyLayout = Instance.new("UIListLayout")
+BodyLayout.Padding = UDim.new(0, GAP)
+BodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+BodyLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+BodyLayout.Parent = Body
+
+local BodyPad = Instance.new("UIPadding")
+BodyPad.PaddingTop = UDim.new(0, 6)
+BodyPad.PaddingBottom = UDim.new(0, 8)
+BodyPad.PaddingLeft = UDim.new(0, 8)
+BodyPad.PaddingRight = UDim.new(0, 8)
+BodyPad.Parent = Body
+
+local function Row(order, height)
+    local f = U.Frame({bg = T.Glass, tr = 1, size = UDim2.new(1, 0, 0, height), z = 12, parent = Body})
+    f.LayoutOrder = order
+    return f
+end
+
+-- ── Settings strip (hidden until [...] is tapped)
+local SettingsRow = Instance.new("Frame")
+SettingsRow.BackgroundTransparency = 1
+SettingsRow.BorderSizePixel = 0
+SettingsRow.AutomaticSize = Enum.AutomaticSize.Y
+SettingsRow.Size = UDim2.new(1, 0, 0, 0)
+SettingsRow.LayoutOrder = 1
+SettingsRow.Visible = false
+SettingsRow.ZIndex = 12
+SettingsRow.Parent = Body
+local SettingsLayout = Instance.new("UIListLayout")
+SettingsLayout.Padding = UDim.new(0, GAP)
+SettingsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+SettingsLayout.Parent = SettingsRow
+
+local OpacityLabel = U.Label({
+    text = "OPACITY", col = T.TxtSec, font = T.FontBold, sz = 10,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(1, 0, 0, 14), z = 13, parent = SettingsRow,
+})
+OpacityLabel.LayoutOrder = 1
+
+local SliderHit = U.Frame({bg = T.Glass, tr = 1, size = UDim2.new(1, 0, 0, 24), z = 13, parent = SettingsRow})
+SliderHit.LayoutOrder = 2
+SliderHit.Active = true
+local SliderTrack = U.Frame({bg = Color3.fromRGB(46, 48, 70), tr = 0,
+    size = UDim2.new(1, 0, 0, 6), pos = UDim2.new(0, 0, 0.5, -3), z = 14, parent = SliderHit})
+U.Corner(SliderTrack, UDim.new(0, 3))
+local SliderFill = U.Frame({bg = T.Cyan, tr = 0, size = UDim2.new(0, 0, 1, 0), z = 15, parent = SliderTrack})
+U.Corner(SliderFill, UDim.new(0, 3))
+local SliderKnob = U.Frame({bg = Color3.new(1, 1, 1), tr = 0,
+    size = UDim2.new(0, 16, 0, 16), pos = UDim2.new(0, -8, 0.5, -8), z = 16, parent = SliderHit})
+U.Corner(SliderKnob, UDim.new(1, 0))
+U.Stroke(SliderKnob, T.Cyan, 1.5, 0.2)
+
+local ResetBtn = MakeBtn({text = "RESET POSITION", col = T.TxtSec, sz = 11,
+    size = UDim2.new(1, 0, 0, 26), parent = SettingsRow})
+ResetBtn.LayoutOrder = 3
+
+-- ── Mode line (+ REC dot while viewing a camera)
+local ModeRow = Row(2, 22)
+local RecDot = U.PulseDot(ModeRow, T.Red, 10, UDim2.new(0, 2, 0.5, -5))
+RecDot.Visible = false
+local ModeText = U.Label({
+    text = "", col = T.TxtDim, font = T.FontBold, sz = 12, rich = true,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(1, 0, 1, 0), z = 13, parent = ModeRow,
+})
+
+-- ── Camera chips (one small numbered button per camera)
+local ChipsRow = Instance.new("Frame")
+ChipsRow.BackgroundTransparency = 1
+ChipsRow.BorderSizePixel = 0
+ChipsRow.AutomaticSize = Enum.AutomaticSize.Y
+ChipsRow.Size = UDim2.new(1, 0, 0, 0)
+ChipsRow.LayoutOrder = 3
+ChipsRow.ZIndex = 12
+ChipsRow.Parent = Body
+local ChipsGrid = Instance.new("UIGridLayout")
+ChipsGrid.CellSize = UDim2.new(0, CHIP_W, 0, CHIP_H)
+ChipsGrid.CellPadding = UDim2.new(0, GAP, 0, GAP)
+ChipsGrid.SortOrder = Enum.SortOrder.LayoutOrder
+ChipsGrid.HorizontalAlignment = Enum.HorizontalAlignment.Left
+ChipsGrid.Parent = ChipsRow
+
+local NoCamLabel = U.Label({
+    text = "No cameras yet", col = T.TxtDim, font = T.FontMed, sz = 11,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(1, 0, 0, 18), z = 13, parent = Body,
+})
+NoCamLabel.LayoutOrder = 4
+
+-- ── Pan / tilt pad — shared by camera view AND mount-aiming
+local PadRow = Row(5, BTN_H)
+PadRow.Visible = false
+local PAD_W = math.floor((INNER_W - GAP * 3) / 4)
+
+-- Press-and-hold repeat: one step immediately, then a smaller step
+-- repeated while the button stays pressed.
+local function MakeRepeatButton(btn, tapFn, holdFn)
+    local pressId = 0
+    local active = false
+    btn.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        pressId = pressId + 1
+        local myId = pressId
+        active = true
+        Bump()
+        tapFn()
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End and pressId == myId then
+                active = false
+            end
+        end)
+        task.spawn(function()
+            task.wait(0.35)
+            while active and pressId == myId do
+                holdFn()
+                Bump()
+                task.wait(0.04)
+            end
+        end)
+    end)
+end
+
+local function AddPadButton(index, glyph, dir)
+    local b = MakeBtn({text = glyph, col = T.Cyan, sz = 16,
+        size = UDim2.new(0, PAD_W, 1, 0),
+        pos = UDim2.new(0, (index - 1) * (PAD_W + GAP), 0, 0), parent = PadRow})
+    MakeRepeatButton(b,
+        function() if PadAction then PadAction(dir, false) end end,
+        function() if PadAction then PadAction(dir, true) end end)
+end
+AddPadButton(1, "\u{25C0}", "left")
+AddPadButton(2, "\u{25B2}", "up")
+AddPadButton(3, "\u{25BC}", "down")
+AddPadButton(4, "\u{25B6}", "right")
+
+-- ── Action row: LIGHT + EXIT while viewing; CANCEL while aiming a mount
+local ActionRow = Row(6, BTN_H)
+ActionRow.Visible = false
+local HALF_W = math.floor((INNER_W - GAP) / 2)
+
+local FlashBtn, FlashStroke = MakeBtn({text = "LIGHT", col = T.Yellow, sz = 12,
+    size = UDim2.new(0, HALF_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = ActionRow})
+local FlashDot = U.Frame({bg = Color3.fromRGB(70, 64, 36), tr = 0,
+    size = UDim2.new(0, 8, 0, 8), pos = UDim2.new(0, 9, 0.5, -4), z = 14, parent = FlashBtn})
+U.Corner(FlashDot, UDim.new(1, 0))
+
+local ExitBtn = MakeBtn({text = "EXIT", col = T.Red, sz = 12,
+    size = UDim2.new(0, HALF_W, 1, 0), pos = UDim2.new(0, HALF_W + GAP, 0, 0), parent = ActionRow})
+
+-- ── Utility row (hidden while viewing / aiming so it can't be mis-tapped)
+local UtilRow = Row(7, BTN_H - 2)
+local DelBtn = MakeBtn({text = "DELETE LAST", col = T.Red, sz = 11,
+    size = UDim2.new(0, HALF_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = UtilRow})
+local InvBtn = MakeBtn({text = "INVENTORY", col = T.Green, sz = 11,
+    size = UDim2.new(0, HALF_W, 1, 0), pos = UDim2.new(0, HALF_W + GAP, 0, 0), parent = UtilRow})
+
+-- ── Status line
+local StatusLabel = U.Label({
+    text = "Binding to Backpack...", col = T.TxtDim, font = T.FontMed, sz = 10,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(1, 0, 0, 14), z = 13, parent = Body,
+})
+StatusLabel.LayoutOrder = 8
+
+local function SetStatus(text, col)
+    StatusLabel.Text = text
+    StatusLabel.TextColor3 = col or T.TxtDim
+end
+
+-- ── Collapsed floating icon (CanvasGroup so the whole thing can fade)
+local Icon = Instance.new("CanvasGroup")
+Icon.Name = "Icon"
+Icon.Size = UDim2.new(0, ICON_SIZE, 0, ICON_SIZE)
+Icon.BackgroundColor3 = T.Glass
+Icon.BorderSizePixel = 0
+Icon.Active = true
+Icon.Visible = false
+Icon.ZIndex = 10
+Icon.Parent = ScreenGui
+U.Corner(Icon, UDim.new(1, 0))
+U.Stroke(Icon, T.Cyan, 1.75, 0.2)
+Glass(Icon, 0.05, 0.75)
+local IconLabel = U.Label({
+    text = "CAM\n0", col = T.Cyan, font = T.FontBold, sz = 11,
+    size = UDim2.new(1, 0, 1, 0), z = 11, parent = Icon,
+})
+local IconRec = U.PulseDot(Icon, T.Red, 9, UDim2.new(1, -13, 0, 4))
+IconRec.Visible = false
+
+-- ── Position handling: clamp to screen and keep clear of the center
+local function ActiveFrameSize()
+    if PanelExpanded then
+        local s = Panel.AbsoluteSize
+        if s.X < 10 or s.Y < 10 then return Vector2.new(PANEL_W, 170) end
+        return s
+    end
+    return Vector2.new(ICON_SIZE, ICON_SIZE)
+end
+
+local function ClampToScreen(pos, size)
+    local ss = ScreenSize()
+    return Vector2.new(
+        math.clamp(pos.X, 4, math.max(4, ss.X - size.X - 4)),
+        math.clamp(pos.Y, 4, math.max(4, ss.Y - size.Y - 4)))
+end
+
+-- The middle of the screen is where you aim; never park over it.
+local function AvoidCenter(pos, size)
+    local ss = ScreenSize()
+    local cx, cy = ss.X / 2, ss.Y / 2
+    local hw, hh = 48, 48
+    if pos.X + size.X > cx - hw and pos.X < cx + hw
+        and pos.Y + size.Y > cy - hh and pos.Y < cy + hh then
+        local leftX = (cx - hw) - size.X
+        local rightX = cx + hw
+        if math.abs(pos.X - leftX) < math.abs(pos.X - rightX) then
+            return Vector2.new(leftX, pos.Y)
+        end
+        return Vector2.new(rightX, pos.Y)
+    end
+    return pos
+end
+
+local function ApplyPos()
+    local size = ActiveFrameSize()
+    local p = ClampToScreen(PanelPos, size)
+    p = AvoidCenter(p, size)
+    p = ClampToScreen(p, size)
+    p = Vector2.new(math.floor(p.X + 0.5), math.floor(p.Y + 0.5))
+    PanelPos = p
+    Panel.Position = UDim2.fromOffset(p.X, p.Y)
+    Icon.Position = UDim2.fromOffset(p.X, p.Y)
+    Saved.x, Saved.y = p.X, p.Y
+end
+Track(Panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(ApplyPos))
+
+-- ── Dragging (title bar and icon). A tap that barely moves counts as a tap.
+local function MakeDraggable(handle, onTap)
+    local dragging, moved = false, false
+    local startInput, startMouse, startPos
+    handle.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        dragging, moved = true, false
+        DraggingNow = true
+        startInput = inp
+        startMouse = Vector2.new(inp.Position.X, inp.Position.Y)
+        startPos = PanelPos
+        Bump()
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End and startInput == inp and dragging then
+                dragging = false
+                DraggingNow = false
+                if not moved and onTap then onTap() end
+            end
+        end)
+    end)
+    Track(UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == startInput then
+            local delta = Vector2.new(inp.Position.X, inp.Position.Y) - startMouse
+            if not moved and delta.Magnitude > 6 then moved = true end
+            if moved then
+                PanelPos = startPos + delta
+                ApplyPos()
+                Bump()
+            end
+        end
+    end))
+end
+
+-- ── Expand / collapse / icon fade
+Collapse = function()
+    if PlacingPreview then return end -- never hide the aim controls mid-aim
+    PanelExpanded = false
+    SettingsRow.Visible = false
+    Panel.Visible = false
+    Icon.Visible = true
+    ApplyPos()
+    Bump()
+end
+
+Expand = function()
+    PanelExpanded = true
+    Icon.Visible = false
+    Panel.Visible = true
+    ApplyPos()
+    Bump()
+end
+
+SetIconDim = function(dim)
+    IconDim = dim
+    TweenService:Create(Icon, TweenInfo.new(0.35), {GroupTransparency = dim and 0.6 or 0}):Play()
+end
+
+MakeDraggable(Header, nil)
+MakeDraggable(Icon, function() Expand() end)
+
+Panel.InputBegan:Connect(function(inp)
+    local ut = inp.UserInputType
+    if ut == Enum.UserInputType.MouseButton1 or ut == Enum.UserInputType.Touch then Bump() end
+end)
+
+-- Errors and warnings pop the panel open so they're never missed.
+local function Notify(text, col)
+    SetStatus(text, col)
+    Expand()
+end
+
+-- ── Opacity slider
+local SliderT = (Opacity - MIN_OPACITY) / (1 - MIN_OPACITY)
+local function SetSliderT(t)
+    SliderT = math.clamp(t, 0, 1)
+    Opacity = MIN_OPACITY + SliderT * (1 - MIN_OPACITY)
+    Saved.opacity = Opacity
+    SliderFill.Size = UDim2.new(SliderT, 0, 1, 0)
+    SliderKnob.Position = UDim2.new(SliderT, -8, 0.5, -8)
+    OpacityLabel.Text = "OPACITY  " .. math.floor(Opacity * 100 + 0.5) .. "%"
+    ApplyOpacity()
+end
+local function SliderFromX(x)
+    local w = SliderHit.AbsoluteSize.X
+    if w <= 0 then return end
+    SetSliderT((x - SliderHit.AbsolutePosition.X) / w)
+end
+SetSliderT(SliderT)
+
+local sliderInput = nil
+SliderHit.InputBegan:Connect(function(inp)
+    local ut = inp.UserInputType
+    if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+    SliderActive = true
+    sliderInput = inp
+    Bump()
+    SliderFromX(inp.Position.X)
+    inp.Changed:Connect(function()
+        if inp.UserInputState == Enum.UserInputState.End then SliderActive = false end
+    end)
+end)
+Track(UserInputService.InputChanged:Connect(function(inp)
+    if not SliderActive then return end
+    if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == sliderInput then
+        SliderFromX(inp.Position.X)
+        Bump()
+    end
+end))
+
+-- ── Mode, chips, and the main refresh
+local function CurrentMode()
+    if ActivePOVCam then return "pov" end
+    if PlacingPreview then return "preview" end
+    if PlacerEquipped then return "place" end
+    if TabletOpen then return "tablet" end
+    return "idle"
+end
+
+local function RebuildChips()
+    for _, ch in ipairs(ChipsRow:GetChildren()) do
+        if ch:IsA("TextButton") then ch:Destroy() end
+    end
+    ApplyOpacity() -- also prunes registry entries for the chips just destroyed
+    local has = #Cameras > 0
+    ChipsRow.Visible = has
+    NoCamLabel.Visible = not has
+    local usable = TabletOpen or ActivePOVCam ~= nil
+    for i, camData in ipairs(Cameras) do
+        local selected = (ActivePOVCam == camData)
+        local b, st = MakeBtn({
+            text = tostring(camData.id),
+            col = selected and T.Cyan or (usable and T.TxtPri or T.TxtDim),
+            bg = selected and T.BtnSel or T.BtnBase,
+            sz = 13, size = UDim2.new(0, CHIP_W, 0, CHIP_H), parent = ChipsRow,
+        })
+        b.LayoutOrder = i
+        if selected then st.Transparency = 0.05; st.Thickness = 1.75 end
+        b.MouseButton1Click:Connect(function()
+            Bump()
+            if TabletOpen or ActivePOVCam then
+                EnterCameraPOV(camData)
+            else
+                Notify("Equip the Tablet to view cameras", T.Yellow)
+            end
+        end)
+    end
+end
+
+local LastMode = "idle"
+RefreshUI = function()
+    local mode = CurrentMode()
+    local pov = (mode == "pov")
+    local prev = (mode == "preview")
+
+    CountLabel.Text = #Cameras .. "/" .. MAX_CAMERAS
+    IconLabel.Text = "CAM\n" .. #Cameras
+
+    RecDot.Visible = pov
+    IconRec.Visible = pov
+    ModeText.Position = pov and UDim2.new(0, 18, 0, 0) or UDim2.new(0, 0, 0, 0)
+    ModeText.Size = pov and UDim2.new(1, -18, 1, 0) or UDim2.new(1, 0, 1, 0)
+
+    PadRow.Visible = pov or prev
+    ActionRow.Visible = pov or prev
+    FlashBtn.Visible = pov
+    UtilRow.Visible = not (pov or prev)
+
+    if pov then
+        ExitBtn.Text = "EXIT"
+        ExitBtn.Size = UDim2.new(0, HALF_W, 1, 0)
+        ExitBtn.Position = UDim2.new(0, HALF_W + GAP, 0, 0)
+    else
+        ExitBtn.Text = "CANCEL"
+        ExitBtn.Size = UDim2.new(1, 0, 1, 0)
+        ExitBtn.Position = UDim2.new(0, 0, 0, 0)
+    end
+
+    if pov then
+        ModeText.TextColor3 = T.TxtPri
+        ModeText.Text = '<font color="rgb(255,70,90)">REC</font>  ·  CAM #' .. ActivePOVCam.id
+    elseif prev then
+        ModeText.TextColor3 = T.Green
+        ModeText.Text = "AIMING  ·  tap fire to mount"
+    elseif mode == "place" then
+        ModeText.TextColor3 = T.Green
+        ModeText.Text = "PLACER  ·  aim at a surface"
+    elseif mode == "tablet" then
+        ModeText.TextColor3 = T.Cyan
+        ModeText.Text = "TABLET  ·  pick a camera"
+    else
+        ModeText.TextColor3 = T.TxtDim
+        ModeText.Text = "Idle  ·  equip a tool"
+    end
+
+    RebuildChips()
+
+    if mode ~= LastMode then
+        LastMode = mode
+        if mode ~= "idle" then Expand() end
+        Bump()
+    end
+end
+
+-- ── Button wiring
+SettingsBtn.MouseButton1Click:Connect(function()
+    Bump()
+    SettingsRow.Visible = not SettingsRow.Visible
+end)
+CollapseBtn.MouseButton1Click:Connect(function() Collapse() end)
+ResetBtn.MouseButton1Click:Connect(function()
+    PanelPos = DEFAULT_POS
+    ApplyPos()
+    Bump()
+end)
+ExitBtn.MouseButton1Click:Connect(function()
+    Bump()
+    if ActivePOVCam then ExitCameraPOV()
+    elseif PlacingPreview then CancelPreview() end
+end)
+FlashBtn.MouseButton1Click:Connect(function()
+    Bump()
+    if ToggleFlashlight then ToggleFlashlight() end
+end)
+DelBtn.MouseButton1Click:Connect(function()
+    Bump()
+    if #Cameras > 0 then DeleteLastCamera() else SetStatus("No cameras to delete", T.TxtDim) end
+end)
+InvBtn.MouseButton1Click:Connect(function()
+    Bump()
+    ForceBackpackVisible()
+    SetStatus("Inventory forced visible", T.Green)
+end)
+
+-- ── Auto-minimize: collapse to the icon when idle, then fade the icon.
+-- Never while aiming a mount; the dragging/slider guards stop it
+-- collapsing under your finger.
+local AUTO_COLLAPSE = {idle = 8, tablet = 25, place = 14, pov = 7}
+local ICON_DIM_AFTER = 6
+local uiLoop = task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local idleFor = os.clock() - LastInteract
+        local mode = CurrentMode()
+        -- Safety net: if a "finger lifted" event was ever missed, don't
+        -- let a stuck flag block auto-minimize forever.
+        if idleFor > 10 then DraggingNow = false; SliderActive = false end
+        if PanelExpanded then
+            local limit = AUTO_COLLAPSE[mode]
+            if limit and idleFor > limit and not DraggingNow and not SliderActive then
+                Collapse()
+            end
+        elseif not IconDim and mode ~= "pov" and idleFor > ICON_DIM_AFTER then
+            SetIconDim(true)
+        end
+    end
+end)
+table.insert(ENV.ApexSurvLoops, {Disconnect = function() task.cancel(uiLoop) end})
+
+-- ── Crosshair: four small ticks with the exact center left clear
+local CrosshairRoot = U.Frame({bg = T.Glass, tr = 1, size = UDim2.new(0, 40, 0, 40),
+    pos = UDim2.new(0.5, -20, 0.5, -20), z = 5, parent = ScreenGui})
+CrosshairRoot.Visible = false
+local CrosshairPieces = {}
+local function Tick(w, h, px, py)
+    local f = U.Frame({bg = T.Cyan, tr = 0, size = UDim2.new(0, w, 0, h),
+        pos = UDim2.new(0.5, px - math.floor(w / 2), 0.5, py - math.floor(h / 2)), z = 6, parent = CrosshairRoot})
+    CrosshairPieces[#CrosshairPieces + 1] = f
+end
+Tick(2, 6, 0, -9)
+Tick(2, 6, 0, 9)
+Tick(6, 2, -9, 0)
+Tick(6, 2, 9, 0)
+Tick(2, 2, 0, 0)
+
+-- ════════════════════════════════════════════════════════════════
+-- RAYCAST HELPERS
+-- ════════════════════════════════════════════════════════════════
+local function IsDescendantOfAny(obj, list)
+    for _, m in ipairs(list) do
+        if m and obj:IsDescendantOf(m) then return true end
+    end
+    return false
+end
+
+local function BuildExcludeList()
+    local excludeList = {}
+    local char = GetChar()
+    if char then table.insert(excludeList, char) end
+    for _, cam in ipairs(Cameras) do
+        if cam.model then table.insert(excludeList, cam.model) end
+    end
+    if PreviewModel then table.insert(excludeList, PreviewModel) end
+    return excludeList
+end
+
+local function RaycastFromCamera(maxDist)
+    local camera = GetCamera()
+    local vpSize = camera.ViewportSize
+    local ray = camera:ScreenPointToRay(vpSize.X / 2, vpSize.Y / 2)
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = BuildExcludeList()
+    params.IgnoreWater = true
+
+    local result = Workspace:Raycast(ray.Origin, ray.Direction * maxDist, params)
+
+    print(("[ApexSurveillance] Raycast  origin=%s  dir=%s  hit=%s"):format(
+        tostring(ray.Origin), tostring(ray.Direction), result and tostring(result.Position) or "NONE"))
+
+    return result, ray, camera
+end
+
+local function CrosshairSilentRaycast()
+    local camera = GetCamera()
+    local vpSize = camera.ViewportSize
+    local ray = camera:ScreenPointToRay(vpSize.X / 2, vpSize.Y / 2)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = BuildExcludeList()
+    params.IgnoreWater = true
+    return Workspace:Raycast(ray.Origin, ray.Direction * RAY_MAX_DIST, params), camera
+end
+
+-- Crosshair turns green over a mountable surface, red otherwise. The
+-- distance readout lives in the panel's mode line, not on screen.
+local function UpdateCrosshairFeedback()
+    if not CrosshairRoot.Visible then return end
+    local hit, camera = CrosshairSilentRaycast()
+    local col = hit and T.Green or T.Red
+    for _, p in ipairs(CrosshairPieces) do p.BackgroundColor3 = col end
+
+    local mode = CurrentMode()
+    if mode == "place" or mode == "preview" then
+        local head = (mode == "place") and "PLACER" or "AIMING"
+        local txt
+        if hit then
+            local d = (hit.Position - camera.CFrame.Position).Magnitude
+            txt = head .. "  ·  " .. string.format("%.0f studs", d)
+            if mode == "preview" then txt = txt .. "  ·  tap fire" end
+        else
+            txt = head .. "  ·  no surface"
+        end
+        if ModeText.Text ~= txt then ModeText.Text = txt end
+        ModeText.TextColor3 = col
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- CCTV CAMERA MODEL (unchanged from v5)
+-- ════════════════════════════════════════════════════════════════
+local function BuildCCTVGeometry(mode, container, baseCFrame)
+    local bodyColor  = Color3.fromRGB(42, 46, 54)
+    local bodyDark   = Color3.fromRGB(22, 24, 30)
+    local metalColor = Color3.fromRGB(152, 157, 167)
+    local darkMetal  = Color3.fromRGB(32, 34, 40)
+    local lensGlass  = Color3.fromRGB(8, 20, 35)
+    local ledRed     = Color3.fromRGB(255, 40, 40)
+    local ledIR      = Color3.fromRGB(95, 22, 22)
+
+    baseCFrame = baseCFrame or CFrame.new(0,0,0)
+    local parts = {}
+
+    local function NewPart(name, kind, size, localCF, material, color, extraProps)
+        local p
+        if kind == "cylinder" or kind == "box" then
+            p = Instance.new("Part")
+            if kind == "cylinder" then p.Shape = Enum.PartType.Cylinder end
+        elseif kind == "ball" then
+            p = Instance.new("Part")
+            p.Shape = Enum.PartType.Ball
+        end
+        p.Name = name
+        p.Size = size
+        p.Anchored = (mode == "fixture")
+        p.CanCollide = false
+        p.CastShadow = true
+        p.Material = material
+        p.Color = color
+        if extraProps then
+            for k, v in pairs(extraProps) do p[k] = v end
+        end
+
+        if mode == "fixture" then
+            p.CFrame = baseCFrame * localCF
+            p.Parent = container
+        else
+            p.CFrame = localCF
+            p.Parent = container
+        end
+
+        table.insert(parts, p)
+        return p
+    end
+
+    -- Root wall plate (also the Tool's required "Handle" in tool mode).
+    -- Z is the thin dimension — the plate sits flush against the wall,
+    -- with everything else extending forward along +Z from here.
+    local root = NewPart(mode=="tool" and "Handle" or "MountPlate", "box",
+        Vector3.new(0.9, 1.1, 0.18), CFrame.new(0,0,0), Enum.Material.Metal, darkMetal)
+
+    -- corner rivets (on the forward-facing side of the plate)
+    for _, off in ipairs({
+        Vector3.new(0.35, 0.45, 0.1), Vector3.new(-0.35, 0.45, 0.1),
+        Vector3.new(0.35, -0.45, 0.1), Vector3.new(-0.35, -0.45, 0.1),
+    }) do
+        NewPart("Rivet", "ball", Vector3.new(0.08,0.08,0.08), CFrame.new(off), Enum.Material.Metal, metalColor)
+    end
+
+    -- swivel joints + angled mount arm (reference: articulated bracket).
+    -- The Arm cylinder's own Size.X is its length regardless of which
+    -- world axis it's rotated to point along — rotating it ~90° around
+    -- Y converts its local length axis to point along Z (forward),
+    -- with a small extra tilt for a slightly bent, less robotic look.
+    NewPart("Joint1", "ball", Vector3.new(0.34,0.34,0.34),
+        CFrame.new(0, 0, 0.25), Enum.Material.Metal, metalColor)
+    NewPart("Arm", "cylinder", Vector3.new(1.1, 0.2, 0.2),
+        CFrame.new(0, -0.05, 0.75) * CFrame.Angles(math.rad(10), math.rad(90), 0),
+        Enum.Material.Metal, metalColor)
+    NewPart("Joint2", "ball", Vector3.new(0.3,0.3,0.3),
+        CFrame.new(0, -0.1, 1.35), Enum.Material.Metal, metalColor)
+
+    -- bullet housing — long dimension now along Z
+    NewPart("Housing", "box", Vector3.new(0.68, 0.68, 1.9),
+        CFrame.new(CCTV_HOUSING_OFFSET), Enum.Material.SmoothPlastic, bodyColor)
+    NewPart("HousingPanel", "box", Vector3.new(0.55, 0.55, 0.5),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0,0,0.85)), Enum.Material.SmoothPlastic, bodyDark)
+
+    -- lens — cylinders rotated to point along Z, positioned along Z;
+    -- these now actually agree with each other
+    NewPart("LensRing", "cylinder", Vector3.new(0.18, 0.5, 0.5),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0,0,1.15)) * CFrame.Angles(0, math.rad(90), 0),
+        Enum.Material.Metal, darkMetal)
+    NewPart("LensGlass", "cylinder", Vector3.new(0.08, 0.4, 0.4),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0,0,1.28)) * CFrame.Angles(0, math.rad(90), 0),
+        Enum.Material.Glass, lensGlass, {Transparency=0.2})
+
+    -- IR LED ring around the lens — ring now sits in the XY plane at a
+    -- fixed Z depth, perpendicular to the forward axis as intended
+    for i = 0, 5 do
+        local ang = math.rad(i * 60)
+        local off = Vector3.new(math.sin(ang)*0.22, math.cos(ang)*0.22, 1.2)
+        NewPart("IRLed", "ball", Vector3.new(0.06,0.06,0.06),
+            CFrame.new(CCTV_HOUSING_OFFSET + off), Enum.Material.Neon, ledIR)
+    end
+
+    -- status/recording LED (caller animates its Transparency to blink)
+    local statusLed = NewPart("StatusLED", "ball", Vector3.new(0.1,0.1,0.1),
+        CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0, 0.3, 0.3)), Enum.Material.Neon, ledRed)
+
+    if mode == "tool" then
+        for _, p in ipairs(parts) do
+            if p ~= root then WeldTo(root, p) end
+        end
+    end
+
+    return root, parts, statusLed
+end
+
+local function StartLedBlink(led, getAlive)
+    task.spawn(function()
+        while getAlive() do
+            led.Transparency = 0
+            task.wait(0.6)
+            if not getAlive() then break end
+            led.Transparency = 0.7
+            task.wait(0.6)
+        end
+    end)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- TABLET MODEL (unchanged from v5)
+-- ════════════════════════════════════════════════════════════════
+local function BuildTabletHandle(tool)
+    local Handle = Instance.new("Part")
+    Handle.Name = "Handle"
+    Handle.Size = Vector3.new(0.15, 1.6, 1.0)
+    Handle.CFrame = CFrame.new(0,0,0)
+    Handle.Anchored = false; Handle.CanCollide = false; Handle.CastShadow = true
+    Handle.Material = Enum.Material.SmoothPlastic
+    Handle.Color = Color3.fromRGB(20, 20, 24)
+    Handle.Parent = tool
+
+    local bezel = Instance.new("Part")
+    bezel.Name = "Bezel"
+    bezel.Size = Vector3.new(0.03, 1.46, 0.86)
+    bezel.CFrame = Handle.CFrame * CFrame.new(0.09, 0, 0)
+    bezel.Anchored=false; bezel.CanCollide=false; bezel.CastShadow=false
+    bezel.Material = Enum.Material.SmoothPlastic
+    bezel.Color = Color3.fromRGB(8, 8, 10)
+    bezel.Parent = tool
+    WeldTo(Handle, bezel)
+
+    local screen = Instance.new("Part")
+    screen.Name = "Screen"
+    screen.Size = Vector3.new(0.02, 1.3, 0.74)
+    screen.CFrame = Handle.CFrame * CFrame.new(0.11, 0, 0)
+    screen.Anchored=false; screen.CanCollide=false; screen.CastShadow=false
+    screen.Material = Enum.Material.Neon
+    screen.Color = Color3.fromRGB(10, 40, 60)
+    screen.Transparency = 0.15
+    screen.Parent = tool
+    WeldTo(Handle, screen)
+
+    local frontCam = Instance.new("Part")
+    frontCam.Name = "FrontCam"
+    frontCam.Shape = Enum.PartType.Cylinder
+    frontCam.Size = Vector3.new(0.02, 0.06, 0.06)
+    frontCam.CFrame = Handle.CFrame * CFrame.new(0.13, 0.68, 0) * CFrame.Angles(0, math.rad(90), 0)
+    frontCam.Anchored=false; frontCam.CanCollide=false; frontCam.CastShadow=false
+    frontCam.Material = Enum.Material.Neon
+    frontCam.Color = Color3.fromRGB(10,10,10)
+    frontCam.Parent = tool
+    WeldTo(Handle, frontCam)
+
+    local homeBtn = Instance.new("Part")
+    homeBtn.Name = "HomeButton"
+    homeBtn.Shape = Enum.PartType.Cylinder
+    homeBtn.Size = Vector3.new(0.02, 0.1, 0.1)
+    homeBtn.CFrame = Handle.CFrame * CFrame.new(0.13, -0.68, 0) * CFrame.Angles(0, math.rad(90), 0)
+    homeBtn.Anchored=false; homeBtn.CanCollide=false; homeBtn.CastShadow=false
+    homeBtn.Material = Enum.Material.Metal
+    homeBtn.Color = Color3.fromRGB(82, 82, 88)
+    homeBtn.Parent = tool
+    WeldTo(Handle, homeBtn)
+
+    return Handle
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- MOUNTING: aim, ghost preview, confirm
+-- ════════════════════════════════════════════════════════════════
+local function GetCameraPlaceCF()
+    local result, ray, camera = RaycastFromCamera(RAY_MAX_DIST)
+    local hitPos, hitNorm
+    if result then
+        hitPos = result.Position
+        hitNorm = result.Normal
+    else
+        hitPos = ray.Origin + ray.Direction * (RAY_MAX_DIST * 0.05)
+        hitNorm = -ray.Direction
+        warn("[ApexSurveillance] Placement raycast missed — using fallback point in front of camera.")
+    end
+
+    -- Mount flush to the surface, lens pointing outward along its
+    -- normal (walls, ceilings, or a floor-standing mount), then let
+    -- the player fine-tune with yaw/pitch.
+    local baseCF = CFrame.new(hitPos, hitPos + hitNorm)
+    local adjustedCF = baseCF * CFrame.Angles(math.rad(PlacePitch), math.rad(PlaceYaw), 0)
+    return adjustedCF, result ~= nil
+end
+
+local function UpdateCameraPreview()
+    local cf = GetCameraPlaceCF()
+
+    if not PreviewModel then
+        PreviewModel = Instance.new("Model")
+        PreviewModel.Name = "ApexCamPreview"
+        PreviewModel.Parent = Workspace
+
+        local box = Instance.new("Part")
+        box.Name = "PreviewHousing"
+        box.Size = Vector3.new(0.68, 0.68, 1.9)
+        box.Anchored = true; box.CanCollide = false; box.CastShadow = false
+        box.Material = Enum.Material.Glass; box.Transparency = 0.5; box.Color = T.Violet
+        box.Parent = PreviewModel
+
+        local lens = Instance.new("Part")
+        lens.Name = "PreviewLens"
+        lens.Shape = Enum.PartType.Cylinder
+        lens.Size = Vector3.new(0.2, 0.5, 0.5)
+        lens.Anchored = true; lens.CanCollide = false; lens.CastShadow = false
+        lens.Material = Enum.Material.Neon; lens.Transparency = 0.3; lens.Color = T.Cyan
+        lens.Parent = PreviewModel
+    end
+
+    local parts = PreviewModel:GetChildren()
+    local box, lens = parts[1], parts[2]
+    if box then box.CFrame = cf * CFrame.new(CCTV_HOUSING_OFFSET) end
+    if lens then
+        lens.CFrame = cf * CFrame.new(CCTV_HOUSING_OFFSET + Vector3.new(0, 0, 1.15)) * CFrame.Angles(0, math.rad(90), 0)
+    end
+end
+
+local function DestroyPreview()
+    if PreviewModel then PreviewModel:Destroy(); PreviewModel = nil end
+end
+
+local function BuildCameraFixture(camData, placeCF)
+    if camData.model then camData.model:Destroy() end
+    local model = Instance.new("Model")
+    model.Name = "ApexCam_" .. camData.id
+    model.Parent = Workspace
+
+    local root, parts, led = BuildCCTVGeometry("fixture", model, placeCF)
+    camData.model = model
+    camData.mountCFrame = placeCF
+    camData.root = root
+
+    StartLedBlink(led, function() return model and model.Parent ~= nil end)
+
+    print(("[ApexSurveillance] Camera #%d mounted at %s facing %s")
+        :format(camData.id, tostring(placeCF.Position), tostring(placeCF.LookVector)))
+end
+
+local function ConfirmCameraPlacement()
+    local cf = GetCameraPlaceCF()
+    DestroyPreview()
+
+    local camData = {
+        id = NextCamId,
+        model = nil,
+        mountCFrame = nil,
+        root = nil,
+        povYaw = 0,
+        povPitch = 0,
+    }
+    NextCamId = NextCamId + 1
+    table.insert(Cameras, camData)
+
+    BuildCameraFixture(camData, cf)
+
+    PlaceYaw = 0
+    PlacePitch = 0
+    SetStatus("Camera #" .. camData.id .. " mounted", T.Green)
+end
+
+CancelPreview = function()
+    PlacingPreview = false
+    PlaceYaw = 0
+    PlacePitch = 0
+    DestroyPreview()
+    RefreshUI()
+end
+
+DeleteLastCamera = function()
+    local camData = table.remove(Cameras)
+    if not camData then return end
+    if ActivePOVCam == camData then ExitCameraPOV() end
+    if camData.model then camData.model:Destroy() end
+    SetStatus("Camera #" .. camData.id .. " removed", T.TxtSec)
+    RefreshUI()
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- PAN / TILT (shared by camera view and mount aiming)
+-- Positive pitch looks UP and positive yaw turns LEFT (CFrame.Angles
+-- convention) — earlier versions had both inverted.
+-- ════════════════════════════════════════════════════════════════
+PadAction = function(dir, hold)
+    if ActivePOVCam then
+        local c = ActivePOVCam
+        local ps = hold and POV_PAN_HOLD or POV_PAN_TAP
+        local ts = hold and POV_TILT_HOLD or POV_TILT_TAP
+        if dir == "left" then c.povYaw = (c.povYaw + ps) % 360
+        elseif dir == "right" then c.povYaw = (c.povYaw - ps) % 360
+        elseif dir == "up" then c.povPitch = math.clamp(c.povPitch + ts, -80, 80)
+        elseif dir == "down" then c.povPitch = math.clamp(c.povPitch - ts, -80, 80)
+        end
+    elseif PlacingPreview then
+        local ys = hold and 3 or 15
+        local ts2 = hold and 2 or 10
+        if dir == "left" then PlaceYaw = (PlaceYaw + ys) % 360
+        elseif dir == "right" then PlaceYaw = (PlaceYaw - ys) % 360
+        elseif dir == "up" then PlacePitch = math.clamp(PlacePitch + ts2, -85, 85)
+        elseif dir == "down" then PlacePitch = math.clamp(PlacePitch - ts2, -85, 85)
+        end
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- CAMERA POV — moves the REAL player camera to the CCTV's lens, so
+-- the view is exactly as good as normal gameplay rendering.
+-- ════════════════════════════════════════════════════════════════
+local function ComputePovCFrame(camData)
+    local lensCF = camData.mountCFrame * CFrame.new(CCTV_LENS_TIP_LOCAL)
+    return lensCF * CFrame.Angles(math.rad(camData.povPitch), math.rad(camData.povYaw), 0)
+end
+
+-- A Scriptable camera has no light of its own, so dark areas stay dark.
+-- This is a real SpotLight on an invisible part that tracks the POV
+-- CFrame every frame (see the render loop below).
+local FlashlightOn   = false
+local FlashlightPart = nil
+local FlashlightLamp = nil
+
+local function EnsureFlashlight()
+    if FlashlightPart then return end
+    local p = Instance.new("Part")
+    p.Name = "ApexFlashlight"
+    p.Size = Vector3.new(0.2, 0.2, 0.2)
+    p.Transparency = 1
+    p.CanCollide = false
+    p.Anchored = true
+    p.CastShadow = false
+    p.Parent = Workspace
+
+    local lamp = Instance.new("SpotLight")
+    lamp.Face = Enum.NormalId.Front -- local -Z, same direction as CFrame.LookVector
+    lamp.Brightness = 3.5
+    lamp.Range = 60
+    lamp.Angle = 55
+    lamp.Color = Color3.fromRGB(255, 244, 214)
+    lamp.Enabled = false
+    lamp.Parent = p
+
+    FlashlightPart = p
+    FlashlightLamp = lamp
+end
+
+local function SetFlashlightVisual(on)
+    FlashBtn.TextColor3 = on and T.Yellow or T.TxtSec
+    FlashStroke.Color = on and T.Yellow or T.BorderGlow
+    FlashStroke.Transparency = on and 0.1 or 0.5
+    FlashDot.BackgroundColor3 = on and T.Yellow or Color3.fromRGB(70, 64, 36)
+end
+SetFlashlightVisual(false)
+
+ToggleFlashlight = function()
+    EnsureFlashlight()
+    FlashlightOn = not FlashlightOn
+    FlashlightLamp.Enabled = FlashlightOn
+    SetFlashlightVisual(FlashlightOn)
+end
+
+EnterCameraPOV = function(camData)
+    local camera = GetCamera()
+
+    if not ActivePOVCam then
+        -- first entry this session: remember what to restore on exit
+        SavedCameraType = camera.CameraType
+        SavedFOV = camera.FieldOfView
+        local hum = GetHum()
+        if hum then
+            SavedWalkSpeed = hum.WalkSpeed
+            hum.WalkSpeed = 0 -- no walking blind while watching a feed
+        end
+    end
+
+    ActivePOVCam = camData
+    camera.CameraType = Enum.CameraType.Scriptable
+    camera.FieldOfView = 70
+    camera.CFrame = ComputePovCFrame(camData)
+
+    RefreshUI()
+    print("[ApexSurveillance] Entered POV of camera #" .. camData.id)
+end
+
+ExitCameraPOV = function()
+    if not ActivePOVCam then return end
+    local camera = GetCamera()
+    local exitedId = ActivePOVCam.id
+
+    -- Turn the flashlight off so it doesn't keep burning in the world.
+    if FlashlightOn then
+        FlashlightOn = false
+        if FlashlightLamp then FlashlightLamp.Enabled = false end
+        SetFlashlightVisual(false)
+    end
+
+    camera.CameraType = SavedCameraType or Enum.CameraType.Custom
+    if SavedFOV then camera.FieldOfView = SavedFOV end
+
+    local hum = GetHum()
+    if hum and SavedWalkSpeed then hum.WalkSpeed = SavedWalkSpeed end
+    SavedWalkSpeed = nil
+
+    ActivePOVCam = nil
+    RefreshUI()
+    print("[ApexSurveillance] Exited POV of camera #" .. exitedId)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- TOOLS
+-- ════════════════════════════════════════════════════════════════
+local function BindToolToBackpack(tool, attempt)
+    attempt = attempt or 1
+    local bp = GetBackpack()
+    tool.Parent = bp
+    task.wait(0.1)
+    if tool.Parent == bp then
+        SetStatus("Inventory OK (" .. #bp:GetChildren() .. " items)", T.Green)
+        return true
+    end
+    if attempt < 5 then
+        task.wait(0.3)
+        return BindToolToBackpack(tool, attempt + 1)
+    end
+    SetStatus("Backpack bind failed — tap INVENTORY", T.Red)
+    warn("[ApexSurveillance] Failed to parent tool to Backpack after 5 attempts: " .. tool.Name)
+    return false
+end
+
+local PlacerTool, TabletTool
+
+local function CreateCameraPlacerTool()
+    local tool = Instance.new("Tool")
+    tool.Name = "Apex Camera Placer"
+    tool.RequiresHandle = true
+    tool.CanBeDropped = false
+    tool.ToolTip = "Click to preview a mounting spot, click again to mount a camera there"
+    table.insert(ENV.ApexSurvTools, tool)
+
+    local _, _, led = BuildCCTVGeometry("tool", tool, nil)
+    StartLedBlink(led, function() return tool and tool.Parent ~= nil end)
+
+    -- Roblox's default grip treats local -Z as "away from player," but
+    -- the lens stack runs along local +Z. Flipping Forward AND Right
+    -- together is a clean 180° turn (not a mirror).
+    tool.GripForward = Vector3.new(0, 0, 1)
+    tool.GripRight   = Vector3.new(-1, 0, 0)
+    tool.GripUp      = Vector3.new(0, 1, 0)
+    tool.GripPos     = Vector3.new(0, -0.15, -0.3)
+
+    tool.Equipped:Connect(function()
+        PlacerEquipped = true
+        CrosshairRoot.Visible = true
+        RefreshUI()
+    end)
+
+    tool.Unequipped:Connect(function()
+        PlacerEquipped = false
+        CrosshairRoot.Visible = false
+        if PlacingPreview then CancelPreview() else RefreshUI() end
+    end)
+
+    tool.Activated:Connect(function()
+        if not PlacingPreview then
+            if #Cameras >= MAX_CAMERAS then
+                Notify("Camera limit reached (" .. MAX_CAMERAS .. ")", T.Red)
+                return
+            end
+            local result = RaycastFromCamera(RAY_MAX_DIST)
+            if not result then
+                Notify("No surface in range", T.Red)
+                return
+            end
+            PlacingPreview = true
+            PlaceYaw = 0
+            PlacePitch = 0
+            RefreshUI()
+        else
+            ConfirmCameraPlacement()
+            PlacingPreview = false
+            RefreshUI()
+        end
+    end)
+
+    BindToolToBackpack(tool)
+    return tool
+end
+
+local function CreateTabletTool()
+    local tool = Instance.new("Tool")
+    tool.Name = "Apex Tablet"
+    tool.RequiresHandle = true
+    tool.CanBeDropped = false
+    tool.ToolTip = "Equip, then tap a camera number in the panel to view it"
+    table.insert(ENV.ApexSurvTools, tool)
+
+    BuildTabletHandle(tool)
+    tool.GripForward = Vector3.new(1, 0, 0)
+    tool.GripRight   = Vector3.new(0, 0, -1)
+    tool.GripUp      = Vector3.new(0, 1, 0)
+    tool.GripPos     = Vector3.new(0, -0.1, 0)
+
+    tool.Equipped:Connect(function()
+        TabletOpen = true
+        RefreshUI()
+    end)
+
+    tool.Unequipped:Connect(function()
+        TabletOpen = false
+        if ActivePOVCam then ExitCameraPOV() else RefreshUI() end
+    end)
+
+    BindToolToBackpack(tool)
+    return tool
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- PC KEYBOARD
+-- ════════════════════════════════════════════════════════════════
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    local k = inp.KeyCode
+
+    if k == Enum.KeyCode.Escape then
+        if ActivePOVCam then ExitCameraPOV()
+        elseif PlacingPreview then CancelPreview() end
+        return
+    end
+
+    if ActivePOVCam or PlacingPreview then
+        local dir
+        if k == Enum.KeyCode.Left then dir = "left"
+        elseif k == Enum.KeyCode.Right then dir = "right"
+        elseif k == Enum.KeyCode.Up then dir = "up"
+        elseif k == Enum.KeyCode.Down then dir = "down" end
+        if dir then
+            PadAction(dir, false)
+            Bump()
+            return
+        end
+    end
+
+    if k == Enum.KeyCode.G then
+        if #Cameras > 0 then DeleteLastCamera() end
+        return
+    end
+
+    if k == Enum.KeyCode.H then
+        ForceBackpackVisible()
+        SetStatus("Inventory forced visible", T.Green)
+        return
+    end
+
+    if k == Enum.KeyCode.P then
+        if PanelExpanded then Collapse() else Expand() end
+        return
+    end
+end))
+
+-- ════════════════════════════════════════════════════════════════
+-- RENDER LOOP — while viewing, the real camera CFrame is pinned here
+-- every frame so pan/tilt apply immediately and nothing can knock the
+-- Scriptable camera out of position.
+-- ════════════════════════════════════════════════════════════════
+Track(RunService.RenderStepped:Connect(function()
+    if ActivePOVCam then
+        local povCF = ComputePovCFrame(ActivePOVCam)
+        GetCamera().CFrame = povCF
+        if FlashlightPart and FlashlightOn then
+            FlashlightPart.CFrame = povCF
+        end
+    elseif PlacingPreview then
+        UpdateCameraPreview()
+    elseif PreviewModel then
+        DestroyPreview()
+    end
+    UpdateCrosshairFeedback()
+end))
+
+-- ════════════════════════════════════════════════════════════════
+-- RESPAWN — a respawn replaces the Backpack, which can take local
+-- tools with it, so re-bind them or rebuild any that are gone.
+-- ════════════════════════════════════════════════════════════════
+local function RestoreTool(tool, factory)
+    if tool then
+        local bp = GetBackpack()
+        if tool.Parent == bp or tool.Parent == GetChar() then return tool end
+        local ok = pcall(function() tool.Parent = bp end)
+        if ok and tool.Parent == bp then return tool end
+        pcall(function() tool:Destroy() end)
+    end
+    return factory()
+end
+
+Track(LP.CharacterAdded:Connect(function()
+    if ActivePOVCam then ExitCameraPOV() end
+    if PlacingPreview then CancelPreview() end
+    TabletOpen = false
+    PlacerEquipped = false
+    CrosshairRoot.Visible = false
+    RefreshUI()
+    task.wait(0.5)
+    ForceBackpackVisible()
+    PlacerTool = RestoreTool(PlacerTool, CreateCameraPlacerTool)
+    TabletTool = RestoreTool(TabletTool, CreateTabletTool)
+    print("[ApexSurveillance] Character respawned.")
+end))
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+RefreshUI()
+task.defer(ApplyPos)
+
+PlacerTool = CreateCameraPlacerTool()
+TabletTool = CreateTabletTool()
+
+print("[ApexSurveillance v6] Loaded.")
+print("  One compact panel: drag the title bar, [-] collapses to an icon, [...] = opacity + reset.")
+print("  It auto-minimizes when idle and stays clear of the screen center.")
+print("  Camera view: real player camera at the CCTV lens, pan/tilt (hold to repeat), LIGHT, EXIT.")
+print("  PC keys: P panel, arrows pan/aim, Esc exit/cancel, G delete last, H inventory.")
