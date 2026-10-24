@@ -1,0 +1,853 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX SAVE POSITION  ·  v1                                    ║
+╠══════════════════════════════════════════════════════════════╣
+║   SAVE   Tap SAVE to store exactly where you stand (position     ║
+║          AND facing). Up to 12 slots, remembered across           ║
+║          respawns, and — if your executor supports writefile —     ║
+║          across sessions, per game.                                 ║
+║   GO     Each slot has a GO button. Teleport is instant and          ║
+║          sets your velocity to zero so you don't fling.               ║
+║   HOLD   Some games snap you back after a teleport. With HOLD on,      ║
+║          the script re-applies your position whenever you drift          ║
+║          more than 3 studs from it, for up to N seconds (HOLD cycles      ║
+║          OFF / 3s / 8s / 20s). Pushing the move stick releases it         ║
+║          early. Even with HOLD off it re-checks for a third of a            ║
+║          second, which beats a single-frame rubber-band.                     ║
+║   COORDS Type X / Y / Z and tap GO to teleport to exact coordinates          ║
+║          (keeps your facing). Paste "x, y, z" into the X box and it            ║
+║          splits itself across all three. FILL copies your current              ║
+║          position into the boxes; tap the live readout to copy it.              ║
+║   RETURN After you respawn, automatically teleport to the selected slot.         ║
+║                                                                                    ║
+║   Compact draggable panel; [-] shrinks it to a tiny SAVE / GO / OPEN bar so          ║
+║   you can still save and teleport with one tap. It auto-minimizes when idle           ║
+║   and stays clear of the screen center.                                                  ║
+║   PC keys: K save here, L teleport to selected slot, P toggle panel.                       ║
+║                                                                                              ║
+║   Limits: this fights a game's CLIENT-side snap-back. If the server itself keeps              ║
+║   moving you or kicks for teleporting, nothing on the client can stop that.                    ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexSavePosGui then pcall(function() ENV.ApexSavePosGui:Destroy() end) end
+if ENV.ApexSavePosLoops then
+    for _, c in pairs(ENV.ApexSavePosLoops) do pcall(function() c:Disconnect() end) end
+end
+ENV.ApexSavePosLoops = {}
+-- Bumping the hold token cancels any hold loop left over from a previous run.
+ENV.ApexSaveHold = (ENV.ApexSaveHold or 0) + 1
+
+local function Track(conn)
+    table.insert(ENV.ApexSavePosLoops, conn)
+    return conn
+end
+
+local IsTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- ════════════════════════════════════════════════════════════════
+-- DATA + PERSISTENCE
+-- ════════════════════════════════════════════════════════════════
+local FILE          = "ApexSavedPositions_" .. tostring(game.PlaceId) .. ".json"
+local MAX_SLOTS     = 12
+local HOLD_OPTIONS  = {0, 3, 8, 20}   -- seconds; 0 = off
+local RELEASE_GRACE = 0.8             -- seconds before move-input can release a hold
+local PULLBACK_DIST = 3               -- studs of drift that count as "pulled back"
+
+local function CanFiles()
+    return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+end
+
+local function DefaultData()
+    return {slots = {}, selected = 0, holdIdx = 2, autoReturn = false, counter = 0}
+end
+
+local function ValidSlot(s)
+    if type(s) ~= "table" or type(s.c) ~= "table" or #s.c ~= 12 then return false end
+    for i = 1, 12 do
+        if type(s.c[i]) ~= "number" then return false end
+    end
+    return true
+end
+
+local function LoadFromFile()
+    if not CanFiles() then return nil end
+    local ok, raw = pcall(function()
+        if isfile(FILE) then return readfile(FILE) end
+        return nil
+    end)
+    if not ok or type(raw) ~= "string" then return nil end
+    local ok2, decoded = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(decoded) ~= "table" then return nil end
+
+    local d = DefaultData()
+    if type(decoded.slots) == "table" then
+        for _, s in ipairs(decoded.slots) do
+            if ValidSlot(s) and #d.slots < MAX_SLOTS then
+                d.slots[#d.slots + 1] = {name = tostring(s.name or ("Pos " .. (#d.slots + 1))), c = s.c}
+            end
+        end
+    end
+    d.selected = math.clamp(math.floor(tonumber(decoded.selected) or 0), 0, #d.slots)
+    d.holdIdx = math.clamp(math.floor(tonumber(decoded.holdIdx) or 2), 1, #HOLD_OPTIONS)
+    d.autoReturn = (decoded.autoReturn == true)
+    d.counter = math.max(math.floor(tonumber(decoded.counter) or 0), #d.slots)
+    d.ux, d.uy = tonumber(decoded.ux), tonumber(decoded.uy)
+    return d
+end
+
+-- Session data survives re-running the script; the file survives rejoining.
+local Data = ENV.ApexSavePosData
+if type(Data) ~= "table" or type(Data.slots) ~= "table" then
+    Data = LoadFromFile() or DefaultData()
+    ENV.ApexSavePosData = Data
+end
+
+local function Persist()
+    if not CanFiles() then return end
+    pcall(function()
+        writefile(FILE, HttpService:JSONEncode({
+            slots = Data.slots, selected = Data.selected, holdIdx = Data.holdIdx,
+            autoReturn = Data.autoReturn, counter = Data.counter, ux = Data.ux, uy = Data.uy,
+        }))
+    end)
+end
+
+local function SlotCF(slot) return CFrame.new(table.unpack(slot.c)) end
+local function Fmt(v) return string.format("%.1f, %.1f, %.1f", v.X, v.Y, v.Z) end
+
+local function GetRoot()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function GetHum()
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- THEME + UTILITY
+-- ════════════════════════════════════════════════════════════════
+local T = {
+    Glass      = Color3.fromRGB(10,  10,  18),
+    BtnBase    = Color3.fromRGB(34,  36,  56),
+    BtnSel     = Color3.fromRGB(0,   84,  112),
+    Violet     = Color3.fromRGB(138, 80,  255),
+    Cyan       = Color3.fromRGB(0,   220, 255),
+    Green      = Color3.fromRGB(0,   240, 148),
+    Yellow     = Color3.fromRGB(255, 200, 0),
+    Red        = Color3.fromRGB(255, 70,  90),
+    TxtPri     = Color3.fromRGB(240, 238, 255),
+    TxtSec     = Color3.fromRGB(165, 160, 195),
+    TxtDim     = Color3.fromRGB(105, 102, 132),
+    BorderGlow = Color3.fromRGB(90,  55,  200),
+    FontBold   = Enum.Font.GothamBold,
+    FontMed    = Enum.Font.Gotham,
+}
+
+local U = {}
+function U.Corner(p, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = r or UDim.new(0, 6)
+    c.Parent = p
+    return c
+end
+function U.Stroke(p, col, thick, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col or Color3.new(0, 0, 0)
+    s.Thickness = thick or 1.5
+    s.Transparency = tr or 0
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent = p
+    return s
+end
+function U.Frame(props)
+    local f = Instance.new("Frame")
+    f.BackgroundColor3 = props.bg or T.Glass
+    f.BackgroundTransparency = props.tr or 0
+    f.BorderSizePixel = 0
+    f.Size = props.size or UDim2.new(1, 0, 0, 30)
+    f.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    f.ZIndex = props.z or 1
+    if props.parent then f.Parent = props.parent end
+    return f
+end
+function U.Label(props)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = props.text or ""
+    l.TextColor3 = props.col or T.TxtPri
+    l.Font = props.font or T.FontMed
+    l.TextSize = props.sz or 12
+    l.TextXAlignment = props.xa or Enum.TextXAlignment.Center
+    l.TextYAlignment = Enum.TextYAlignment.Center
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+    l.TextStrokeTransparency = 0.65
+    l.TextStrokeColor3 = Color3.new(0, 0, 0)
+    l.Size = props.size or UDim2.new(1, 0, 1, 0)
+    l.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    l.ZIndex = props.z or 2
+    if props.parent then l.Parent = props.parent end
+    return l
+end
+function U.Button(props)
+    local b = Instance.new("TextButton")
+    b.BackgroundColor3 = props.bg or T.BtnBase
+    b.BackgroundTransparency = props.tr or 0
+    b.BorderSizePixel = 0
+    b.Text = props.text or ""
+    b.TextColor3 = props.col or T.TxtPri
+    b.Font = props.font or T.FontBold
+    b.TextSize = props.sz or 12
+    b.TextTruncate = Enum.TextTruncate.AtEnd
+    b.TextStrokeTransparency = 0.65
+    b.TextStrokeColor3 = Color3.new(0, 0, 0)
+    b.AutoButtonColor = false
+    b.Size = props.size or UDim2.new(1, 0, 0, 30)
+    b.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    b.ZIndex = props.z or 2
+    if props.parent then b.Parent = props.parent end
+    return b
+end
+local function MakeBtn(p)
+    local b = U.Button({
+        text = p.text, col = p.col or T.TxtPri, sz = p.sz or 12,
+        bg = p.bg or T.BtnBase, tr = 0.12, size = p.size, pos = p.pos,
+        z = p.z or 12, parent = p.parent,
+    })
+    U.Corner(b, UDim.new(0, 6))
+    local st = U.Stroke(b, p.col or T.BorderGlow, 1.25, 0.5)
+    return b, st
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- GUI
+-- ════════════════════════════════════════════════════════════════
+local Expanded     = true
+local DraggingNow  = false
+local LastInteract = os.clock()
+local function Bump() LastInteract = os.clock() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ApexSavePos"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 98
+ScreenGui.Parent = PGui
+ENV.ApexSavePosGui = ScreenGui
+
+local function ScreenSize()
+    local s = ScreenGui.AbsoluteSize
+    if s.X < 50 or s.Y < 50 then
+        local cam = workspace.CurrentCamera
+        if cam then s = cam.ViewportSize end
+    end
+    return s
+end
+
+local SS         = ScreenSize()
+local PANEL_W    = math.clamp(math.floor(SS.X * 0.32), 214, 256)
+local INNER      = PANEL_W - 16
+local GAP        = 4
+local BTN_H      = IsTouch and 34 or 30
+local ROW_H      = 40
+local LIST_ROWS  = (SS.Y < 400) and 2 or 3
+local LIST_H     = LIST_ROWS * (ROW_H + GAP)
+local HEADER_H   = 28
+local MINI_H     = 40
+local DEFAULT_POS = Vector2.new(8, 64)
+local AUTO_COLLAPSE_AFTER = 15
+
+local PanelPos = Vector2.new(Data.ux or DEFAULT_POS.X, Data.uy or DEFAULT_POS.Y)
+
+-- ── Main panel
+local Panel = Instance.new("Frame")
+Panel.Name = "Panel"
+Panel.AutomaticSize = Enum.AutomaticSize.Y
+Panel.Size = UDim2.new(0, PANEL_W, 0, 0)
+Panel.BackgroundColor3 = T.Glass
+Panel.BackgroundTransparency = 0.08
+Panel.BorderSizePixel = 0
+Panel.Active = true
+Panel.ZIndex = 10
+Panel.Parent = ScreenGui
+U.Corner(Panel, UDim.new(0, 10))
+U.Stroke(Panel, T.BorderGlow, 1.5, 0.35)
+local PanelLayout = Instance.new("UIListLayout")
+PanelLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PanelLayout.Parent = Panel
+
+local Header = U.Frame({tr = 1, size = UDim2.new(1, 0, 0, HEADER_H), z = 11, parent = Panel})
+Header.Active = true
+Header.LayoutOrder = 1
+U.Label({text = "SAVE POS", col = T.Cyan, font = T.FontBold, sz = 12,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(0, 70, 1, 0), pos = UDim2.new(0, 10, 0, 0),
+    z = 12, parent = Header})
+local CountLabel = U.Label({text = "0/" .. MAX_SLOTS, col = T.TxtSec, font = T.FontBold, sz = 11,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(0, 50, 1, 0), pos = UDim2.new(0, 80, 0, 0),
+    z = 12, parent = Header})
+local CollapseBtn = MakeBtn({text = "-", col = T.TxtSec, sz = 16,
+    size = UDim2.new(0, 28, 0, 22), pos = UDim2.new(1, -34, 0.5, -11), parent = Header})
+U.Frame({bg = T.BorderGlow, tr = 0.65, size = UDim2.new(1, -16, 0, 1),
+    pos = UDim2.new(0, 8, 1, -1), z = 12, parent = Header})
+
+local Body = Instance.new("Frame")
+Body.BackgroundTransparency = 1
+Body.BorderSizePixel = 0
+Body.AutomaticSize = Enum.AutomaticSize.Y
+Body.Size = UDim2.new(1, 0, 0, 0)
+Body.LayoutOrder = 2
+Body.ZIndex = 11
+Body.Parent = Panel
+local BodyLayout = Instance.new("UIListLayout")
+BodyLayout.Padding = UDim.new(0, GAP)
+BodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+BodyLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+BodyLayout.Parent = Body
+local BodyPad = Instance.new("UIPadding")
+BodyPad.PaddingTop = UDim.new(0, 6)
+BodyPad.PaddingBottom = UDim.new(0, 8)
+BodyPad.PaddingLeft = UDim.new(0, 8)
+BodyPad.PaddingRight = UDim.new(0, 8)
+BodyPad.Parent = Body
+
+local function Row(order, height)
+    local f = U.Frame({tr = 1, size = UDim2.new(1, 0, 0, height), z = 12, parent = Body})
+    f.LayoutOrder = order
+    return f
+end
+
+-- Row 1: live coordinates (tap to copy) + FILL
+local FILL_W = 46
+local PosRow = Row(1, 28)
+local PosBtn = MakeBtn({text = "...", col = T.Cyan, sz = 11,
+    size = UDim2.new(1, -(FILL_W + GAP), 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = PosRow})
+local FillBtn = MakeBtn({text = "FILL", col = T.TxtSec, sz = 11,
+    size = UDim2.new(0, FILL_W, 1, 0), pos = UDim2.new(1, -FILL_W, 0, 0), parent = PosRow})
+
+-- Row 2: SAVE / HOLD / RETURN
+local SIDE_W = 64
+local ActRow = Row(2, BTN_H)
+local SAVE_W = INNER - SIDE_W * 2 - GAP * 2
+local SaveBtn = MakeBtn({text = "SAVE HERE", col = T.Green, sz = 12,
+    size = UDim2.new(0, SAVE_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = ActRow})
+local HoldBtn, HoldStroke = MakeBtn({text = "HOLD", col = T.Yellow, sz = 11,
+    size = UDim2.new(0, SIDE_W, 1, 0), pos = UDim2.new(0, SAVE_W + GAP, 0, 0), parent = ActRow})
+local ReturnBtn, ReturnStroke = MakeBtn({text = "RETURN", col = T.TxtSec, sz = 11,
+    size = UDim2.new(0, SIDE_W, 1, 0), pos = UDim2.new(0, SAVE_W + GAP + SIDE_W + GAP, 0, 0), parent = ActRow})
+
+-- Row 3: saved slots (scrolls)
+local ListScroll = Instance.new("ScrollingFrame")
+ListScroll.BackgroundTransparency = 1
+ListScroll.BorderSizePixel = 0
+ListScroll.Size = UDim2.new(1, 0, 0, LIST_H)
+ListScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+ListScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ListScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+ListScroll.ScrollBarThickness = 3
+ListScroll.ScrollBarImageColor3 = T.Violet
+ListScroll.LayoutOrder = 3
+ListScroll.ZIndex = 12
+ListScroll.Parent = Body
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.Padding = UDim.new(0, GAP)
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout.Parent = ListScroll
+local EmptyLabel = U.Label({text = "No saved positions yet — tap SAVE HERE",
+    col = T.TxtDim, font = T.FontMed, sz = 11, size = UDim2.new(1, 0, 0, 30), z = 13, parent = ListScroll})
+EmptyLabel.LayoutOrder = 0
+
+-- Row 4: direct coordinates
+local GO_W = 46
+local BOX_W = math.floor((INNER - GAP * 3 - GO_W) / 3)
+local CoordRow = Row(4, 30)
+local function MakeBox(placeholder, index)
+    local tb = Instance.new("TextBox")
+    tb.Size = UDim2.new(0, BOX_W, 1, 0)
+    tb.Position = UDim2.new(0, (index - 1) * (BOX_W + GAP), 0, 0)
+    tb.BackgroundColor3 = T.BtnBase
+    tb.BackgroundTransparency = 0.12
+    tb.BorderSizePixel = 0
+    tb.PlaceholderText = placeholder
+    tb.PlaceholderColor3 = T.TxtDim
+    tb.Text = ""
+    tb.TextColor3 = T.TxtPri
+    tb.Font = T.FontMed
+    tb.TextSize = 12
+    tb.ClearTextOnFocus = false
+    tb.ZIndex = 13
+    tb.Parent = CoordRow
+    U.Corner(tb, UDim.new(0, 6))
+    U.Stroke(tb, T.BorderGlow, 1.25, 0.5)
+    tb.Focused:Connect(Bump)
+    tb.FocusLost:Connect(Bump)
+    return tb
+end
+local XBox = MakeBox("X", 1)
+local YBox = MakeBox("Y", 2)
+local ZBox = MakeBox("Z", 3)
+local GoXYZBtn = MakeBtn({text = "GO", col = T.Green, sz = 12,
+    size = UDim2.new(0, GO_W, 1, 0), pos = UDim2.new(1, -GO_W, 0, 0), parent = CoordRow})
+
+-- Row 5: status
+local StatusLabel = U.Label({text = "Ready", col = T.TxtDim, font = T.FontMed, sz = 10,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(1, 0, 0, 14), z = 13, parent = Body})
+StatusLabel.LayoutOrder = 5
+local function SetStatus(text, col)
+    StatusLabel.Text = text
+    StatusLabel.TextColor3 = col or T.TxtDim
+end
+
+-- ── Collapsed mini bar: SAVE / GO / OPEN in one tap each
+local MINI_BTN_H = MINI_H - 10
+local MINI_W = 16 + 54 + GAP + 40 + GAP + 48 + 6
+local MiniBar = U.Frame({tr = 0.08, size = UDim2.new(0, MINI_W, 0, MINI_H), z = 10, parent = ScreenGui})
+MiniBar.Active = true
+MiniBar.Visible = false
+U.Corner(MiniBar, UDim.new(0, 10))
+U.Stroke(MiniBar, T.BorderGlow, 1.5, 0.35)
+U.Label({text = "::", col = T.TxtDim, font = T.FontBold, sz = 12,
+    size = UDim2.new(0, 14, 1, 0), pos = UDim2.new(0, 2, 0, 0), z = 11, parent = MiniBar})
+local MiniSave = MakeBtn({text = "SAVE", col = T.Green, sz = 11,
+    size = UDim2.new(0, 54, 0, MINI_BTN_H), pos = UDim2.new(0, 16, 0.5, -MINI_BTN_H / 2), parent = MiniBar})
+local MiniGo = MakeBtn({text = "GO", col = T.Cyan, sz = 12,
+    size = UDim2.new(0, 40, 0, MINI_BTN_H), pos = UDim2.new(0, 16 + 54 + GAP, 0, 0), parent = MiniBar})
+MiniGo.Position = UDim2.new(0, 16 + 54 + GAP, 0.5, -MINI_BTN_H / 2)
+local MiniOpen = MakeBtn({text = "OPEN", col = T.TxtSec, sz = 11,
+    size = UDim2.new(0, 48, 0, MINI_BTN_H), pos = UDim2.new(0, 16 + 54 + GAP + 40 + GAP, 0.5, -MINI_BTN_H / 2), parent = MiniBar})
+
+-- ── Position: clamped to the screen and kept off the center
+local function ActiveSize()
+    if Expanded then
+        local s = Panel.AbsoluteSize
+        if s.X < 10 or s.Y < 10 then return Vector2.new(PANEL_W, 230) end
+        return s
+    end
+    return Vector2.new(MINI_W, MINI_H)
+end
+local function ClampToScreen(pos, size)
+    local ss = ScreenSize()
+    return Vector2.new(
+        math.clamp(pos.X, 4, math.max(4, ss.X - size.X - 4)),
+        math.clamp(pos.Y, 4, math.max(4, ss.Y - size.Y - 4)))
+end
+local function AvoidCenter(pos, size)
+    local ss = ScreenSize()
+    local cx, cy = ss.X / 2, ss.Y / 2
+    local hw, hh = 48, 48
+    if pos.X + size.X > cx - hw and pos.X < cx + hw and pos.Y + size.Y > cy - hh and pos.Y < cy + hh then
+        local leftX, rightX = (cx - hw) - size.X, cx + hw
+        if math.abs(pos.X - leftX) < math.abs(pos.X - rightX) then
+            return Vector2.new(leftX, pos.Y)
+        end
+        return Vector2.new(rightX, pos.Y)
+    end
+    return pos
+end
+local function ApplyPos()
+    local size = ActiveSize()
+    local p = ClampToScreen(PanelPos, size)
+    p = AvoidCenter(p, size)
+    p = ClampToScreen(p, size)
+    p = Vector2.new(math.floor(p.X + 0.5), math.floor(p.Y + 0.5))
+    PanelPos = p
+    Panel.Position = UDim2.fromOffset(p.X, p.Y)
+    MiniBar.Position = UDim2.fromOffset(p.X, p.Y)
+    Data.ux, Data.uy = p.X, p.Y
+end
+Track(Panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(ApplyPos))
+
+local function Collapse()
+    Expanded = false
+    Panel.Visible = false
+    MiniBar.Visible = true
+    ApplyPos()
+    Bump()
+end
+local function Expand()
+    Expanded = true
+    MiniBar.Visible = false
+    Panel.Visible = true
+    ApplyPos()
+    Bump()
+end
+
+-- Drag by the title bar (expanded) or the bar itself (collapsed).
+local function MakeDraggable(handle)
+    local dragging, moved = false, false
+    local startInput, startMouse, startPos
+    handle.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        dragging, moved = true, false
+        DraggingNow = true
+        startInput = inp
+        startMouse = Vector2.new(inp.Position.X, inp.Position.Y)
+        startPos = PanelPos
+        Bump()
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End and startInput == inp and dragging then
+                dragging = false
+                DraggingNow = false
+                if moved then Persist() end
+            end
+        end)
+    end)
+    Track(UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == startInput then
+            local delta = Vector2.new(inp.Position.X, inp.Position.Y) - startMouse
+            if not moved and delta.Magnitude > 6 then moved = true end
+            if moved then
+                PanelPos = startPos + delta
+                ApplyPos()
+                Bump()
+            end
+        end
+    end))
+end
+MakeDraggable(Header)
+MakeDraggable(MiniBar)
+Panel.InputBegan:Connect(function(inp)
+    local ut = inp.UserInputType
+    if ut == Enum.UserInputType.MouseButton1 or ut == Enum.UserInputType.Touch then Bump() end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- TELEPORT — instant, zero velocity, and re-applied if the game
+-- pulls you back.
+-- ════════════════════════════════════════════════════════════════
+local RebuildList -- assigned below
+
+local function ApplyCF(cf)
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    local ok = pcall(function() char:PivotTo(cf) end)
+    if not ok then root.CFrame = cf end
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    return true
+end
+
+local function TeleportTo(cf, label)
+    if not GetRoot() then
+        SetStatus("No character yet", T.Red)
+        return false
+    end
+
+    ENV.ApexSaveHold = ENV.ApexSaveHold + 1
+    local token = ENV.ApexSaveHold
+
+    -- A seated character stays welded to its seat, so stand up first.
+    local hum = GetHum()
+    if hum and hum.SeatPart then hum.Sit = false end
+
+    ApplyCF(cf)
+    SetStatus("Teleported to " .. label, T.Green)
+
+    task.spawn(function()
+        local holdSecs = HOLD_OPTIONS[Data.holdIdx] or 0
+        local window = math.max(holdSecs, 0.35) -- always re-check briefly, even with HOLD off
+        local t0 = os.clock()
+        local fixes = 0
+        local released = false
+        while ENV.ApexSaveHold == token and os.clock() - t0 < window do
+            RunService.Heartbeat:Wait()
+            local r = GetRoot()
+            if not r then break end -- respawned or removed; RETURN handles respawns
+            if holdSecs > 0 and os.clock() - t0 > RELEASE_GRACE then
+                local h = GetHum()
+                if h and h.MoveDirection.Magnitude > 0.1 then released = true; break end
+            end
+            if (r.Position - cf.Position).Magnitude > PULLBACK_DIST then
+                ApplyCF(cf)
+                fixes = fixes + 1
+            end
+        end
+        if ENV.ApexSaveHold == token then
+            if fixes > 0 then
+                SetStatus(("Held %s — countered %d pull-back%s"):format(label, fixes, fixes == 1 and "" or "s"), T.Yellow)
+            elseif released then
+                SetStatus("Hold released (you moved)", T.TxtSec)
+            end
+        end
+    end)
+    return true
+end
+
+local function SelectedSlot()
+    return Data.slots[Data.selected] or Data.slots[#Data.slots]
+end
+
+local function GoSelected()
+    local slot = SelectedSlot()
+    if not slot then
+        SetStatus("No saved positions yet", T.Yellow)
+        Expand()
+        return
+    end
+    TeleportTo(SlotCF(slot), slot.name)
+end
+
+local function SaveHere()
+    local root = GetRoot()
+    if not root then SetStatus("No character to save", T.Red); Expand(); return end
+    if #Data.slots >= MAX_SLOTS then
+        SetStatus("Slot limit (" .. MAX_SLOTS .. ") — delete one first", T.Red)
+        Expand()
+        return
+    end
+    Data.counter = Data.counter + 1
+    Data.slots[#Data.slots + 1] = {name = "Pos " .. Data.counter, c = {root.CFrame:GetComponents()}}
+    Data.selected = #Data.slots
+    Persist()
+    RebuildList()
+    SetStatus("Saved Pos " .. Data.counter .. "  (" .. Fmt(root.Position) .. ")", T.Green)
+    task.defer(function()
+        ListScroll.CanvasPosition = Vector2.new(0, math.max(0, ListScroll.AbsoluteCanvasSize.Y))
+    end)
+end
+
+local function GoToTyped()
+    local x, y, z = tonumber(XBox.Text), tonumber(YBox.Text), tonumber(ZBox.Text)
+    if not (x and y and z) then
+        SetStatus("Enter numbers in X, Y and Z", T.Red)
+        Expand()
+        return
+    end
+    local root = GetRoot()
+    if not root then SetStatus("No character yet", T.Red); return end
+    -- keep the way you're currently facing
+    local cf = CFrame.new(x, y, z) * root.CFrame.Rotation
+    TeleportTo(cf, string.format("%.1f, %.1f, %.1f", x, y, z))
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- SAVED-SLOT LIST
+-- ════════════════════════════════════════════════════════════════
+local ROW_GO_W, ROW_DEL_W = 44, 28
+RebuildList = function()
+    for _, ch in ipairs(ListScroll:GetChildren()) do
+        if ch:IsA("Frame") then ch:Destroy() end
+    end
+    EmptyLabel.Visible = (#Data.slots == 0)
+    CountLabel.Text = #Data.slots .. "/" .. MAX_SLOTS
+
+    for i, slot in ipairs(Data.slots) do
+        local selected = (i == Data.selected)
+        local rf = Instance.new("Frame")
+        rf.Size = UDim2.new(1, -6, 0, ROW_H)
+        rf.BackgroundColor3 = selected and T.BtnSel or T.BtnBase
+        rf.BackgroundTransparency = 0.12
+        rf.BorderSizePixel = 0
+        rf.LayoutOrder = i
+        rf.ZIndex = 13
+        rf.Parent = ListScroll
+        U.Corner(rf, UDim.new(0, 6))
+        U.Stroke(rf, selected and T.Cyan or T.BorderGlow, selected and 1.75 or 1.25, selected and 0.1 or 0.5)
+
+        local safeName = tostring(slot.name):gsub("[<>&]", "")
+        local main = U.Button({
+            text = safeName .. '\n<font size="10" color="rgb(150,150,185)">' .. Fmt(SlotCF(slot).Position) .. '</font>',
+            col = T.TxtPri, sz = 12, bg = T.Glass, tr = 1,
+            size = UDim2.new(1, -(ROW_GO_W + ROW_DEL_W + 14), 1, 0), pos = UDim2.new(0, 8, 0, 0),
+            z = 14, parent = rf,
+        })
+        main.RichText = true
+        main.TextXAlignment = Enum.TextXAlignment.Left
+
+        local goBtn = MakeBtn({text = "GO", col = T.Green, sz = 12, z = 14,
+            size = UDim2.new(0, ROW_GO_W, 0, ROW_H - 10),
+            pos = UDim2.new(1, -(ROW_GO_W + ROW_DEL_W + 8), 0.5, -(ROW_H - 10) / 2), parent = rf})
+        local delBtn = MakeBtn({text = "X", col = T.Red, sz = 12, z = 14,
+            size = UDim2.new(0, ROW_DEL_W, 0, ROW_H - 10),
+            pos = UDim2.new(1, -(ROW_DEL_W + 4), 0.5, -(ROW_H - 10) / 2), parent = rf})
+
+        main.MouseButton1Click:Connect(function()
+            Bump()
+            Data.selected = i
+            Persist()
+            RebuildList()
+        end)
+        goBtn.MouseButton1Click:Connect(function()
+            Bump()
+            Data.selected = i
+            Persist()
+            RebuildList()
+            TeleportTo(SlotCF(slot), slot.name)
+        end)
+        delBtn.MouseButton1Click:Connect(function()
+            Bump()
+            table.remove(Data.slots, i)
+            if Data.selected == i then
+                Data.selected = math.min(i, #Data.slots)
+            elseif Data.selected > i then
+                Data.selected = Data.selected - 1
+            end
+            Persist()
+            RebuildList()
+            SetStatus("Deleted " .. safeName, T.TxtSec)
+        end)
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- BUTTON WIRING
+-- ════════════════════════════════════════════════════════════════
+local function HoldText()
+    local s = HOLD_OPTIONS[Data.holdIdx] or 0
+    return (s == 0) and "HOLD OFF" or ("HOLD " .. s .. "s")
+end
+local function RefreshToggles()
+    HoldBtn.Text = HoldText()
+    local holdOn = (HOLD_OPTIONS[Data.holdIdx] or 0) > 0
+    HoldBtn.TextColor3 = holdOn and T.Yellow or T.TxtSec
+    HoldStroke.Color = holdOn and T.Yellow or T.BorderGlow
+    ReturnBtn.TextColor3 = Data.autoReturn and T.Green or T.TxtSec
+    ReturnStroke.Color = Data.autoReturn and T.Green or T.BorderGlow
+end
+
+CollapseBtn.MouseButton1Click:Connect(function() Collapse() end)
+MiniOpen.MouseButton1Click:Connect(function() Expand() end)
+MiniSave.MouseButton1Click:Connect(function() Bump(); SaveHere() end)
+MiniGo.MouseButton1Click:Connect(function() Bump(); GoSelected() end)
+SaveBtn.MouseButton1Click:Connect(function() Bump(); SaveHere() end)
+GoXYZBtn.MouseButton1Click:Connect(function() Bump(); GoToTyped() end)
+
+HoldBtn.MouseButton1Click:Connect(function()
+    Bump()
+    Data.holdIdx = Data.holdIdx % #HOLD_OPTIONS + 1
+    Persist()
+    RefreshToggles()
+    local s = HOLD_OPTIONS[Data.holdIdx]
+    if s == 0 then
+        SetStatus("Hold OFF — one instant teleport", T.TxtSec)
+    else
+        SetStatus("Re-applies your spot for " .. s .. "s if the game pulls you back", T.Yellow)
+    end
+end)
+
+ReturnBtn.MouseButton1Click:Connect(function()
+    Bump()
+    Data.autoReturn = not Data.autoReturn
+    Persist()
+    RefreshToggles()
+    SetStatus(Data.autoReturn and "After you respawn: auto-teleport to selected slot" or "Respawn return OFF",
+        Data.autoReturn and T.Green or T.TxtSec)
+end)
+
+PosBtn.MouseButton1Click:Connect(function()
+    Bump()
+    local root = GetRoot()
+    if not root then return end
+    local p = root.Position
+    local s = string.format("%.2f, %.2f, %.2f", p.X, p.Y, p.Z)
+    local fn = setclipboard or toclipboard
+    if type(fn) == "function" then
+        pcall(fn, s)
+        SetStatus("Copied: " .. s, T.Cyan)
+    else
+        SetStatus("Clipboard not available in this executor", T.TxtSec)
+    end
+end)
+
+FillBtn.MouseButton1Click:Connect(function()
+    Bump()
+    local root = GetRoot()
+    if not root then return end
+    local p = root.Position
+    XBox.Text = string.format("%.1f", p.X)
+    YBox.Text = string.format("%.1f", p.Y)
+    ZBox.Text = string.format("%.1f", p.Z)
+end)
+
+-- Paste "x, y, z" into the X box and it spreads across all three.
+local function ParseNumbers(str)
+    local nums = {}
+    for n in string.gmatch(str, "%-?%d+%.?%d*") do
+        nums[#nums + 1] = tonumber(n)
+    end
+    return nums
+end
+XBox.FocusLost:Connect(function()
+    local nums = ParseNumbers(XBox.Text)
+    if #nums >= 3 then
+        XBox.Text = tostring(nums[1])
+        YBox.Text = tostring(nums[2])
+        ZBox.Text = tostring(nums[3])
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- LOOPS + INPUT
+-- ════════════════════════════════════════════════════════════════
+local posLoop = task.spawn(function()
+    while true do
+        task.wait(0.2)
+        local r = GetRoot()
+        PosBtn.Text = r and Fmt(r.Position) or "no character"
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(posLoop) end})
+
+-- Auto-minimize when idle (never while dragging or typing).
+local idleLoop = task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if Expanded and not DraggingNow and not UserInputService:GetFocusedTextBox()
+            and os.clock() - LastInteract > AUTO_COLLAPSE_AFTER then
+            Collapse()
+        end
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(idleLoop) end})
+
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    local k = inp.KeyCode
+    if k == Enum.KeyCode.K then
+        SaveHere()
+    elseif k == Enum.KeyCode.L then
+        GoSelected()
+    elseif k == Enum.KeyCode.P then
+        if Expanded then Collapse() else Expand() end
+    end
+end))
+
+-- After a respawn, optionally teleport straight back to the selected slot.
+Track(LP.CharacterAdded:Connect(function(char)
+    ENV.ApexSaveHold = ENV.ApexSaveHold + 1 -- cancel any hold on the old character
+    if not Data.autoReturn then return end
+    local slot = SelectedSlot()
+    if not slot then return end
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if not root then return end
+    task.wait(0.6) -- let the game place the spawn first
+    TeleportTo(SlotCF(slot), slot.name)
+end))
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+RefreshToggles()
+RebuildList()
+ApplyPos()
+task.defer(ApplyPos)
+SetStatus(CanFiles() and "Ready — saves persist between sessions" or "Ready — saves last until you leave the game", T.TxtDim)
+
+print("[ApexSavePosition v1] Loaded.")
+print("  SAVE HERE stores position + facing; each slot has GO. HOLD re-applies it if the game pulls you back.")
+print("  X/Y/Z boxes teleport to exact coordinates (paste 'x, y, z' into X). PC keys: K save, L go, P panel.")
