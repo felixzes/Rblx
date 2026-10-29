@@ -1,0 +1,3247 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX SAVE POSITION  ·  v7  ·  RICH GLASS DECOR                ║
+╠══════════════════════════════════════════════════════════════╣
+║   v7: the GUI actually looks like colored glass now — a diagonal        ║
+║   sheen on the panel, mini bar and list rows, a soft glow halo behind      ║
+║   the panel, HUD-style corner brackets, a glowing accent header line,       ║
+║   and a small accent dot by the title. All of it re-tints the moment you      ║
+║   switch THEME, while staying exactly as see-through as your GLASS slider.     ║
+║   v6 ADDS (MORE tab): MARKERS (beam + name + live distance at each saved   ║
+║   position), TOUR (auto-visit every slot in the view; GAP and LOOP), AUTO     ║
+║   checkpoint (rolling "Auto" slot while grounded), EXPORT / IMPORT (copy all    ║
+║   positions as text, paste to restore or share), NEAREST (key N), SORT NAME /     ║
+║   NEWEST, a distance + direction compass to the selected slot in the status        ║
+║   line, and position counts on folder chips.                                         ║
+║   HOLD is now SHIELD (MORE tab). It no longer pins you in place:    ║
+║   • Any sudden jump you didn't cause is reversed the same frame it    ║
+║     happens (checked on Stepped, Heartbeat, RenderStepped AND the      ║
+║     moment your root's CFrame changes) — momentum kept, walking free.  ║
+║   • 1.4s arrival pin after each teleport (moving releases it early).    ║
+║   • Body movers / constraints added to you are destroyed; anchoring      ║
+║     your root is undone.                                                  ║
+║   • With hookmetamethod, the game's own scripts can't move you via         ║
+║     CFrame / PivotTo / SetPrimaryPartCFrame / Model:MoveTo while on.        ║
+║   • Duration: OFF / 10s / 30s / 2m / ALWAYS. The header shows a live         ║
+║     SHIELD countdown and how many pull-backs it has countered (xN).            ║
+║   TP MODE: INSTANT, or STEP FAST / STEP SLOW — glides with collisions off       ║
+║   instead of one huge jump, which beats anti-cheats that flag a single move.     ║
+║   Everything from v4 (themes + live scenes, glass, load screen, folders, icons,   ║
+║   colors, favorites, BACK, death point, SORT NEAR...) is unchanged.                 ║
+║                                                                                       ║
+║   Limits: nothing on the client can beat a server that keeps moving you every         ║
+║   frame, owns your character's physics, or kicks for teleporting. This stops the         ║
+║   common client-side and server-side snap-backs, not every possible protection.           ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
+local TweenService     = game:GetService("TweenService")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexSavePosGui then pcall(function() ENV.ApexSavePosGui:Destroy() end) end
+if ENV.ApexSavePosLoadGui then pcall(function() ENV.ApexSavePosLoadGui:Destroy() end) end
+if ENV.ApexSavePosFxGui then pcall(function() ENV.ApexSavePosFxGui:Destroy() end) end
+if ENV.ApexSaveMarkerFolder then pcall(function() ENV.ApexSaveMarkerFolder:Destroy() end) end
+ENV.ApexSaveTour = (ENV.ApexSaveTour or 0) + 1 -- stops any tour left from a previous run
+if ENV.ApexSavePosLoops then
+    for _, c in pairs(ENV.ApexSavePosLoops) do pcall(function() c:Disconnect() end) end
+end
+ENV.ApexSavePosLoops = {}
+-- Bumping the hold token cancels any hold loop left over from a previous run.
+ENV.ApexSaveHold = (ENV.ApexSaveHold or 0) + 1
+
+local function Track(conn)
+    table.insert(ENV.ApexSavePosLoops, conn)
+    return conn
+end
+
+local IsTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- ════════════════════════════════════════════════════════════════
+-- CONSTANTS
+-- ════════════════════════════════════════════════════════════════
+local FILE          = "ApexSavedPositions_" .. tostring(game.PlaceId) .. ".json"
+local HOLD_OPTIONS  = {0, 10, 30, 120, -1} -- SHIELD seconds; 0 = off, -1 = always
+local ARRIVAL_SECONDS = 1.4           -- short hard pin right after a teleport
+local ARRIVAL_GRACE   = 0.35          -- moving after this releases the pin early
+local PULLBACK_DIST = 3               -- studs of drift that count as "pulled back"
+local TP_MODES = {
+    {name = "INSTANT",   speed = 0},
+    {name = "STEP FAST", speed = 320}, -- glide speed in studs/second
+    {name = "STEP SLOW", speed = 110},
+}
+local K = {
+    TourGaps = {1.5, 3, 6},          -- seconds between stops on a TOUR
+    Auto = {0, 30, 60, 120},         -- AUTO checkpoint interval in seconds; 0 = off
+    SortCycle = {"order", "near", "name", "new"},
+    SortLabels = {order = "ORDER", near = "NEAR", name = "NAME", new = "NEWEST"},
+    Arrows = {"\u{2191}", "\u{2197}", "\u{2192}", "\u{2198}", "\u{2193}", "\u{2199}", "\u{2190}", "\u{2196}"},
+}
+local RENDER_CAP    = 200             -- rows drawn at once (use folders to narrow down)
+
+local PALETTE = {
+    {0, 220, 255}, {0, 240, 148}, {255, 200, 0}, {255, 148, 0},
+    {255, 70, 90}, {255, 80, 180}, {138, 80, 255}, {235, 235, 245},
+}
+local ICON_PRESETS = {
+    "\u{25CF}", "\u{25A0}", "\u{25B2}", "\u{25C6}", "\u{2605}",
+    "\u{2665}", "\u{2663}", "\u{2660}", "\u{2666}", "\u{25B6}",
+}
+local STAR = "\u{2605}"
+
+-- Each theme tints the glass (panel / button / selected shades) AND plays
+-- its own animated scene behind the GUI. Order matters: saved theme
+-- numbers from earlier versions still map to the matching color.
+local ACCENTS = {
+    {name = "OCEAN",  fx = "OCEAN",  accent = {50, 170, 255},  panel = {6, 20, 44},  btn = {12, 38, 74}, sel = {0, 80, 150}},
+    {name = "GALAXY", fx = "GALAXY", accent = {172, 120, 255}, panel = {16, 8, 38},  btn = {36, 24, 72}, sel = {70, 40, 140}},
+    {name = "MATRIX", fx = "MATRIX", accent = {0, 240, 120},   panel = {3, 20, 9},   btn = {8, 40, 20},  sel = {0, 95, 45}},
+    {name = "EMBER",  fx = "EMBER",  accent = {255, 170, 40},  panel = {30, 16, 4},  btn = {62, 36, 12}, sel = {130, 76, 8}},
+    {name = "SAKURA", fx = "SAKURA", accent = {255, 130, 180}, panel = {40, 10, 26}, btn = {74, 28, 52}, sel = {150, 50, 100}},
+    {name = "FROST",  fx = "FROST",  accent = {170, 225, 255}, panel = {10, 24, 36}, btn = {26, 52, 72}, sel = {60, 110, 150}},
+}
+local RETURN_LABELS = {[0] = "RETURN OFF", [1] = "RETURN SLOT", [2] = "RETURN DEATH"}
+local LOAD_MIN_SECONDS = 1.7
+local GLASS_MIN = 0.25
+local TIPS = {
+    "MARKERS shows a beam and live distance at every saved position.",
+    "TOUR visits each position in the current view for you.",
+    "Tap the star on a slot to make it a favorite.",
+    "SHIELD undoes game teleports for a while — and you can still walk.",
+    "STEP teleports glide, so speed checks don't flag one big jump.",
+    "Paste \"x, y, z\" into the X box and it splits itself.",
+    "BACK swaps you between your last two spots (key: B).",
+    "RETURN DEATH takes you back to where you died.",
+    "Drag the title bar to move this panel anywhere.",
+    "SORT NEAR lists the closest positions first.",
+    "Drag the GLASS slider on MORE to see through the panel.",
+    "Each theme tints the glass and plays its own animation.",
+    "THEME now re-colors the panel's sheen, glow and corner marks too.",
+    "SAKURA grows cherry blossom trees; MATRIX rains 1s and 0s.",
+}
+
+-- ════════════════════════════════════════════════════════════════
+-- TEXT / COLOR HELPERS
+-- ════════════════════════════════════════════════════════════════
+local function CleanName(s, maxChars)
+    local t = tostring(s or "")
+    t = t:gsub("[<>&%c]", "")
+    t = t:match("^%s*(.-)%s*$") or ""
+    local len = utf8.len(t)
+    if not len then return "" end
+    maxChars = maxChars or 24
+    if len > maxChars then t = t:sub(1, utf8.offset(t, maxChars + 1) - 1) end
+    return t
+end
+
+local function FirstChars(s, n)
+    local t = CleanName(s, 64)
+    local len = utf8.len(t)
+    if not len or len == 0 then return nil end
+    if len > n then t = t:sub(1, utf8.offset(t, n + 1) - 1) end
+    return t
+end
+
+local function ValidColor(c)
+    return type(c) == "table" and type(c[1]) == "number" and type(c[2]) == "number" and type(c[3]) == "number"
+end
+local function ColorOf(c) return Color3.fromRGB(c[1], c[2], c[3]) end
+local function HexOf(c) return string.format("#%02X%02X%02X", c[1], c[2], c[3]) end
+local function ParseHex(s)
+    local h = tostring(s or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
+    if not h then return nil end
+    return {tonumber(h:sub(1, 2), 16), tonumber(h:sub(3, 4), 16), tonumber(h:sub(5, 6), 16)}
+end
+local function Fmt(v) return string.format("%.1f, %.1f, %.1f", v.X, v.Y, v.Z) end
+
+-- ════════════════════════════════════════════════════════════════
+-- DATA + PERSISTENCE
+-- Slots carry a unique id, so sorting favorites to the top or
+-- filtering by folder never breaks which slot is selected.
+-- ════════════════════════════════════════════════════════════════
+local function CanFiles()
+    return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+end
+
+local function DefaultData()
+    return {
+        v = 3, slots = {}, folders = {}, nextId = 1, nextFolderId = 1,
+        selectedId = nil, view = "all", holdIdx = 3, returnMode = 0, tpMode = 1, markers = false, tourIdx = 2, tourLoop = false, autoIdx = 1,
+        glass = 0.55, accent = 1, fx = true, sortMode = "order", death = nil,
+    }
+end
+
+local function ValidSlot(s)
+    if type(s) ~= "table" or type(s.c) ~= "table" or #s.c ~= 12 then return false end
+    for i = 1, 12 do
+        if type(s.c[i]) ~= "number" then return false end
+    end
+    return true
+end
+
+local function FindById(list, id)
+    for i, v in ipairs(list) do
+        if v.id == id then return v, i end
+    end
+    return nil, nil
+end
+
+-- Accepts v1 data (index-based selection, no ids/icons/colors/folders)
+-- as well as v2, and always returns a clean v2 table.
+local function Normalize(d)
+    local out = DefaultData()
+
+    local maxFolder = 0
+    if type(d.folders) == "table" then
+        for _, f in ipairs(d.folders) do
+            local fid = type(f) == "table" and tonumber(f.id)
+            if fid then
+                fid = math.floor(fid)
+                if fid > 0 and not FindById(out.folders, fid) then
+                    local nm = CleanName(f.name, 16)
+                    out.folders[#out.folders + 1] = {id = fid, name = (nm ~= "") and nm or ("Folder " .. fid)}
+                    maxFolder = math.max(maxFolder, fid)
+                end
+            end
+        end
+    end
+    out.nextFolderId = math.max(math.floor(tonumber(d.nextFolderId) or 1), maxFolder + 1)
+
+    local seen, maxId = {}, 0
+    if type(d.slots) == "table" then
+        for _, s in ipairs(d.slots) do
+            if ValidSlot(s) then
+                local slot = {
+                    name = CleanName(s.name, 24),
+                    c = s.c,
+                    fav = (s.fav == true),
+                    icon = FirstChars(s.icon, 2) or ICON_PRESETS[1],
+                    color = ValidColor(s.color) and {s.color[1], s.color[2], s.color[3]} or nil,
+                    folder = tonumber(s.folder),
+                }
+                local id = math.floor(tonumber(s.id) or 0)
+                if id > 0 and not seen[id] then
+                    slot.id = id
+                    seen[id] = true
+                    maxId = math.max(maxId, id)
+                end
+                out.slots[#out.slots + 1] = slot
+            end
+        end
+    end
+    local nextId = math.max(math.floor(tonumber(d.nextId) or 1), maxId + 1)
+    for i, slot in ipairs(out.slots) do
+        if not slot.id then slot.id = nextId; nextId = nextId + 1 end
+        if slot.name == "" then slot.name = "Pos " .. i end
+        if not slot.color then
+            local pc = PALETTE[(slot.id - 1) % #PALETTE + 1]
+            slot.color = {pc[1], pc[2], pc[3]}
+        end
+        if slot.folder and not FindById(out.folders, slot.folder) then slot.folder = nil end
+    end
+    out.nextId = nextId
+
+    local selId = tonumber(d.selectedId)
+    if not selId and tonumber(d.selected) then
+        local old = out.slots[math.floor(d.selected)]
+        if old then selId = old.id end
+    end
+    if selId and FindById(out.slots, selId) then out.selectedId = selId end
+
+    if d.view == "fav" or d.view == "all" then
+        out.view = d.view
+    elseif tonumber(d.view) and FindById(out.folders, tonumber(d.view)) then
+        out.view = tonumber(d.view)
+    end
+
+    out.holdIdx = math.clamp(math.floor(tonumber(d.holdIdx) or 3), 1, #HOLD_OPTIONS)
+    out.tpMode = math.clamp(math.floor(tonumber(d.tpMode) or 1), 1, #TP_MODES)
+    out.markers = (d.markers == true)
+    out.tourIdx = math.clamp(math.floor(tonumber(d.tourIdx) or 2), 1, #K.TourGaps)
+    out.tourLoop = (d.tourLoop == true)
+    out.autoIdx = math.clamp(math.floor(tonumber(d.autoIdx) or 1), 1, #K.Auto)
+    -- v2 had a simple on/off autoReturn; it becomes returnMode 1 (selected slot)
+    out.returnMode = math.clamp(math.floor(tonumber(d.returnMode) or ((d.autoReturn == true) and 1 or 0)), 0, 2)
+    out.glass = math.clamp(tonumber(d.glass) or 0.55, GLASS_MIN, 1)
+    out.accent = math.clamp(math.floor(tonumber(d.accent) or 1), 1, #ACCENTS)
+    out.fx = (d.fx ~= false)
+    local sm = d.sortMode
+    out.sortMode = (sm == "near" or sm == "name" or sm == "new") and sm or "order"
+    if ValidSlot(d.death) then out.death = {c = d.death.c} end
+    out.ux, out.uy = tonumber(d.ux), tonumber(d.uy)
+    return out
+end
+
+local function LoadFromFile()
+    if not CanFiles() then return nil end
+    local ok, raw = pcall(function()
+        if isfile(FILE) then return readfile(FILE) end
+        return nil
+    end)
+    if not ok or type(raw) ~= "string" then return nil end
+    local ok2, decoded = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(decoded) ~= "table" then return nil end
+    return Normalize(decoded)
+end
+
+-- Session data survives re-running the script; the file survives rejoining.
+local Data
+do
+    local raw = ENV.ApexSavePosData
+    if type(raw) == "table" and type(raw.slots) == "table" then
+        Data = Normalize(raw)
+    else
+        Data = LoadFromFile() or DefaultData()
+    end
+    ENV.ApexSavePosData = Data
+end
+
+local function Persist()
+    if not CanFiles() then return end
+    pcall(function()
+        writefile(FILE, HttpService:JSONEncode({
+            v = 3, slots = Data.slots, folders = Data.folders,
+            nextId = Data.nextId, nextFolderId = Data.nextFolderId,
+            selectedId = Data.selectedId, view = Data.view,
+            holdIdx = Data.holdIdx, tpMode = Data.tpMode, returnMode = Data.returnMode,
+            markers = Data.markers, tourIdx = Data.tourIdx, tourLoop = Data.tourLoop, autoIdx = Data.autoIdx,
+            glass = Data.glass, accent = Data.accent, fx = Data.fx,
+            sortMode = Data.sortMode, death = Data.death,
+            ux = Data.ux, uy = Data.uy,
+        }))
+    end)
+end
+
+local function FindSlot(id) return FindById(Data.slots, id) end
+local function SlotCF(slot) return CFrame.new(table.unpack(slot.c)) end
+
+-- Lowest unused "Pos N": delete everything and the next save is "Pos 1".
+local function NextDefaultName()
+    local used = {}
+    for _, s in ipairs(Data.slots) do
+        local n = tonumber(string.match(s.name, "^Pos (%d+)$"))
+        if n then used[n] = true end
+    end
+    local n = 1
+    while used[n] do n = n + 1 end
+    return "Pos " .. n
+end
+
+local function NextFolderName()
+    local used = {}
+    for _, f in ipairs(Data.folders) do
+        local n = tonumber(string.match(f.name, "^Folder (%d+)$"))
+        if n then used[n] = true end
+    end
+    local n = 1
+    while used[n] do n = n + 1 end
+    return "Folder " .. n
+end
+
+local function UniqueCopyName(base)
+    local stem = base:gsub(" %(%d+%)$", "")
+    local names = {}
+    for _, s in ipairs(Data.slots) do names[s.name] = true end
+    local n = 2
+    local cand = stem .. " (" .. n .. ")"
+    while names[cand] do
+        n = n + 1
+        cand = stem .. " (" .. n .. ")"
+    end
+    return cand
+end
+
+local function GetRoot()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function GetHum()
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- THEME + UTILITY
+-- ════════════════════════════════════════════════════════════════
+local T = {
+    Glass      = Color3.fromRGB(10,  10,  18),
+    BtnBase    = Color3.fromRGB(34,  36,  56),
+    BtnSel     = Color3.fromRGB(0,   84,  112),
+    Violet     = Color3.fromRGB(138, 80,  255),
+    Cyan       = Color3.fromRGB(0,   220, 255),
+    Green      = Color3.fromRGB(0,   240, 148),
+    Yellow     = Color3.fromRGB(255, 200, 0),
+    Red        = Color3.fromRGB(255, 70,  90),
+    TxtPri     = Color3.fromRGB(240, 238, 255),
+    TxtSec     = Color3.fromRGB(165, 160, 195),
+    TxtDim     = Color3.fromRGB(105, 102, 132),
+    BorderGlow = Color3.fromRGB(90,  55,  200),
+    FontBold   = Enum.Font.GothamBold,
+    FontMed    = Enum.Font.Gotham,
+}
+
+-- Applies the current theme's tone colors to the shared palette.
+local function SetThemeColors()
+    local th = ACCENTS[Data.accent] or ACCENTS[1]
+    T.Accent  = Color3.fromRGB(th.accent[1], th.accent[2], th.accent[3])
+    T.Glass   = Color3.fromRGB(th.panel[1], th.panel[2], th.panel[3])
+    T.BtnBase = Color3.fromRGB(th.btn[1], th.btn[2], th.btn[3])
+    T.BtnSel  = Color3.fromRGB(th.sel[1], th.sel[2], th.sel[3])
+end
+SetThemeColors()
+
+-- Two-tone gradient (lighter top-left to darker bottom-right) used for
+-- the glass sheen and for button/stroke accents. Only ever put on plain
+-- Frames (or on a UIStroke) — never directly on a TextLabel/TextButton,
+-- since a UIGradient there also tints the text, not just the fill.
+local function Grad2(c)
+    return ColorSequence.new({
+        ColorSequenceKeypoint.new(0, c:Lerp(Color3.new(1, 1, 1), 0.22)),
+        ColorSequenceKeypoint.new(1, c:Lerp(Color3.new(0, 0, 0), 0.40)),
+    })
+end
+
+local U = {}
+function U.Corner(p, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = r or UDim.new(0, 6)
+    c.Parent = p
+    return c
+end
+function U.Stroke(p, col, thick, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col or Color3.new(0, 0, 0)
+    s.Thickness = thick or 1.5
+    s.Transparency = tr or 0
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent = p
+    return s
+end
+function U.Frame(props)
+    local f = Instance.new("Frame")
+    f.BackgroundColor3 = props.bg or T.Glass
+    f.BackgroundTransparency = props.tr or 0
+    f.BorderSizePixel = 0
+    f.Size = props.size or UDim2.new(1, 0, 0, 30)
+    f.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    f.ZIndex = props.z or 1
+    if props.parent then f.Parent = props.parent end
+    return f
+end
+function U.Label(props)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = props.text or ""
+    l.TextColor3 = props.col or T.TxtPri
+    l.Font = props.font or T.FontMed
+    l.TextSize = props.sz or 12
+    l.TextXAlignment = props.xa or Enum.TextXAlignment.Center
+    l.TextYAlignment = Enum.TextYAlignment.Center
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+    l.TextStrokeTransparency = 0.65
+    l.TextStrokeColor3 = Color3.new(0, 0, 0)
+    l.Size = props.size or UDim2.new(1, 0, 1, 0)
+    l.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    l.ZIndex = props.z or 2
+    if props.parent then l.Parent = props.parent end
+    return l
+end
+function U.Button(props)
+    local b = Instance.new("TextButton")
+    b.BackgroundColor3 = props.bg or T.BtnBase
+    b.BackgroundTransparency = props.tr or 0
+    b.BorderSizePixel = 0
+    b.Text = props.text or ""
+    b.TextColor3 = props.col or T.TxtPri
+    b.Font = props.font or T.FontBold
+    b.TextSize = props.sz or 12
+    b.TextTruncate = Enum.TextTruncate.AtEnd
+    b.TextStrokeTransparency = 0.65
+    b.TextStrokeColor3 = Color3.new(0, 0, 0)
+    b.AutoButtonColor = false
+    b.Size = props.size or UDim2.new(1, 0, 0, 30)
+    b.Position = props.pos or UDim2.new(0, 0, 0, 0)
+    b.ZIndex = props.z or 2
+    if props.parent then b.Parent = props.parent end
+    return b
+end
+-- GLASS: every translucent background registers here, so one slider
+-- (MORE tab) makes the whole GUI more or less see-through. Text and
+-- outlines stay solid so everything remains readable.
+local GlassItems = {}
+local function GlassTr(minTr, maxTr)
+    return minTr + (maxTr - minTr) * (1 - Data.glass)
+end
+local function Glass(inst, minTr, maxTr, key, sheen)
+    local entry = {inst = inst, minTr = minTr, maxTr = maxTr, key = key or "BtnBase"}
+    if sheen then -- Frame-only decorative sheen; see the Grad2 note above
+        local g = Instance.new("UIGradient")
+        g.Rotation = (type(sheen) == "number") and sheen or 80
+        g.Color = Grad2(inst.BackgroundColor3)
+        g.Parent = inst
+        entry.gradient = g
+    end
+    GlassItems[#GlassItems + 1] = entry
+    inst.BackgroundTransparency = GlassTr(minTr, maxTr)
+    return inst
+end
+local function ApplyGlass()
+    local alive = {}
+    for _, g in ipairs(GlassItems) do
+        if g.inst.Parent then
+            g.inst.BackgroundTransparency = GlassTr(g.minTr, g.maxTr)
+            alive[#alive + 1] = g
+        end
+    end
+    GlassItems = alive
+end
+
+local function MakeBtn(p)
+    local b = U.Button({
+        text = p.text, col = p.col or T.TxtPri, sz = p.sz or 12,
+        bg = p.bg or T.BtnBase, tr = 0, size = p.size, pos = p.pos,
+        z = p.z or 14, parent = p.parent,
+    })
+    U.Corner(b, UDim.new(0, 6))
+    local st = U.Stroke(b, p.col or T.BorderGlow, 1.25, 0.5)
+    do
+        local g = Instance.new("UIGradient")
+        g.Rotation = 90
+        g.Color = Grad2(p.col or T.BorderGlow)
+        g.Parent = st
+    end
+    if not p.solid then Glass(b, 0.15, 0.8, (p.bg == T.BtnSel) and "BtnSel" or "BtnBase") end
+    return b, st
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- THEME EFFECTS ENGINE
+-- Every theme has its own animated scene. A scene lives inside a clipped
+-- container (the panel's back layer, the load card) and is drawn behind
+-- the controls, so it shows through the glass. A short full-screen burst
+-- of the same style plays when you teleport or switch themes.
+--   OCEAN waves · GALAXY stars · MATRIX binary rain · EMBER sparks
+--   SAKURA cherry-blossom trees + petals · FROST snowfall
+-- Turn it all off with FX on the MORE tab (the tint stays).
+-- ════════════════════════════════════════════════════════════════
+local Fx = {handles = {}, busy = false, BurstGui = nil}
+local Builders = {}
+Fx.PINKS = {
+    Color3.fromRGB(255, 170, 205), Color3.fromRGB(255, 200, 222),
+    Color3.fromRGB(255, 140, 185), Color3.fromRGB(255, 225, 236),
+}
+
+function Fx.Rand(a, b) return a + math.random() * (b - a) end
+
+-- A small round dot, centered on its position.
+function Fx.NewDot(parent, size, col, tr)
+    local f = Instance.new("Frame")
+    f.BackgroundColor3 = col
+    f.BackgroundTransparency = tr or 0
+    f.BorderSizePixel = 0
+    f.AnchorPoint = Vector2.new(0.5, 0.5)
+    f.Size = UDim2.new(0, size, 0, size)
+    f.ZIndex = 2
+    f.Parent = parent
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(1, 0)
+    c.Parent = f
+    return f
+end
+
+-- ── OCEAN: three layers of rolling waves along the bottom + bubbles
+Builders.OCEAN = function(h)
+    local SEG = 7
+    local count = math.ceil(h.width / SEG)
+    local layers = {
+        {base = 30, amp = 5, wl = 80, speed = 1.0, tr = 0.80, phase = 0},
+        {base = 22, amp = 4, wl = 56, speed = 1.7, tr = 0.72, phase = 2},
+        {base = 15, amp = 3, wl = 40, speed = 2.4, tr = 0.62, phase = 4},
+    }
+    for li, L in ipairs(layers) do
+        L.cols = {}
+        local col = T.Accent:Lerp(Color3.new(1, 1, 1), (li - 1) * 0.12)
+        for i = 1, count do
+            local f = Instance.new("Frame")
+            f.BackgroundColor3 = col
+            f.BackgroundTransparency = L.tr
+            f.BorderSizePixel = 0
+            f.AnchorPoint = Vector2.new(0, 1)
+            f.Position = UDim2.new(0, (i - 1) * SEG, 1, 0)
+            f.Size = UDim2.new(0, SEG + 1, 0, L.base)
+            f.ZIndex = 1 + li
+            f.Parent = h.root
+            L.cols[i] = f
+        end
+    end
+    local bubbles = {}
+    for i = 1, 7 do
+        local b = Fx.NewDot(h.root, math.random(3, 6), Color3.new(1, 1, 1), 0.7)
+        b.ZIndex = 6
+        bubbles[i] = {f = b, x = Fx.Rand(0.05, 0.95), y = Fx.Rand(0.5, 1), vy = Fx.Rand(0.05, 0.14), ph = Fx.Rand(0, 6)}
+    end
+    local acc = 0
+    return function(dt, t)
+        acc = acc + dt
+        if acc >= 1 / 30 then -- waves refresh at 30 Hz; plenty smooth, half the cost
+            acc = 0
+            for _, L in ipairs(layers) do
+                for i, f in ipairs(L.cols) do
+                    local x = (i - 1) * SEG
+                    local hgt = L.base + L.amp * math.sin(x / L.wl * math.pi * 2 + t * L.speed + L.phase)
+                    f.Size = UDim2.new(0, SEG + 1, 0, math.max(2, hgt))
+                end
+            end
+        end
+        for _, b in ipairs(bubbles) do
+            b.y = b.y - b.vy * dt
+            if b.y < -0.05 then b.y = 1.05; b.x = Fx.Rand(0.05, 0.95) end
+            b.f.Position = UDim2.new(b.x + 0.02 * math.sin(t * 1.5 + b.ph), 0, b.y, 0)
+        end
+    end
+end
+
+-- ── GALAXY: nebula clouds, twinkling stars, an occasional shooting star
+Builders.GALAXY = function(h)
+    local nebulae = {}
+    for i = 1, 2 do
+        local n = Fx.NewDot(h.root, i == 1 and 150 or 110,
+            i == 1 and T.Accent or Color3.fromRGB(80, 120, 255), 0.9)
+        n.ZIndex = 1
+        nebulae[i] = {f = n, x = Fx.Rand(0.2, 0.8), y = Fx.Rand(0.2, 0.8), ph = Fx.Rand(0, 6), sp = Fx.Rand(0.12, 0.25)}
+    end
+    local stars = {}
+    for i = 1, 34 do
+        local c = (math.random() < 0.5) and Color3.new(1, 1, 1) or T.Accent:Lerp(Color3.new(1, 1, 1), 0.5)
+        local f = Fx.NewDot(h.root, (math.random() < 0.2) and 3 or 2, c, 0.3)
+        f.ZIndex = 3
+        stars[i] = {f = f, x = math.random(), y = math.random(), ph = Fx.Rand(0, 6.28), sp = Fx.Rand(1, 3), vx = Fx.Rand(-0.006, 0.006)}
+    end
+    local streak = Instance.new("Frame")
+    streak.BackgroundColor3 = Color3.new(1, 1, 1)
+    streak.BackgroundTransparency = 1
+    streak.BorderSizePixel = 0
+    streak.AnchorPoint = Vector2.new(0.5, 0.5)
+    streak.Size = UDim2.new(0, 34, 0, 2)
+    streak.Rotation = -35
+    streak.ZIndex = 4
+    streak.Parent = h.root
+    local nextStreak = os.clock() + Fx.Rand(2, 5)
+    local streakT0 = nil
+    return function(dt, t)
+        for _, n in ipairs(nebulae) do
+            n.f.Position = UDim2.new(n.x + 0.08 * math.sin(t * n.sp + n.ph), 0,
+                n.y + 0.06 * math.cos(t * n.sp * 0.8 + n.ph), 0)
+        end
+        for _, s in ipairs(stars) do
+            s.x = s.x + s.vx * dt
+            if s.x > 1.02 then s.x = -0.02 elseif s.x < -0.02 then s.x = 1.02 end
+            s.f.Position = UDim2.new(s.x, 0, s.y, 0)
+            s.f.BackgroundTransparency = 0.15 + 0.8 * (0.5 + 0.5 * math.sin(t * s.sp + s.ph))
+        end
+        local now = os.clock()
+        if not streakT0 and now >= nextStreak then streakT0 = now end
+        if streakT0 then
+            local p = (now - streakT0) / 0.8
+            if p >= 1 then
+                streakT0 = nil
+                nextStreak = now + Fx.Rand(5, 9)
+                streak.BackgroundTransparency = 1
+            else
+                streak.Position = UDim2.new(1.0 - p * 1.1, 0, 0.05 + p * 0.7, 0)
+                streak.BackgroundTransparency = 0.1 + 0.85 * math.abs(p - 0.5) * 2
+            end
+        end
+    end
+end
+
+-- ── MATRIX: falling columns of 1s and 0s that fade out behind the head
+Builders.MATRIX = function(h)
+    local COLW, LINES, LH = 14, 15, 12
+    local count = math.floor(h.width / COLW)
+    local left = math.floor((h.width - count * COLW) / 2)
+    local function RandText()
+        local lines = {}
+        for i = 1, LINES do lines[i] = (math.random() < 0.5) and "0" or "1" end
+        return table.concat(lines, "\n")
+    end
+    local cols = {}
+    for i = 1, count do
+        local l = Instance.new("TextLabel")
+        l.BackgroundTransparency = 1
+        l.Font = Enum.Font.Code
+        l.TextSize = 11
+        l.TextColor3 = T.Accent
+        l.TextTransparency = 0.3
+        l.TextXAlignment = Enum.TextXAlignment.Center
+        l.TextYAlignment = Enum.TextYAlignment.Top
+        l.Text = RandText()
+        l.Size = UDim2.new(0, COLW, 0, LINES * LH)
+        l.ZIndex = 2
+        l.Parent = h.root
+        local g = Instance.new("UIGradient")
+        g.Rotation = 90
+        g.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0.1)})
+        g.Parent = l
+        local c = {f = l, x = left + (i - 1) * COLW, y = -math.random(0, 220),
+            sp = Fx.Rand(35, 95), nextChange = os.clock() + Fx.Rand(0.1, 0.4)}
+        l.Position = UDim2.new(0, c.x, 0, c.y)
+        cols[i] = c
+    end
+    return function(dt, t)
+        local H = h.root.AbsoluteSize.Y
+        local now = os.clock()
+        for _, c in ipairs(cols) do
+            c.y = c.y + c.sp * dt
+            if c.y > H then c.y = -LINES * LH; c.sp = Fx.Rand(35, 95) end
+            c.f.Position = UDim2.new(0, c.x, 0, c.y)
+            if now >= c.nextChange then
+                c.f.Text = RandText()
+                c.nextChange = now + Fx.Rand(0.15, 0.45)
+            end
+        end
+    end
+end
+
+-- ── EMBER: warm glow along the bottom with sparks drifting upward
+Builders.EMBER = function(h)
+    local glow = Instance.new("Frame")
+    glow.BackgroundColor3 = T.Accent
+    glow.BackgroundTransparency = 0.75
+    glow.BorderSizePixel = 0
+    glow.AnchorPoint = Vector2.new(0, 1)
+    glow.Position = UDim2.new(0, 0, 1, 0)
+    glow.Size = UDim2.new(1, 0, 0, 70)
+    glow.ZIndex = 1
+    glow.Parent = h.root
+    local gg = Instance.new("UIGradient")
+    gg.Rotation = 90
+    gg.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0)})
+    gg.Parent = glow
+    local sparks = {}
+    for i = 1, 24 do
+        local col = (math.random() < 0.5) and T.Accent or Color3.fromRGB(255, 110, 40)
+        local f = Fx.NewDot(h.root, math.random(2, 4), col, 0.2)
+        f.ZIndex = 3
+        sparks[i] = {f = f, x = math.random(), y = Fx.Rand(0, 1.1), vy = Fx.Rand(0.10, 0.28),
+            ph = Fx.Rand(0, 6.28), sw = Fx.Rand(0.01, 0.035)}
+    end
+    return function(dt, t)
+        glow.BackgroundTransparency = 0.72 + 0.1 * math.sin(t * 5) * math.sin(t * 2.3)
+        for _, s in ipairs(sparks) do
+            s.y = s.y - s.vy * dt
+            if s.y < -0.05 then s.y = 1.05; s.x = math.random() end
+            s.f.Position = UDim2.new(s.x + s.sw * math.sin(t * 2 + s.ph), 0, s.y, 0)
+            s.f.BackgroundTransparency = 0.1 + 0.9 * math.clamp(1 - s.y, 0, 1)
+        end
+    end
+end
+
+-- ── SAKURA: two cherry-blossom trees that sway, plus drifting petals
+function Fx.BuildTree(parent, xScale, scale)
+    local W0, H0 = 76, 84
+    local tree = Instance.new("Frame")
+    tree.BackgroundTransparency = 1
+    tree.BorderSizePixel = 0
+    tree.AnchorPoint = Vector2.new(0.5, 1)
+    tree.Position = UDim2.new(xScale, 0, 1, 4)
+    tree.Size = UDim2.new(0, W0 * scale, 0, H0 * scale)
+    tree.ZIndex = 3
+    tree.Parent = parent
+    local function px(v) return v * scale end
+
+    local function Bar(cx, cy, w, hgt, rot)
+        local f = Instance.new("Frame")
+        f.BackgroundColor3 = Color3.fromRGB(92, 56, 52)
+        f.BorderSizePixel = 0
+        f.AnchorPoint = Vector2.new(0.5, 0.5)
+        f.Position = UDim2.new(0, px(cx), 0, px(cy))
+        f.Size = UDim2.new(0, math.max(2, px(w)), 0, px(hgt))
+        f.Rotation = rot or 0
+        f.ZIndex = 3
+        f.Parent = tree
+        return f
+    end
+    Bar(38, 62, 6, 44, 0) -- trunk
+
+    -- branch: starts on the trunk at height py, length len, angle in
+    -- degrees clockwise from straight up; its tip grows a blossom cluster.
+    local tips = {}
+    local function Branch(py, len, ang)
+        local r = math.rad(ang)
+        Bar(38 + (len / 2) * math.sin(r), py - (len / 2) * math.cos(r), 3, len, ang)
+        tips[#tips + 1] = {x = 38 + len * math.sin(r), y = py - len * math.cos(r)}
+    end
+    Branch(50, 26, -42)
+    Branch(46, 28, 40)
+    Branch(38, 22, -12)
+    Branch(34, 20, 18)
+    tips[#tips + 1] = {x = 38, y = 26} -- crown
+
+    for _, tp in ipairs(tips) do
+        for k = 1, 11 do
+            local a = math.random() * math.pi * 2
+            local rr = math.random() * 12
+            local d = Fx.NewDot(tree, px(Fx.Rand(5, 9)), Fx.PINKS[math.random(#Fx.PINKS)], Fx.Rand(0, 0.35))
+            d.Position = UDim2.new(0, px(tp.x + rr * math.cos(a)), 0, px(tp.y + rr * math.sin(a) * 0.8))
+            d.ZIndex = 4
+        end
+    end
+    return tree
+end
+
+Builders.SAKURA = function(h)
+    local trees = {
+        {f = Fx.BuildTree(h.root, 0.14, 1.0), ph = 0},
+        {f = Fx.BuildTree(h.root, 0.88, 0.8), ph = 2},
+    }
+    local petals = {}
+    for i = 1, 18 do
+        local p = Fx.NewDot(h.root, 8, Fx.PINKS[math.random(#Fx.PINKS)], 0.2)
+        p.Size = UDim2.new(0, math.random(6, 9), 0, math.random(4, 6))
+        p.ZIndex = 5
+        petals[i] = {f = p, x = math.random(), y = Fx.Rand(-0.1, 1.0), vy = Fx.Rand(0.05, 0.12),
+            ph = Fx.Rand(0, 6.28), sw = Fx.Rand(0.02, 0.05), rs = Fx.Rand(40, 120)}
+    end
+    return function(dt, t)
+        for _, tr in ipairs(trees) do tr.f.Rotation = 1.6 * math.sin(t * 0.9 + tr.ph) end
+        for _, p in ipairs(petals) do
+            p.y = p.y + p.vy * dt
+            if p.y > 1.05 then p.y = -0.05; p.x = math.random() end
+            p.f.Position = UDim2.new(p.x + p.sw * math.sin(t * 1.3 + p.ph), 0, p.y, 0)
+            p.f.Rotation = p.ph * 30 + t * p.rs
+            p.f.BackgroundTransparency = 0.1 + 0.25 * (0.5 + 0.5 * math.sin(t * 2 + p.ph))
+        end
+    end
+end
+
+-- ── FROST: gentle snowfall over a cold shimmer at the bottom
+Builders.FROST = function(h)
+    local shimmer = Instance.new("Frame")
+    shimmer.BackgroundColor3 = Color3.new(1, 1, 1)
+    shimmer.BackgroundTransparency = 0.85
+    shimmer.BorderSizePixel = 0
+    shimmer.AnchorPoint = Vector2.new(0, 1)
+    shimmer.Position = UDim2.new(0, 0, 1, 0)
+    shimmer.Size = UDim2.new(1, 0, 0, 50)
+    shimmer.ZIndex = 1
+    shimmer.Parent = h.root
+    local sg = Instance.new("UIGradient")
+    sg.Rotation = 90
+    sg.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0)})
+    sg.Parent = shimmer
+    local flakes = {}
+    for i = 1, 28 do
+        local sz = math.random(2, 5)
+        local f = Fx.NewDot(h.root, sz, Color3.new(1, 1, 1), Fx.Rand(0.05, 0.4))
+        f.ZIndex = 3
+        flakes[i] = {f = f, x = math.random(), y = Fx.Rand(-0.1, 1.0), vy = Fx.Rand(0.04, 0.12) * (sz / 3),
+            ph = Fx.Rand(0, 6.28), sw = Fx.Rand(0.01, 0.04)}
+    end
+    return function(dt, t)
+        shimmer.BackgroundTransparency = 0.82 + 0.05 * math.sin(t * 1.4)
+        for _, fl in ipairs(flakes) do
+            fl.y = fl.y + fl.vy * dt
+            if fl.y > 1.05 then fl.y = -0.05; fl.x = math.random() end
+            fl.f.Position = UDim2.new(fl.x + fl.sw * math.sin(t * 1.1 + fl.ph), 0, fl.y, 0)
+        end
+    end
+end
+
+-- ── engine core
+function Fx.Build(h)
+    for _, ch in ipairs(h.root:GetChildren()) do ch:Destroy() end
+    h.update = nil
+    if not Data.fx then return end
+    local th = ACCENTS[Data.accent] or ACCENTS[1]
+    local builder = Builders[th.fx]
+    if builder then h.update = builder(h) end
+end
+
+function Fx.Attach(root, width)
+    local h = {root = root, width = width}
+    Fx.handles[#Fx.handles + 1] = h
+    Fx.Build(h)
+    return h
+end
+
+function Fx.RebuildAll()
+    for _, h in ipairs(Fx.handles) do Fx.Build(h) end
+end
+
+local fxClock = 0
+Track(RunService.RenderStepped:Connect(function(dt)
+    dt = math.min(dt, 0.1)
+    fxClock = fxClock + dt
+    local live = {}
+    for _, h in ipairs(Fx.handles) do
+        if h.root.Parent then
+            live[#live + 1] = h
+            if h.update and h.root.Visible then
+                local ok, err = pcall(h.update, dt, fxClock)
+                if not ok then
+                    h.update = nil -- never let a scene error take the GUI down
+                    warn("[ApexSavePosition] theme effect error: " .. tostring(err))
+                end
+            end
+        end
+    end
+    Fx.handles = live
+end))
+
+-- ── full-screen burst: the same style, thrown across the screen for a
+-- moment on each teleport or theme change. Tween-driven, so it's cheap.
+function Fx.Spawn(kind)
+    local parent = Fx.BurstGui
+    if not parent then return end
+    local acc = T.Accent
+    local life = Fx.Rand(0.9, 1.6)
+    local lin = TweenInfo.new(life, Enum.EasingStyle.Linear)
+    local obj
+    if kind == "MATRIX" then
+        local x = math.random()
+        obj = Instance.new("TextLabel")
+        obj.BackgroundTransparency = 1
+        obj.Font = Enum.Font.Code
+        obj.Text = (math.random() < 0.5) and "0" or "1"
+        obj.TextSize = math.random(14, 24)
+        obj.TextColor3 = acc
+        obj.Size = UDim2.new(0, 18, 0, 22)
+        obj.AnchorPoint = Vector2.new(0.5, 0.5)
+        obj.Position = UDim2.new(x, 0, -0.05, 0)
+        obj.ZIndex = 5
+        obj.Parent = parent
+        TweenService:Create(obj, lin, {Position = UDim2.new(x, 0, 1.05, 0), TextTransparency = 1}):Play()
+    elseif kind == "SAKURA" then
+        local x0 = Fx.Rand(0.2, 1.1)
+        obj = Fx.NewDot(parent, 8, Fx.PINKS[math.random(#Fx.PINKS)], 0.1)
+        obj.Size = UDim2.new(0, math.random(8, 12), 0, math.random(5, 8))
+        obj.Position = UDim2.new(x0, 0, -0.05, 0)
+        obj.Rotation = math.random(0, 180)
+        obj.ZIndex = 5
+        TweenService:Create(obj, lin, {
+            Position = UDim2.new(x0 - Fx.Rand(0.2, 0.5), 0, 1.05, 0),
+            Rotation = obj.Rotation + math.random(180, 540),
+            BackgroundTransparency = 0.85,
+        }):Play()
+    elseif kind == "OCEAN" then
+        local x = math.random()
+        obj = Fx.NewDot(parent, math.random(4, 11), Color3.new(1, 1, 1), 0.45)
+        obj.Position = UDim2.new(x, 0, 1.05, 0)
+        obj.ZIndex = 5
+        TweenService:Create(obj, lin, {
+            Position = UDim2.new(x + Fx.Rand(-0.05, 0.05), 0, -0.05, 0), BackgroundTransparency = 1,
+        }):Play()
+    elseif kind == "GALAXY" then
+        obj = Fx.NewDot(parent, 2, Color3.new(1, 1, 1), 0.1)
+        obj.Position = UDim2.new(math.random(), 0, math.random(), 0)
+        obj.ZIndex = 5
+        TweenService:Create(obj, lin, {Size = UDim2.new(0, 10, 0, 10), BackgroundTransparency = 1}):Play()
+    elseif kind == "EMBER" then
+        local x = math.random()
+        obj = Fx.NewDot(parent, math.random(3, 6),
+            (math.random() < 0.5) and acc or Color3.fromRGB(255, 110, 40), 0.1)
+        obj.Position = UDim2.new(x, 0, 1.05, 0)
+        obj.ZIndex = 5
+        TweenService:Create(obj, lin, {
+            Position = UDim2.new(x + Fx.Rand(-0.08, 0.08), 0, Fx.Rand(0.1, 0.6), 0), BackgroundTransparency = 1,
+        }):Play()
+    else -- FROST
+        local x = math.random()
+        obj = Fx.NewDot(parent, math.random(3, 7), Color3.new(1, 1, 1), 0.15)
+        obj.Position = UDim2.new(x, 0, -0.05, 0)
+        obj.ZIndex = 5
+        TweenService:Create(obj, lin, {
+            Position = UDim2.new(x + Fx.Rand(-0.1, 0.1), 0, 1.05, 0), BackgroundTransparency = 0.9,
+        }):Play()
+    end
+    task.delay(life + 0.15, function()
+        if obj then obj:Destroy() end
+    end)
+end
+
+function Fx.Burst()
+    if not Data.fx or Fx.busy then return end
+    Fx.busy = true
+    task.delay(0.7, function() Fx.busy = false end)
+    local kind = (ACCENTS[Data.accent] or ACCENTS[1]).fx
+    for i = 1, 28 do
+        task.delay(math.random() * 0.4, function() Fx.Spawn(kind) end)
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- LOAD SCREEN — a small card with a progress bar, a spinner and a tip.
+-- The lines it shows are real facts about what was loaded. Tap to skip.
+-- ════════════════════════════════════════════════════════════════
+local Loader = {}
+do
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ApexSavePosLoading"
+    gui.ResetOnSpawn = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 200
+    gui.Parent = PGui
+    ENV.ApexSavePosLoadGui = gui
+
+    local cam = workspace.CurrentCamera
+    local vs = cam and cam.ViewportSize or Vector2.new(800, 400)
+    local cardW = math.clamp(math.floor(vs.X) - 40, 230, 320)
+
+    local backdrop = U.Frame({bg = Color3.new(0, 0, 0), tr = 0.4, size = UDim2.new(1, 0, 1, 0), z = 1, parent = gui})
+    backdrop.Active = true -- swallow taps while loading
+
+    local card = Instance.new("CanvasGroup")
+    card.AnchorPoint = Vector2.new(0.5, 0.5)
+    card.Position = UDim2.new(0.5, 0, 0.5, 0)
+    card.Size = UDim2.new(0, cardW, 0, 176)
+    card.BackgroundColor3 = T.Glass
+    card.BackgroundTransparency = 0.2
+    card.BorderSizePixel = 0
+    card.Active = true
+    card.ZIndex = 2
+    card.Parent = gui
+    U.Corner(card, UDim.new(0, 14))
+    U.Stroke(card, T.Accent, 1.75, 0.2)
+    do
+        local g = Instance.new("UIGradient")
+        g.Rotation = 75
+        g.Color = Grad2(card.BackgroundColor3)
+        g.Parent = card
+    end
+
+    -- the current theme's animation plays behind the card's text
+    local fxBack = U.Frame({tr = 1, size = UDim2.new(1, 0, 1, 0), z = 1, parent = card})
+    Fx.Attach(fxBack, cardW)
+
+    U.Label({text = "APEX SAVE POSITION", col = T.Accent, font = T.FontBold, sz = 17,
+        size = UDim2.new(1, 0, 0, 24), pos = UDim2.new(0, 0, 0, 16), z = 3, parent = card})
+    U.Label({text = "v7  ·  rich glass decor  ·  markers  ·  shield", col = T.TxtDim, font = T.FontMed, sz = 11,
+        size = UDim2.new(1, 0, 0, 16), pos = UDim2.new(0, 0, 0, 42), z = 3, parent = card})
+
+    local dots = {}
+    for i = 1, 3 do
+        local d = U.Frame({bg = T.Accent, tr = 0.5, size = UDim2.new(0, 8, 0, 8),
+            pos = UDim2.new(0.5, -22 + (i - 1) * 18, 0, 68), z = 3, parent = card})
+        U.Corner(d, UDim.new(1, 0))
+        dots[i] = d
+    end
+
+    local track = U.Frame({bg = Color3.fromRGB(46, 48, 70), tr = 0,
+        size = UDim2.new(1, -40, 0, 6), pos = UDim2.new(0, 20, 0, 92), z = 3, parent = card})
+    U.Corner(track, UDim.new(0, 3))
+    local fill = U.Frame({bg = T.Accent, tr = 0, size = UDim2.new(0, 0, 1, 0), z = 4, parent = track})
+    U.Corner(fill, UDim.new(0, 3))
+
+    local stageLabel = U.Label({text = "Starting...", col = T.TxtSec, font = T.FontBold, sz = 11,
+        size = UDim2.new(1, -24, 0, 18), pos = UDim2.new(0, 12, 0, 104), z = 3, parent = card})
+    local tip = U.Label({text = "TIP  " .. TIPS[math.random(#TIPS)], col = T.TxtDim, font = T.FontMed, sz = 10,
+        size = UDim2.new(1, -28, 0, 30), pos = UDim2.new(0, 14, 0, 132), z = 3, parent = card})
+    tip.TextWrapped = true
+
+    local progress, target = 0, 0
+    local skip = false
+    local startT = os.clock()
+    local conn = RunService.RenderStepped:Connect(function(dt)
+        progress = progress + (target - progress) * math.min(1, dt * 7)
+        fill.Size = UDim2.new(math.clamp(progress, 0, 1), 0, 1, 0)
+        local t = os.clock() - startT
+        for i, d in ipairs(dots) do
+            d.BackgroundTransparency = 0.15 + 0.75 * (0.5 + 0.5 * math.sin(t * 6 - i * 0.9))
+        end
+    end)
+    Track(conn)
+
+    local function OnInput(inp)
+        local ut = inp.UserInputType
+        if ut == Enum.UserInputType.MouseButton1 or ut == Enum.UserInputType.Touch then skip = true end
+    end
+    card.InputBegan:Connect(OnInput)
+    backdrop.InputBegan:Connect(OnInput)
+
+    -- stages = { {progress 0..1, text}, ... }; shown one after another
+    -- over LOAD_MIN_SECONDS, then the card fades away and onDone runs.
+    function Loader.Finish(stages, onDone)
+        task.spawn(function()
+            local interval = LOAD_MIN_SECONDS / math.max(1, #stages)
+            for _, st in ipairs(stages) do
+                if skip then break end
+                target = st[1]
+                stageLabel.Text = st[2]
+                local t0 = os.clock()
+                while os.clock() - t0 < interval and not skip do task.wait(0.03) end
+            end
+            target = 1
+            progress = 1
+            fill.Size = UDim2.new(1, 0, 1, 0)
+            local last = stages[#stages]
+            stageLabel.Text = last and last[2] or "Ready"
+            task.wait(skip and 0.05 or 0.25)
+            TweenService:Create(card, TweenInfo.new(0.35), {GroupTransparency = 1}):Play()
+            TweenService:Create(backdrop, TweenInfo.new(0.35), {BackgroundTransparency = 1}):Play()
+            task.wait(0.4)
+            pcall(function() conn:Disconnect() end)
+            gui:Destroy()
+            if onDone then onDone() end
+        end)
+    end
+
+    -- Failsafe: never leave a tap-blocking overlay behind if init fails.
+    task.delay(12, function()
+        pcall(function() conn:Disconnect() end)
+        if gui.Parent then gui:Destroy() end
+    end)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- GUI — structure
+-- ════════════════════════════════════════════════════════════════
+local Expanded     = true
+local DraggingNow  = false
+local LastInteract = os.clock()
+local function Bump() LastInteract = os.clock() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ApexSavePos"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 98
+ScreenGui.Parent = PGui
+ENV.ApexSavePosGui = ScreenGui
+
+-- FX: a soft accent-colored flash confirms every teleport.
+local FxGui = Instance.new("ScreenGui")
+FxGui.Name = "ApexSavePosFx"
+FxGui.ResetOnSpawn = false
+FxGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+FxGui.IgnoreGuiInset = true
+FxGui.DisplayOrder = 97
+FxGui.Parent = PGui
+ENV.ApexSavePosFxGui = FxGui
+Fx.BurstGui = FxGui
+local FxFrame = U.Frame({bg = T.Accent, tr = 1, size = UDim2.new(1, 0, 1, 0), z = 1, parent = FxGui})
+local function Flash()
+    if not Data.fx then return end
+    Fx.Burst() -- themed particles across the whole screen
+    FxFrame.BackgroundColor3 = T.Accent
+    FxFrame.BackgroundTransparency = 0.72
+    TweenService:Create(FxFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {BackgroundTransparency = 1}):Play()
+end
+
+local function ScreenSize()
+    local s = ScreenGui.AbsoluteSize
+    if s.X < 50 or s.Y < 50 then
+        local cam = workspace.CurrentCamera
+        if cam then s = cam.ViewportSize end
+    end
+    return s
+end
+
+local SS         = ScreenSize()
+local PANEL_W    = math.clamp(math.floor(SS.X * 0.35), 230, 280)
+local INNER      = PANEL_W - 16
+local GAP        = 4
+local BTN_H      = IsTouch and 34 or 30
+local ROW_H      = 40
+local LIST_ROWS  = (SS.Y < 400) and 2 or 3
+local LIST_H     = LIST_ROWS * (ROW_H + GAP)
+local EDIT_H     = 168
+local CHIP_H     = 28
+local HEADER_H   = 28
+local MINI_H     = 40
+local DEFAULT_POS = Vector2.new(8, 64)
+local AUTO_COLLAPSE_AFTER = 15
+
+local PanelPos = Vector2.new(Data.ux or DEFAULT_POS.X, Data.uy or DEFAULT_POS.Y)
+
+-- All widgets live in tables (not top-level locals) so the script stays
+-- far below Luau's 200-locals-per-function limit.
+local W  = {}   -- main-panel widgets
+local Xy = {}   -- XYZ page
+local Mo = {}   -- MORE page
+local Ed = {}   -- editor page
+
+local Panel = Instance.new("Frame")
+Panel.Name = "Panel"
+Panel.AutomaticSize = Enum.AutomaticSize.Y
+Panel.Size = UDim2.new(0, PANEL_W, 0, 0)
+Panel.BackgroundColor3 = T.Glass
+Panel.BorderSizePixel = 0
+Panel.Active = true
+Panel.ZIndex = 10
+Panel.Visible = false -- revealed when the load screen finishes
+Panel.Parent = ScreenGui
+Glass(Panel, 0.10, 0.92, "Glass", 75)
+U.Corner(Panel, UDim.new(0, 10))
+W.PanelStroke = U.Stroke(Panel, T.Accent, 1.5, 0.35)
+
+-- The scene layer sits just behind the panel, clipped to the same rounded
+-- rectangle, so the panel's translucent glass shows the animation through.
+W.Back = Instance.new("Frame")
+W.Back.Name = "PanelBack"
+W.Back.BackgroundTransparency = 1
+W.Back.BorderSizePixel = 0
+W.Back.ClipsDescendants = true
+W.Back.Size = UDim2.new(0, PANEL_W, 0, 260)
+W.Back.ZIndex = 9
+W.Back.Visible = false
+W.Back.Parent = ScreenGui
+U.Corner(W.Back, UDim.new(0, 10))
+Fx.Attach(W.Back, PANEL_W)
+
+-- A two-ring soft glow sits behind everything; brackets sit on top of
+-- everything. Both are repositioned in ApplyPos and recolored by theme.
+W.Glow2 = Instance.new("Frame")
+W.Glow2.BackgroundColor3 = T.Accent
+W.Glow2.BackgroundTransparency = 0.93
+W.Glow2.BorderSizePixel = 0
+W.Glow2.ZIndex = 7
+W.Glow2.Visible = false
+W.Glow2.Parent = ScreenGui
+U.Corner(W.Glow2, UDim.new(0, 22))
+W.Glow1 = Instance.new("Frame")
+W.Glow1.BackgroundColor3 = T.Accent
+W.Glow1.BackgroundTransparency = 0.85
+W.Glow1.BorderSizePixel = 0
+W.Glow1.ZIndex = 8
+W.Glow1.Visible = false
+W.Glow1.Parent = ScreenGui
+U.Corner(W.Glow1, UDim.new(0, 16))
+
+W.Brackets = {}
+for i = 1, 8 do
+    local f = Instance.new("Frame")
+    f.BackgroundColor3 = T.Accent
+    f.BackgroundTransparency = 0.1
+    f.BorderSizePixel = 0
+    f.ZIndex = 11
+    f.Visible = false
+    f.Parent = ScreenGui
+    U.Corner(f, UDim.new(0, 1))
+    W.Brackets[i] = f
+end
+
+local PanelLayout = Instance.new("UIListLayout")
+PanelLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PanelLayout.Parent = Panel
+
+local Header = U.Frame({tr = 1, size = UDim2.new(1, 0, 0, HEADER_H), z = 11, parent = Panel})
+Header.Active = true
+Header.LayoutOrder = 1
+W.TitleDot = U.Frame({bg = T.Accent, tr = 0, size = UDim2.new(0, 8, 0, 8),
+    pos = UDim2.new(0, 10, 0.5, -4), z = 12, parent = Header})
+U.Corner(W.TitleDot, UDim.new(1, 0))
+U.Stroke(W.TitleDot, Color3.new(1, 1, 1), 1, 0.7)
+W.Title = U.Label({text = "SAVE POS", col = T.Accent, font = T.FontBold, sz = 12,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(0, 56, 1, 0), pos = UDim2.new(0, 24, 0, 0),
+    z = 12, parent = Header})
+W.Count = U.Label({text = "0", col = T.TxtSec, font = T.FontBold, sz = 11,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(0, 28, 1, 0), pos = UDim2.new(0, 78, 0, 0),
+    z = 12, parent = Header})
+W.ShieldLabel = U.Label({text = "", col = T.Green, font = T.FontBold, sz = 10,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(1, -150, 1, 0), pos = UDim2.new(0, 108, 0, 0),
+    z = 12, parent = Header})
+W.Collapse = MakeBtn({text = "-", col = T.TxtSec, sz = 16, z = 12,
+    size = UDim2.new(0, 28, 0, 22), pos = UDim2.new(1, -34, 0.5, -11), parent = Header})
+W.HeaderLine = U.Frame({bg = T.Accent, tr = 0.15, size = UDim2.new(1, -16, 0, 2),
+    pos = UDim2.new(0, 8, 1, -2), z = 12, parent = Header})
+W.HeaderLineGrad = Instance.new("UIGradient")
+W.HeaderLineGrad.Color = ColorSequence.new(T.Accent)
+W.HeaderLineGrad.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.8), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 0.8),
+})
+W.HeaderLineGrad.Parent = W.HeaderLine
+
+local Body = Instance.new("Frame")
+Body.BackgroundTransparency = 1
+Body.BorderSizePixel = 0
+Body.AutomaticSize = Enum.AutomaticSize.Y
+Body.Size = UDim2.new(1, 0, 0, 0)
+Body.LayoutOrder = 2
+Body.ZIndex = 11
+Body.Parent = Panel
+local BodyLayout = Instance.new("UIListLayout")
+BodyLayout.Padding = UDim.new(0, GAP)
+BodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+BodyLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+BodyLayout.Parent = Body
+local BodyPad = Instance.new("UIPadding")
+BodyPad.PaddingTop = UDim.new(0, 6)
+BodyPad.PaddingBottom = UDim.new(0, 8)
+BodyPad.PaddingLeft = UDim.new(0, 8)
+BodyPad.PaddingRight = UDim.new(0, 8)
+BodyPad.Parent = Body
+
+local function Row(order, height)
+    local f = U.Frame({tr = 1, size = UDim2.new(1, 0, 0, height), z = 12, parent = Body})
+    f.LayoutOrder = order
+    return f
+end
+
+local function MakeBox(parent, placeholder, size, pos)
+    local tb = Instance.new("TextBox")
+    tb.Size = size
+    tb.Position = pos
+    tb.BackgroundColor3 = T.BtnBase
+    Glass(tb, 0.15, 0.8, "BtnBase")
+    tb.BorderSizePixel = 0
+    tb.PlaceholderText = placeholder
+    tb.PlaceholderColor3 = T.TxtDim
+    tb.Text = ""
+    tb.TextColor3 = T.TxtPri
+    tb.Font = T.FontMed
+    tb.TextSize = 12
+    tb.ClearTextOnFocus = false
+    tb.TextTruncate = Enum.TextTruncate.AtEnd
+    tb.ZIndex = 14
+    tb.Parent = parent
+    U.Corner(tb, UDim.new(0, 6))
+    U.Stroke(tb, T.BorderGlow, 1.25, 0.5)
+    tb.Focused:Connect(Bump)
+    tb.FocusLost:Connect(Bump)
+    return tb
+end
+
+-- Row 1: name (optional) + SAVE HERE
+local SAVE_W = 76
+W.NameRow = Row(1, BTN_H)
+W.Name = MakeBox(W.NameRow, "Pos 1", UDim2.new(1, -(SAVE_W + GAP), 1, 0), UDim2.new(0, 0, 0, 0))
+W.Save = MakeBtn({text = "SAVE HERE", col = T.Green, sz = 11,
+    size = UDim2.new(0, SAVE_W, 1, 0), pos = UDim2.new(1, -SAVE_W, 0, 0), parent = W.NameRow})
+
+-- Row 2: folder chips (scrolls sideways)
+W.Folders = Instance.new("ScrollingFrame")
+W.Folders.BackgroundTransparency = 1
+W.Folders.BorderSizePixel = 0
+W.Folders.Size = UDim2.new(1, 0, 0, CHIP_H)
+W.Folders.CanvasSize = UDim2.new(0, 0, 0, 0)
+W.Folders.AutomaticCanvasSize = Enum.AutomaticSize.X
+W.Folders.ScrollingDirection = Enum.ScrollingDirection.X
+W.Folders.ScrollBarThickness = 0
+W.Folders.LayoutOrder = 2
+W.Folders.ZIndex = 12
+W.Folders.Parent = Body
+local FoldersLayout = Instance.new("UIListLayout")
+FoldersLayout.FillDirection = Enum.FillDirection.Horizontal
+FoldersLayout.Padding = UDim.new(0, GAP)
+FoldersLayout.SortOrder = Enum.SortOrder.LayoutOrder
+FoldersLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+FoldersLayout.Parent = W.Folders
+
+-- Row 3: content area — one page at a time (slots / xyz / more / edit)
+W.Content = U.Frame({tr = 1, size = UDim2.new(1, 0, 0, LIST_H), z = 12, parent = Body})
+W.Content.LayoutOrder = 3
+
+local function NewPage()
+    local f = U.Frame({tr = 1, size = UDim2.new(1, 0, 1, 0), z = 13, parent = W.Content})
+    f.Visible = false
+    return f
+end
+
+-- Page: slot list
+W.List = Instance.new("ScrollingFrame")
+W.List.BackgroundTransparency = 1
+W.List.BorderSizePixel = 0
+W.List.Size = UDim2.new(1, 0, 1, 0)
+W.List.CanvasSize = UDim2.new(0, 0, 0, 0)
+W.List.AutomaticCanvasSize = Enum.AutomaticSize.Y
+W.List.ScrollingDirection = Enum.ScrollingDirection.Y
+W.List.ScrollBarThickness = 3
+W.List.ScrollBarImageColor3 = T.Violet
+W.List.ZIndex = 13
+W.List.Parent = W.Content
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.Padding = UDim.new(0, GAP)
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout.Parent = W.List
+W.Empty = U.Label({text = "Nothing here yet — tap SAVE HERE",
+    col = T.TxtDim, font = T.FontMed, sz = 11, size = UDim2.new(1, 0, 0, 30), z = 14, parent = W.List})
+W.Empty.LayoutOrder = 0
+W.MoreNote = U.Label({text = "Showing the first " .. RENDER_CAP .. " — use folders to narrow down",
+    col = T.TxtDim, font = T.FontMed, sz = 10, size = UDim2.new(1, 0, 0, 20), z = 14, parent = W.List})
+W.MoreNote.LayoutOrder = 100000
+W.MoreNote.Visible = false
+
+-- Page: XYZ
+W.XYZ = NewPage()
+local THIRD_W = math.floor((INNER - GAP * 2) / 3)
+local GO_W = 46
+local BOX_W = math.floor((INNER - GAP * 3 - GO_W) / 3)
+Xy.X = MakeBox(W.XYZ, "X", UDim2.new(0, BOX_W, 0, 30), UDim2.new(0, 0, 0, 0))
+Xy.Y = MakeBox(W.XYZ, "Y", UDim2.new(0, BOX_W, 0, 30), UDim2.new(0, BOX_W + GAP, 0, 0))
+Xy.Z = MakeBox(W.XYZ, "Z", UDim2.new(0, BOX_W, 0, 30), UDim2.new(0, (BOX_W + GAP) * 2, 0, 0))
+Xy.Go = MakeBtn({text = "GO", col = T.Green, sz = 12,
+    size = UDim2.new(0, GO_W, 0, 30), pos = UDim2.new(1, -GO_W, 0, 0), parent = W.XYZ})
+Xy.Fill = MakeBtn({text = "FILL", col = T.TxtSec, sz = 10,
+    size = UDim2.new(0, THIRD_W, 0, 30), pos = UDim2.new(0, 0, 0, 34), parent = W.XYZ})
+Xy.Copy = MakeBtn({text = "COPY", col = T.Cyan, sz = 10,
+    size = UDim2.new(0, THIRD_W, 0, 30), pos = UDim2.new(0, THIRD_W + GAP, 0, 34), parent = W.XYZ})
+Xy.SaveXYZ = MakeBtn({text = "SAVE XYZ", col = T.Green, sz = 10,
+    size = UDim2.new(0, THIRD_W, 0, 30), pos = UDim2.new(0, (THIRD_W + GAP) * 2, 0, 34), parent = W.XYZ})
+
+-- Page: MORE — tools, settings and folder management (scrolls)
+W.More = Instance.new("ScrollingFrame")
+W.More.BackgroundTransparency = 1
+W.More.BorderSizePixel = 0
+W.More.Size = UDim2.new(1, 0, 1, 0)
+W.More.CanvasSize = UDim2.new(0, 0, 0, 0)
+W.More.AutomaticCanvasSize = Enum.AutomaticSize.Y
+W.More.ScrollingDirection = Enum.ScrollingDirection.Y
+W.More.ScrollBarThickness = 3
+W.More.ScrollBarImageColor3 = T.Violet
+W.More.ZIndex = 13
+W.More.Visible = false
+W.More.Parent = W.Content
+local MoreLayout = Instance.new("UIListLayout")
+MoreLayout.Padding = UDim.new(0, GAP)
+MoreLayout.SortOrder = Enum.SortOrder.LayoutOrder
+MoreLayout.Parent = W.More
+
+local HALF_W = math.floor((INNER - GAP) / 2)
+local MORE_W = INNER - 6 -- leave room for the scrollbar
+local M3_W = math.floor((MORE_W - GAP * 2) / 3)
+local MH_W = math.floor((MORE_W - GAP) / 2)
+local function MoreRow(order)
+    local f = U.Frame({tr = 1, size = UDim2.new(0, MORE_W, 0, 30), z = 14, parent = W.More})
+    f.LayoutOrder = order
+    return f
+end
+
+-- row 1: BACK / DEATH / SORT
+local mr1 = MoreRow(1)
+Mo.Back = MakeBtn({text = "BACK", col = T.Accent, sz = 11,
+    size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = mr1})
+Mo.Death = MakeBtn({text = "DEATH", col = T.Red, sz = 11,
+    size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, M3_W + GAP, 0, 0), parent = mr1})
+Mo.Sort = MakeBtn({text = "SORT ORDER", col = T.TxtSec, sz = 10,
+    size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, (M3_W + GAP) * 2, 0, 0), parent = mr1})
+
+-- row 2: HOLD / RETURN
+local mr2 = MoreRow(2)
+Mo.Hold, Mo.HoldStroke = MakeBtn({text = "HOLD", col = T.Yellow, sz = 11,
+    size = UDim2.new(0, MH_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = mr2})
+Mo.Return, Mo.ReturnStroke = MakeBtn({text = "RETURN", col = T.TxtSec, sz = 11,
+    size = UDim2.new(0, MH_W, 1, 0), pos = UDim2.new(0, MH_W + GAP, 0, 0), parent = mr2})
+
+-- row 3: TP MODE / FX / THEME
+local mr3 = MoreRow(3)
+Mo.TpMode = MakeBtn({text = "INSTANT", col = T.TxtSec, sz = 10,
+    size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = mr3})
+Mo.Fx = MakeBtn({text = "FX ON", col = T.Green, sz = 11,
+    size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, M3_W + GAP, 0, 0), parent = mr3})
+Mo.Theme = MakeBtn({text = "OCEAN", col = T.Accent, sz = 10,
+    size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, (M3_W + GAP) * 2, 0, 0), parent = mr3})
+
+-- row 4: GLASS slider (how see-through the whole GUI is)
+local mr4 = MoreRow(4)
+Mo.GlassLabel = U.Label({text = "GLASS", col = T.TxtSec, font = T.FontBold, sz = 10,
+    xa = Enum.TextXAlignment.Left, size = UDim2.new(0, 72, 1, 0), pos = UDim2.new(0, 4, 0, 0), z = 15, parent = mr4})
+Mo.SliderHit = U.Frame({tr = 1, size = UDim2.new(0, MORE_W - 80, 1, 0), pos = UDim2.new(0, 78, 0, 0), z = 15, parent = mr4})
+Mo.SliderHit.Active = true
+Mo.Track = U.Frame({bg = Color3.fromRGB(46, 48, 70), tr = 0,
+    size = UDim2.new(1, -8, 0, 6), pos = UDim2.new(0, 4, 0.5, -3), z = 16, parent = Mo.SliderHit})
+U.Corner(Mo.Track, UDim.new(0, 3))
+Mo.Fill = U.Frame({bg = T.Accent, tr = 0, size = UDim2.new(0, 0, 1, 0), z = 17, parent = Mo.Track})
+U.Corner(Mo.Fill, UDim.new(0, 3))
+Mo.Knob = U.Frame({bg = Color3.new(1, 1, 1), tr = 0,
+    size = UDim2.new(0, 16, 0, 16), pos = UDim2.new(0, -8, 0.5, -8), z = 18, parent = Mo.SliderHit})
+U.Corner(Mo.Knob, UDim.new(1, 0))
+U.Stroke(Mo.Knob, T.Accent, 1.5, 0.2)
+
+-- row 5: folder tools (act on the folder chip that is currently selected)
+local mr5 = MoreRow(5)
+local FOLD_BTN_W = 38
+local FOLD_BOX_W = MORE_W - FOLD_BTN_W * 3 - GAP * 3
+Mo.Box = MakeBox(mr5, "Folder name", UDim2.new(0, FOLD_BOX_W, 1, 0), UDim2.new(0, 0, 0, 0))
+Mo.New = MakeBtn({text = "NEW", col = T.Green, sz = 10,
+    size = UDim2.new(0, FOLD_BTN_W, 1, 0), pos = UDim2.new(0, FOLD_BOX_W + GAP, 0, 0), parent = mr5})
+Mo.Ren = MakeBtn({text = "REN", col = T.TxtSec, sz = 10,
+    size = UDim2.new(0, FOLD_BTN_W, 1, 0), pos = UDim2.new(0, FOLD_BOX_W + GAP + FOLD_BTN_W + GAP, 0, 0), parent = mr5})
+Mo.Del = MakeBtn({text = "DEL", col = T.Red, sz = 10,
+    size = UDim2.new(0, FOLD_BTN_W, 1, 0), pos = UDim2.new(1, -FOLD_BTN_W, 0, 0), parent = mr5})
+
+do -- rows 6-8: markers / auto / nearest, tour, share
+    local r6 = MoreRow(6)
+    Mo.Markers = MakeBtn({text = "MARKERS", col = T.TxtSec, sz = 10,
+        size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = r6})
+    Mo.Auto = MakeBtn({text = "AUTO OFF", col = T.TxtSec, sz = 10,
+        size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, M3_W + GAP, 0, 0), parent = r6})
+    Mo.Nearest = MakeBtn({text = "NEAREST", col = T.Accent, sz = 10,
+        size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, (M3_W + GAP) * 2, 0, 0), parent = r6})
+    local r7 = MoreRow(7)
+    Mo.Tour = MakeBtn({text = "TOUR", col = T.Green, sz = 10,
+        size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = r7})
+    Mo.TourGap = MakeBtn({text = "GAP 3s", col = T.TxtSec, sz = 10,
+        size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, M3_W + GAP, 0, 0), parent = r7})
+    Mo.TourLoop = MakeBtn({text = "LOOP OFF", col = T.TxtSec, sz = 10,
+        size = UDim2.new(0, M3_W, 1, 0), pos = UDim2.new(0, (M3_W + GAP) * 2, 0, 0), parent = r7})
+    local r8 = MoreRow(8)
+    local SH_BTN = 52
+    Mo.ShareBox = MakeBox(r8, "paste export here", UDim2.new(0, MORE_W - SH_BTN * 2 - GAP * 2, 1, 0), UDim2.new(0, 0, 0, 0))
+    Mo.Export = MakeBtn({text = "EXPORT", col = T.Cyan, sz = 10,
+        size = UDim2.new(0, SH_BTN, 1, 0), pos = UDim2.new(1, -(SH_BTN * 2 + GAP), 0, 0), parent = r8})
+    Mo.Import = MakeBtn({text = "IMPORT", col = T.Green, sz = 10,
+        size = UDim2.new(0, SH_BTN, 1, 0), pos = UDim2.new(1, -SH_BTN, 0, 0), parent = r8})
+end
+
+-- Page: EDIT one slot (name, favorite, icon, color, folder, duplicate, delete)
+W.Edit = NewPage()
+Ed.Name = MakeBox(W.Edit, "Name", UDim2.new(1, -(34 + GAP), 0, 30), UDim2.new(0, 0, 0, 0))
+Ed.Fav = MakeBtn({text = STAR, col = T.TxtDim, sz = 16,
+    size = UDim2.new(0, 34, 0, 30), pos = UDim2.new(1, -34, 0, 0), parent = W.Edit})
+Ed.IconBtn = MakeBtn({text = ICON_PRESETS[1], col = T.Cyan, sz = 18,
+    size = UDim2.new(0, 34, 0, 30), pos = UDim2.new(0, 0, 0, 34), parent = W.Edit})
+Ed.IconBox = MakeBox(W.Edit, "icon or emoji", UDim2.new(1, -(34 + GAP), 0, 30), UDim2.new(0, 34 + GAP, 0, 34))
+local SW = math.clamp(math.floor((INNER - GAP * (#PALETTE - 1)) / #PALETTE), 18, 28)
+Ed.Swatches = {}
+for i, pc in ipairs(PALETTE) do
+    local sb, sst = MakeBtn({text = "", col = Color3.fromRGB(pc[1], pc[2], pc[3]),
+        bg = Color3.fromRGB(pc[1], pc[2], pc[3]), solid = true,
+        size = UDim2.new(0, SW, 0, 26), pos = UDim2.new(0, (i - 1) * (SW + GAP), 0, 68), parent = W.Edit})
+    sb.BackgroundTransparency = 0
+    sst.Color = Color3.new(1, 1, 1)
+    sst.Transparency = 0.8
+    Ed.Swatches[i] = {btn = sb, stroke = sst, color = pc}
+end
+Ed.Hex = MakeBox(W.Edit, "#RRGGBB", UDim2.new(0, HALF_W, 0, 30), UDim2.new(0, 0, 0, 98))
+Ed.Folder = MakeBtn({text = "NO FOLDER", col = T.TxtSec, sz = 11,
+    size = UDim2.new(0, HALF_W, 0, 30), pos = UDim2.new(0, HALF_W + GAP, 0, 98), parent = W.Edit})
+Ed.Dup = MakeBtn({text = "COPY", col = T.Cyan, sz = 11,
+    size = UDim2.new(0, THIRD_W, 0, 30), pos = UDim2.new(0, 0, 0, 132), parent = W.Edit})
+Ed.Del = MakeBtn({text = "DELETE", col = T.Red, sz = 11,
+    size = UDim2.new(0, THIRD_W, 0, 30), pos = UDim2.new(0, THIRD_W + GAP, 0, 132), parent = W.Edit})
+Ed.Done = MakeBtn({text = "DONE", col = T.Green, sz = 11,
+    size = UDim2.new(0, THIRD_W, 0, 30), pos = UDim2.new(0, (THIRD_W + GAP) * 2, 0, 132), parent = W.Edit})
+
+-- Row 4: page tabs
+W.TabRow = Row(4, 28)
+W.TabList = MakeBtn({text = "SLOTS", col = T.Cyan, sz = 11,
+    size = UDim2.new(0, THIRD_W, 1, 0), pos = UDim2.new(0, 0, 0, 0), parent = W.TabRow})
+W.TabXYZ = MakeBtn({text = "XYZ", col = T.TxtSec, sz = 11,
+    size = UDim2.new(0, THIRD_W, 1, 0), pos = UDim2.new(0, THIRD_W + GAP, 0, 0), parent = W.TabRow})
+W.TabMore = MakeBtn({text = "MORE", col = T.TxtSec, sz = 11,
+    size = UDim2.new(0, THIRD_W, 1, 0), pos = UDim2.new(0, (THIRD_W + GAP) * 2, 0, 0), parent = W.TabRow})
+
+-- Row 5: status line (shows live coordinates when idle; tap to copy)
+W.Status = U.Button({text = "Ready", col = T.TxtDim, font = T.FontMed, sz = 10, bg = T.Glass, tr = 1,
+    size = UDim2.new(1, 0, 0, 16), z = 13, parent = Body})
+W.Status.TextXAlignment = Enum.TextXAlignment.Left
+W.Status.LayoutOrder = 5
+local StatusUntil = 0
+local function SetStatus(text, col, dur)
+    W.Status.Text = text
+    W.Status.TextColor3 = col or T.TxtDim
+    StatusUntil = os.clock() + (dur or 4)
+end
+
+-- ── Collapsed mini bar: SAVE / GO / OPEN in one tap each
+local MINI_BTN_H = MINI_H - 10
+local MINI_W = 16 + 54 + GAP + 40 + GAP + 48 + 6
+W.Mini = U.Frame({tr = 0.08, size = UDim2.new(0, MINI_W, 0, MINI_H), z = 10, parent = ScreenGui})
+W.Mini.Active = true
+W.Mini.Visible = false
+Glass(W.Mini, 0.10, 0.92, "Glass", 75)
+U.Corner(W.Mini, UDim.new(0, 10))
+W.MiniStroke = U.Stroke(W.Mini, T.Accent, 1.5, 0.35)
+U.Label({text = "::", col = T.TxtDim, font = T.FontBold, sz = 12,
+    size = UDim2.new(0, 14, 1, 0), pos = UDim2.new(0, 2, 0, 0), z = 11, parent = W.Mini})
+W.MiniSave = MakeBtn({text = "SAVE", col = T.Green, sz = 11, z = 12,
+    size = UDim2.new(0, 54, 0, MINI_BTN_H), pos = UDim2.new(0, 16, 0.5, -MINI_BTN_H / 2), parent = W.Mini})
+W.MiniGo = MakeBtn({text = "GO", col = T.Cyan, sz = 12, z = 12,
+    size = UDim2.new(0, 40, 0, MINI_BTN_H), pos = UDim2.new(0, 16 + 54 + GAP, 0.5, -MINI_BTN_H / 2), parent = W.Mini})
+W.MiniOpen = MakeBtn({text = "OPEN", col = T.TxtSec, sz = 11, z = 12,
+    size = UDim2.new(0, 48, 0, MINI_BTN_H), pos = UDim2.new(0, 16 + 54 + GAP + 40 + GAP, 0.5, -MINI_BTN_H / 2), parent = W.Mini})
+
+-- ════════════════════════════════════════════════════════════════
+-- POSITION: clamped to the screen and kept off the center
+-- ════════════════════════════════════════════════════════════════
+local function ActiveSize()
+    if Expanded then
+        local s = Panel.AbsoluteSize
+        if s.X < 10 or s.Y < 10 then return Vector2.new(PANEL_W, 260) end
+        return s
+    end
+    return Vector2.new(MINI_W, MINI_H)
+end
+local function ClampToScreen(pos, size)
+    local ss = ScreenSize()
+    return Vector2.new(
+        math.clamp(pos.X, 4, math.max(4, ss.X - size.X - 4)),
+        math.clamp(pos.Y, 4, math.max(4, ss.Y - size.Y - 4)))
+end
+local function AvoidCenter(pos, size)
+    local ss = ScreenSize()
+    local cx, cy = ss.X / 2, ss.Y / 2
+    local hw, hh = 48, 48
+    if pos.X + size.X > cx - hw and pos.X < cx + hw and pos.Y + size.Y > cy - hh and pos.Y < cy + hh then
+        local leftX, rightX = (cx - hw) - size.X, cx + hw
+        if math.abs(pos.X - leftX) < math.abs(pos.X - rightX) then
+            return Vector2.new(leftX, pos.Y)
+        end
+        return Vector2.new(rightX, pos.Y)
+    end
+    return pos
+end
+local function ApplyPos()
+    local size = ActiveSize()
+    local p = ClampToScreen(PanelPos, size)
+    p = AvoidCenter(p, size)
+    p = ClampToScreen(p, size)
+    p = Vector2.new(math.floor(p.X + 0.5), math.floor(p.Y + 0.5))
+    PanelPos = p
+    Panel.Position = UDim2.fromOffset(p.X, p.Y)
+    W.Mini.Position = UDim2.fromOffset(p.X, p.Y)
+    local ps = Panel.AbsoluteSize
+    if ps.X < 10 or ps.Y < 10 then ps = Vector2.new(PANEL_W, 260) end
+    W.Back.Position = UDim2.fromOffset(p.X, p.Y)
+    W.Back.Size = UDim2.fromOffset(ps.X, ps.Y)
+
+    W.Glow1.Position = UDim2.fromOffset(p.X - 6, p.Y - 6)
+    W.Glow1.Size = UDim2.fromOffset(size.X + 12, size.Y + 12)
+    W.Glow2.Position = UDim2.fromOffset(p.X - 14, p.Y - 14)
+    W.Glow2.Size = UDim2.fromOffset(size.X + 28, size.Y + 28)
+
+    -- 8 short bars forming an L-bracket at each of the panel's 4 corners
+    local bx, by, bw, bh = p.X, p.Y, size.X, size.Y
+    local L, TH, OFF = 14, 2, 3
+    local function Bar(i, x, y, w, h)
+        W.Brackets[i].Position = UDim2.fromOffset(x, y)
+        W.Brackets[i].Size = UDim2.fromOffset(w, h)
+    end
+    Bar(1, bx - OFF, by - OFF, L, TH)
+    Bar(2, bx - OFF, by - OFF, TH, L)
+    Bar(3, bx + bw - L + OFF, by - OFF, L, TH)
+    Bar(4, bx + bw + OFF - TH, by - OFF, TH, L)
+    Bar(5, bx - OFF, by + bh + OFF - TH, L, TH)
+    Bar(6, bx - OFF, by + bh - L + OFF, TH, L)
+    Bar(7, bx + bw - L + OFF, by + bh + OFF - TH, L, TH)
+    Bar(8, bx + bw + OFF - TH, by + bh - L + OFF, TH, L)
+
+    Data.ux, Data.uy = p.X, p.Y
+end
+Track(Panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(ApplyPos))
+
+local function Collapse()
+    Expanded = false
+    Panel.Visible = false
+    W.Back.Visible = false
+    for _, f in ipairs(W.Brackets) do f.Visible = false end
+    W.Mini.Visible = true
+    ApplyPos()
+    Bump()
+end
+local function Expand()
+    Expanded = true
+    W.Mini.Visible = false
+    Panel.Visible = true
+    W.Back.Visible = true
+    for _, f in ipairs(W.Brackets) do f.Visible = true end
+    W.Glow1.Visible = true -- the halo itself stays up behind the mini bar too
+    W.Glow2.Visible = true
+    ApplyPos()
+    Bump()
+end
+
+-- Drag by the title bar (expanded) or the bar itself (collapsed).
+local function MakeDraggable(handle)
+    local dragging, moved = false, false
+    local startInput, startMouse, startPos
+    handle.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        dragging, moved = true, false
+        DraggingNow = true
+        startInput = inp
+        startMouse = Vector2.new(inp.Position.X, inp.Position.Y)
+        startPos = PanelPos
+        Bump()
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End and startInput == inp and dragging then
+                dragging = false
+                DraggingNow = false
+                if moved then Persist() end
+            end
+        end)
+    end)
+    Track(UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == startInput then
+            local delta = Vector2.new(inp.Position.X, inp.Position.Y) - startMouse
+            if not moved and delta.Magnitude > 6 then moved = true end
+            if moved then
+                PanelPos = startPos + delta
+                ApplyPos()
+                Bump()
+            end
+        end
+    end))
+end
+MakeDraggable(Header)
+MakeDraggable(W.Mini)
+Panel.InputBegan:Connect(function(inp)
+    local ut = inp.UserInputType
+    if ut == Enum.UserInputType.MouseButton1 or ut == Enum.UserInputType.Touch then Bump() end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- TELEPORT + SHIELD
+-- SHIELD is what stops a game putting you back, and unlike a position
+-- lock it never pins you in place:
+--  1. Arrival pin: for ~1.4s after a teleport your spot is re-applied
+--     on every frame signal; moving the stick releases it early.
+--  2. Jump rejection: every frame (Stepped, Heartbeat, RenderStepped AND
+--     the instant the root's CFrame changes) your position is compared
+--     with last frame's. A sudden jump you didn't cause is reversed, with
+--     your momentum kept — walking, falling and vehicles are untouched.
+--  3. Pull-back parts: Body movers / constraints the game adds to your
+--     character are destroyed, and anchoring your root is undone.
+--  4. Script hook (executors with hookmetamethod): while SHIELD is on, the
+--     game's own scripts can't move your character via CFrame / PivotTo /
+--     SetPrimaryPartCFrame / Model:MoveTo. Without hook support the
+--     position guard (1-3) still runs.
+-- STEP teleport glides to the spot with collisions off instead of one
+-- big jump, which gets past anti-cheats that flag a single large move.
+-- ════════════════════════════════════════════════════════════════
+local LastOrigin = nil -- where you stood before the most recent teleport (for BACK)
+
+local Shield = {on = false, untilT = 0, lastPos = nil, lastCF = nil, lastT = 0,
+                arrival = nil, fixes = 0, conns = {}, self = false}
+ENV.ApexSaveShield = Shield
+
+local function DurText(sec)
+    if sec < 0 then return "always" end
+    if sec >= 120 then return math.floor(sec / 60) .. "m" end
+    return sec .. "s"
+end
+
+-- Our own moves are marked (Shield.self) so neither the hook nor the
+-- jump detector ever mistakes them for the game's.
+local function ApplyCF(cf, keepVelocity)
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    local vel = root.AssemblyLinearVelocity
+    Shield.self = true
+    local ok = pcall(function() char:PivotTo(cf) end)
+    if not ok then root.CFrame = cf end
+    if keepVelocity then
+        root.AssemblyLinearVelocity = vel
+    else
+        root.AssemblyLinearVelocity = Vector3.zero
+    end
+    root.AssemblyAngularVelocity = Vector3.zero
+    Shield.self = false
+    Shield.lastPos, Shield.lastCF, Shield.lastT = cf.Position, cf, os.clock()
+    return true
+end
+
+local function IsMineInstance(inst)
+    local char = LP.Character
+    if not char then return false end
+    local p, depth = inst, 0
+    while p and depth < 12 do
+        if p == char then return true end
+        p = p.Parent
+        depth = depth + 1
+    end
+    return false
+end
+
+local HookState = ENV.ApexSaveHookState
+if type(HookState) ~= "table" then
+    HookState = {installed = false}
+    ENV.ApexSaveHookState = HookState
+end
+-- Installed lazily (first time SHIELD turns on) so it costs nothing when
+-- unused. The hooks read ENV.ApexSaveShield, so reloading never stacks them.
+local function InstallHooks()
+    if HookState.installed then return end
+    if type(hookmetamethod) ~= "function" or type(checkcaller) ~= "function"
+        or type(newcclosure) ~= "function" or type(getnamecallmethod) ~= "function" then return end
+    local BLOCK = {PivotTo = true, SetPrimaryPartCFrame = true, MoveTo = true, TranslateBy = true}
+    local ROOTS = {HumanoidRootPart = true, Torso = true, UpperTorso = true}
+    local ok = pcall(function()
+        local oldNI
+        oldNI = hookmetamethod(game, "__newindex", newcclosure(function(self, key, value)
+            local sh = ENV.ApexSaveShield
+            if sh and sh.on and not sh.self and (key == "CFrame" or key == "Position")
+                and typeof(self) == "Instance" and ROOTS[self.Name] and not checkcaller()
+                and IsMineInstance(self) then
+                return
+            end
+            return oldNI(self, key, value)
+        end))
+        local oldNC
+        oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local sh = ENV.ApexSaveShield
+            if sh and sh.on and not sh.self then
+                local method = getnamecallmethod()
+                if BLOCK[method] and typeof(self) == "Instance" and not checkcaller()
+                    and IsMineInstance(self) and (method ~= "MoveTo" or self.ClassName == "Model") then
+                    return
+                end
+            end
+            return oldNC(self, ...)
+        end))
+    end)
+    HookState.installed = ok
+end
+
+local FORCE_CLASSES = {
+    BodyPosition = true, BodyVelocity = true, BodyGyro = true, BodyForce = true, BodyThrust = true,
+    BodyAngularVelocity = true, RocketPropulsion = true, AlignPosition = true, AlignOrientation = true,
+    LinearVelocity = true, AngularVelocity = true, VectorForce = true, LineForce = true, Torque = true,
+}
+
+local function ShieldClearConns()
+    for _, c in ipairs(Shield.conns) do pcall(function() c:Disconnect() end) end
+    Shield.conns = {}
+end
+
+local function ShieldTick()
+    if not Shield.on and not Shield.arrival then return end
+    local root = GetRoot()
+    if not root then return end
+    local now = os.clock()
+    local pos = root.Position
+
+    -- 1) arrival pin
+    local arr = Shield.arrival
+    if arr then
+        if now > arr.untilT then
+            Shield.arrival = nil
+        else
+            local hum = GetHum()
+            if arr.releaseOnMove and now - arr.t0 > ARRIVAL_GRACE and hum and hum.MoveDirection.Magnitude > 0.1 then
+                Shield.arrival = nil
+            elseif (pos - arr.cf.Position).Magnitude > PULLBACK_DIST then
+                ApplyCF(arr.cf)
+                arr.fixes = arr.fixes + 1
+                Shield.fixes = Shield.fixes + 1
+                pos = arr.cf.Position
+            end
+        end
+    end
+
+    -- 2) reject sudden jumps we didn't cause (never locks normal movement)
+    if Shield.on and Shield.lastPos and not Shield.arrival then
+        local dt = math.clamp(now - Shield.lastT, 0, 0.25)
+        local allowed = 8 + root.AssemblyLinearVelocity.Magnitude * dt * 2.5
+        if (pos - Shield.lastPos).Magnitude > allowed then
+            ApplyCF(Shield.lastCF, true)
+            Shield.fixes = Shield.fixes + 1
+            pos = Shield.lastCF.Position
+        end
+    end
+
+    Shield.lastPos, Shield.lastCF, Shield.lastT = pos, root.CFrame, now
+end
+Track(RunService.Stepped:Connect(ShieldTick))
+Track(RunService.Heartbeat:Connect(ShieldTick))
+Track(RunService.RenderStepped:Connect(ShieldTick))
+table.insert(ENV.ApexSavePosLoops, {Disconnect = ShieldClearConns})
+
+function Shield.Bind(char)
+    ShieldClearConns()
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if not root then return end
+    local c = Shield.conns
+    c[#c + 1] = root:GetPropertyChangedSignal("CFrame"):Connect(ShieldTick) -- instant reaction
+    c[#c + 1] = root:GetPropertyChangedSignal("Anchored"):Connect(function()
+        if Shield.on and root.Anchored then root.Anchored = false end
+    end)
+    c[#c + 1] = char.DescendantAdded:Connect(function(d)
+        if Shield.on and FORCE_CLASSES[d.ClassName] then pcall(function() d:Destroy() end) end
+    end)
+    Shield.lastPos, Shield.lastCF, Shield.lastT = root.Position, root.CFrame, os.clock()
+end
+
+function Shield.Start(sec)
+    if not Shield.on then Shield.fixes = 0 end
+    Shield.on = true
+    Shield.untilT = (sec < 0) and math.huge or (os.clock() + sec)
+    local root = GetRoot()
+    if root then Shield.lastPos, Shield.lastCF, Shield.lastT = root.Position, root.CFrame, os.clock() end
+    InstallHooks()
+end
+
+function Shield.Stop()
+    Shield.on = false
+    Shield.arrival = nil
+end
+
+function Shield.Arrive(cf, pin)
+    Shield.arrival = {cf = cf, t0 = os.clock(), untilT = os.clock() + (pin and ARRIVAL_SECONDS or 0.35),
+        releaseOnMove = pin, fixes = 0}
+end
+
+-- Glide to the target in small steps, collisions off, instead of one jump.
+local function StepTo(cf, speed, token)
+    local root = GetRoot()
+    local char = LP.Character
+    if not (root and char) then return end
+    local start, goal = root.Position, cf.Position
+    local dur = math.clamp((goal - start).Magnitude / speed, 0.15, 12)
+    local touched = {}
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false; touched[#touched + 1] = p end
+    end
+    local t0 = os.clock()
+    while ENV.ApexSaveHold == token do
+        local a = (os.clock() - t0) / dur
+        if a >= 1 or not GetRoot() then break end
+        ApplyCF(CFrame.new(start:Lerp(goal, a)) * cf.Rotation)
+        RunService.Heartbeat:Wait()
+    end
+    for _, p in ipairs(touched) do
+        if p.Parent then p.CanCollide = true end
+    end
+    if ENV.ApexSaveHold == token then ApplyCF(cf) end
+end
+
+local function TeleportTo(cf, label)
+    local rootNow = GetRoot()
+    if not rootNow then
+        SetStatus("No character yet", T.Red)
+        return false
+    end
+    LastOrigin = rootNow.CFrame
+
+    ENV.ApexSaveHold = ENV.ApexSaveHold + 1
+    local token = ENV.ApexSaveHold
+    local dur = HOLD_OPTIONS[Data.holdIdx] or 0
+    local mode = TP_MODES[Data.tpMode] or TP_MODES[1]
+
+    -- A seated character stays welded to its seat, so stand up first.
+    local hum = GetHum()
+    if hum and hum.SeatPart then hum.Sit = false end
+
+    if dur ~= 0 then Shield.Start(dur) end -- armed BEFORE the move
+
+    task.spawn(function()
+        if mode.speed > 0 then
+            SetStatus("Gliding to " .. label .. " (" .. mode.name .. ")...", T.Yellow)
+            StepTo(cf, mode.speed, token)
+        else
+            ApplyCF(cf)
+        end
+        if ENV.ApexSaveHold ~= token or not GetRoot() then return end
+        Flash()
+        SetStatus("Teleported to " .. label .. ((dur ~= 0) and ("  ·  shield " .. DurText(dur)) or ""), T.Green)
+        Shield.Arrive(cf, dur ~= 0)
+        local arr = Shield.arrival
+        local t0 = os.clock()
+        while ENV.ApexSaveHold == token and Shield.arrival == arr and os.clock() - t0 < ARRIVAL_SECONDS + 0.2 do
+            task.wait(0.05)
+        end
+        if ENV.ApexSaveHold == token and arr and arr.fixes > 0 then
+            SetStatus(("Countered %d pull-back%s at %s — you're free to move"):format(
+                arr.fixes, arr.fixes == 1 and "" or "s", label), T.Yellow)
+        end
+    end)
+    return true
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- SLOT / FOLDER LOGIC
+-- ════════════════════════════════════════════════════════════════
+local Markers, Tour, Share = {labels = {}}, {running = false}, {}
+local RefreshAll, RebuildList, RebuildFolders, OpenEditor, ShowPage, LoadEditor
+
+local function SelectedSlot()
+    return FindSlot(Data.selectedId) or Data.slots[#Data.slots]
+end
+
+local function GoSelected()
+    local slot = SelectedSlot()
+    if not slot then
+        SetStatus("No saved positions yet", T.Yellow)
+        Expand()
+        return
+    end
+    TeleportTo(SlotCF(slot), slot.name)
+end
+
+local function GoBack()
+    if not LastOrigin then
+        SetStatus("No previous spot yet — teleport somewhere first", T.Yellow)
+        return
+    end
+    -- TeleportTo records where you are now, so BACK again swaps you back.
+    TeleportTo(LastOrigin, "your previous spot")
+end
+
+local function GoDeath()
+    if not Data.death then
+        SetStatus("No death recorded yet", T.Yellow)
+        return
+    end
+    TeleportTo(CFrame.new(table.unpack(Data.death.c)), "your last death point")
+end
+
+-- What RETURN should send you to after a respawn.
+local function ReturnTarget()
+    if Data.returnMode == 1 then
+        local slot = SelectedSlot()
+        if slot then return SlotCF(slot), slot.name end
+    elseif Data.returnMode == 2 and Data.death then
+        return CFrame.new(table.unpack(Data.death.c)), "your last death point"
+    end
+    return nil, nil
+end
+
+-- Slots in the current view, favorites first. In NEAR mode each group
+-- is ordered by distance from you; the second return is id -> studs.
+local function VisibleSlots()
+    local favs, rest = {}, {}
+    for _, s in ipairs(Data.slots) do
+        local show
+        if Data.view == "all" then show = true
+        elseif Data.view == "fav" then show = s.fav
+        else show = (s.folder == Data.view) end
+        if show then
+            if s.fav then favs[#favs + 1] = s else rest[#rest + 1] = s end
+        end
+    end
+
+    local dist = nil
+    if Data.sortMode == "near" then
+        local root = GetRoot()
+        if root then
+            dist = {}
+            local here = root.Position
+            for _, group in ipairs({favs, rest}) do
+                for _, s in ipairs(group) do
+                    dist[s.id] = (SlotCF(s).Position - here).Magnitude
+                end
+                table.sort(group, function(a, b) return dist[a.id] < dist[b.id] end)
+            end
+        end
+    end
+
+    if Data.sortMode == "name" then
+        for _, group in ipairs({favs, rest}) do
+            table.sort(group, function(a, b) return string.lower(a.name) < string.lower(b.name) end)
+        end
+    elseif Data.sortMode == "new" then
+        for _, group in ipairs({favs, rest}) do
+            table.sort(group, function(a, b) return a.id > b.id end)
+        end
+    end
+
+    for _, s in ipairs(rest) do favs[#favs + 1] = s end
+    return favs, dist
+end
+
+local function AddSlot(cf, name)
+    local id = Data.nextId
+    Data.nextId = id + 1
+    local pc = PALETTE[(id - 1) % #PALETTE + 1]
+    local slot = {
+        id = id, name = name, c = {cf:GetComponents()},
+        fav = (Data.view == "fav"),
+        icon = ICON_PRESETS[1],
+        color = {pc[1], pc[2], pc[3]},
+        folder = (type(Data.view) == "number") and Data.view or nil,
+    }
+    Data.slots[#Data.slots + 1] = slot
+    Data.selectedId = id
+    return slot
+end
+
+local function SaveHere()
+    local root = GetRoot()
+    if not root then SetStatus("No character to save", T.Red); Expand(); return end
+    local name = CleanName(W.Name.Text, 24)
+    if name == "" then name = NextDefaultName() end
+    local slot = AddSlot(root.CFrame, name)
+    W.Name.Text = ""
+    Persist()
+    RefreshAll()
+    SetStatus("Saved " .. slot.name .. "  (" .. Fmt(root.Position) .. ")", T.Green)
+    task.defer(function()
+        W.List.CanvasPosition = Vector2.new(0, math.max(0, W.List.AbsoluteCanvasSize.Y))
+    end)
+end
+
+local function ReadTypedXYZ()
+    local x, y, z = tonumber(Xy.X.Text), tonumber(Xy.Y.Text), tonumber(Xy.Z.Text)
+    if not (x and y and z) then
+        SetStatus("Enter numbers in X, Y and Z", T.Red)
+        Expand()
+        return nil
+    end
+    local root = GetRoot()
+    -- keep the way you're currently facing
+    local rot = root and root.CFrame.Rotation or CFrame.new()
+    return CFrame.new(x, y, z) * rot, x, y, z
+end
+
+local function GoToTyped()
+    local cf, x, y, z = ReadTypedXYZ()
+    if not cf then return end
+    if not GetRoot() then SetStatus("No character yet", T.Red); return end
+    TeleportTo(cf, string.format("%.1f, %.1f, %.1f", x, y, z))
+end
+
+local function SaveTypedXYZ()
+    local cf, x, y, z = ReadTypedXYZ()
+    if not cf then return end
+    local name = CleanName(W.Name.Text, 24)
+    if name == "" then name = NextDefaultName() end
+    local slot = AddSlot(cf, name)
+    W.Name.Text = ""
+    Persist()
+    RefreshAll()
+    SetStatus("Saved " .. slot.name .. " at " .. string.format("%.1f, %.1f, %.1f", x, y, z), T.Green)
+end
+
+local function DuplicateSlot(slot)
+    local _, idx = FindSlot(slot.id)
+    local id = Data.nextId
+    Data.nextId = id + 1
+    local c = {}
+    for i = 1, 12 do c[i] = slot.c[i] end
+    local copy = {
+        id = id, name = UniqueCopyName(slot.name), c = c, fav = slot.fav,
+        icon = slot.icon, color = {slot.color[1], slot.color[2], slot.color[3]}, folder = slot.folder,
+    }
+    table.insert(Data.slots, (idx or #Data.slots) + 1, copy)
+    Data.selectedId = id
+    return copy
+end
+
+local function DeleteSlot(slot)
+    local _, idx = FindSlot(slot.id)
+    if not idx then return end
+    table.remove(Data.slots, idx)
+    if Data.selectedId == slot.id then
+        local nxt = Data.slots[math.min(idx, #Data.slots)]
+        Data.selectedId = nxt and nxt.id or nil
+    end
+end
+
+local function CreateFolder(name)
+    local id = Data.nextFolderId
+    Data.nextFolderId = id + 1
+    local nm = CleanName(name, 16)
+    if nm == "" then nm = NextFolderName() end
+    Data.folders[#Data.folders + 1] = {id = id, name = nm}
+    Data.view = id
+    return nm
+end
+
+local function CurrentFolder()
+    if type(Data.view) == "number" then return (FindById(Data.folders, Data.view)) end
+    return nil
+end
+
+local function CycleSelection(dir)
+    local list = VisibleSlots()
+    if #list == 0 then SetStatus("No saved positions in this view", T.Yellow); return end
+    local idx = 0
+    for i, s in ipairs(list) do
+        if s.id == Data.selectedId then idx = i; break end
+    end
+    if idx == 0 then
+        idx = (dir > 0) and 1 or #list
+    else
+        idx = ((idx - 1 + dir) % #list) + 1
+    end
+    Data.selectedId = list[idx].id
+    Persist()
+    RebuildList()
+    SetStatus("Selected: " .. list[idx].name, T.Cyan)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- LIST + FOLDER CHIPS
+-- ════════════════════════════════════════════════════════════════
+local STAR_W, ROW_GO_W, ROW_EDIT_W, ICON_W = 24, 38, 36, 26
+
+RebuildList = function()
+    local keepPos = W.List.CanvasPosition
+    for _, ch in ipairs(W.List:GetChildren()) do
+        if ch:IsA("Frame") then ch:Destroy() end
+    end
+    ApplyGlass() -- also prunes registry entries for the rows just destroyed
+    local list, distMap = VisibleSlots()
+    W.Empty.Visible = (#list == 0)
+    W.MoreNote.Visible = (#list > RENDER_CAP)
+    W.Count.Text = tostring(#Data.slots)
+
+    local rowW = INNER - 6
+    local editX = rowW - ROW_EDIT_W - 4
+    local goX = editX - GAP - ROW_GO_W
+    local starX = goX - GAP - STAR_W
+    local textX = 4 + ICON_W + 4
+    local textW = starX - GAP - textX
+    local showCoords = textW >= 84
+
+    for idx, slot in ipairs(list) do
+        if idx > RENDER_CAP then break end
+        local selected = (slot.id == Data.selectedId)
+        local col = ColorOf(slot.color)
+
+        local rf = Instance.new("Frame")
+        rf.Size = UDim2.new(1, -6, 0, ROW_H)
+        rf.BackgroundColor3 = selected and T.BtnSel or T.BtnBase
+        Glass(rf, 0.15, 0.8, selected and "BtnSel" or "BtnBase", 90)
+        rf.BorderSizePixel = 0
+        rf.LayoutOrder = idx
+        rf.ZIndex = 14
+        rf.Parent = W.List
+        U.Corner(rf, UDim.new(0, 6))
+        U.Stroke(rf, selected and T.Accent or T.BorderGlow, selected and 1.75 or 1.25, selected and 0.1 or 0.5)
+
+        local iconBg = U.Frame({bg = col, tr = 0.75, size = UDim2.new(0, ICON_W, 0, ICON_W),
+            pos = UDim2.new(0, 4, 0.5, -ICON_W / 2), z = 15, parent = rf})
+        U.Corner(iconBg, UDim.new(1, 0))
+        U.Stroke(iconBg, col, 1.5, 0.1)
+        do
+            local g = Instance.new("UIGradient")
+            g.Rotation = 90
+            g.Color = Grad2(col)
+            g.Parent = iconBg
+        end
+        U.Label({text = slot.icon, col = col, font = T.FontBold, sz = 14,
+            size = UDim2.new(1, 0, 1, 0), z = 16, parent = iconBg})
+
+        local text = slot.name
+        local second = nil
+        if distMap then
+            second = string.format("%d studs", math.floor(distMap[slot.id] + 0.5))
+            if showCoords then second = second .. "  " .. Fmt(SlotCF(slot).Position) end
+        elseif showCoords then
+            second = Fmt(SlotCF(slot).Position)
+        end
+        if second then
+            text = text .. '\n<font size="10" color="rgb(150,150,185)">' .. second .. '</font>'
+        end
+        local main = U.Button({text = text, col = T.TxtPri, sz = 12, bg = T.Glass, tr = 1,
+            size = UDim2.new(0, textW, 1, 0), pos = UDim2.new(0, textX, 0, 0), z = 15, parent = rf})
+        main.RichText = true
+        main.TextXAlignment = Enum.TextXAlignment.Left
+
+        local starBtn = MakeBtn({text = STAR, col = slot.fav and T.Yellow or T.TxtDim, sz = 14, z = 15,
+            size = UDim2.new(0, STAR_W, 0, 26), pos = UDim2.new(0, starX, 0.5, -13), parent = rf})
+        local goBtn = MakeBtn({text = "GO", col = T.Green, sz = 12, z = 15,
+            size = UDim2.new(0, ROW_GO_W, 0, 28), pos = UDim2.new(0, goX, 0.5, -14), parent = rf})
+        local editBtn = MakeBtn({text = "EDIT", col = T.TxtSec, sz = 10, z = 15,
+            size = UDim2.new(0, ROW_EDIT_W, 0, 28), pos = UDim2.new(0, editX, 0.5, -14), parent = rf})
+
+        main.MouseButton1Click:Connect(function()
+            Bump()
+            Data.selectedId = slot.id
+            Persist()
+            RebuildList()
+        end)
+        starBtn.MouseButton1Click:Connect(function()
+            Bump()
+            slot.fav = not slot.fav
+            Persist()
+            RefreshAll()
+            SetStatus(slot.name .. (slot.fav and " marked favorite" or " removed from favorites"), T.Yellow)
+        end)
+        goBtn.MouseButton1Click:Connect(function()
+            Bump()
+            Data.selectedId = slot.id
+            Persist()
+            RebuildList()
+            TeleportTo(SlotCF(slot), slot.name)
+        end)
+        editBtn.MouseButton1Click:Connect(function()
+            Bump()
+            OpenEditor(slot.id)
+        end)
+    end
+
+    task.defer(function() W.List.CanvasPosition = keepPos end)
+end
+
+RebuildFolders = function()
+    for _, ch in ipairs(W.Folders:GetChildren()) do
+        if ch:IsA("TextButton") then ch:Destroy() end
+    end
+    local order = 0
+    local function AddChip(text, width, isSel, textCol, onClick)
+        order = order + 1
+        local b, st = MakeBtn({text = text, col = isSel and T.Accent or textCol,
+            bg = isSel and T.BtnSel or T.BtnBase, sz = 11,
+            size = UDim2.new(0, width, 0, CHIP_H - 2), parent = W.Folders})
+        b.LayoutOrder = order
+        if isSel then st.Transparency = 0.05; st.Thickness = 1.75 end
+        b.MouseButton1Click:Connect(function() Bump(); onClick() end)
+    end
+
+    AddChip("ALL", 40, Data.view == "all", T.TxtSec, function()
+        Data.view = "all"; Persist(); RefreshAll()
+    end)
+    AddChip(STAR, 34, Data.view == "fav", T.Yellow, function()
+        Data.view = "fav"; Persist(); RefreshAll()
+    end)
+    for _, f in ipairs(Data.folders) do
+        local n = 0
+        for _, s in ipairs(Data.slots) do
+            if s.folder == f.id then n = n + 1 end
+        end
+        local w = math.clamp((utf8.len(f.name) or 6) * 7 + 30, 50, 110)
+        AddChip(f.name .. " " .. n, w, Data.view == f.id, T.TxtSec, function()
+            Data.view = f.id; Persist(); RefreshAll()
+        end)
+    end
+    AddChip("+", 30, false, T.Green, function()
+        local nm = CreateFolder("")
+        Persist(); RefreshAll()
+        SetStatus("Created " .. nm .. " — rename it on the MORE tab", T.Green)
+    end)
+
+    local cur = CurrentFolder()
+    Mo.Box.PlaceholderText = cur and ("Rename: " .. cur.name) or "Folder name"
+end
+
+RefreshAll = function()
+    RebuildFolders()
+    RebuildList()
+    W.Name.PlaceholderText = NextDefaultName()
+    W.Count.Text = tostring(#Data.slots)
+    Markers.Rebuild()
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- PAGES
+-- ════════════════════════════════════════════════════════════════
+local Page = "list"
+local function StyleTab(btn, on)
+    btn.TextColor3 = on and T.Accent or T.TxtSec
+    btn.BackgroundColor3 = on and T.BtnSel or T.BtnBase
+end
+
+ShowPage = function(name)
+    Page = name
+    local editing = (name == "edit")
+    W.List.Visible = (name == "list")
+    W.XYZ.Visible = (name == "xyz")
+    W.More.Visible = (name == "more")
+    W.Edit.Visible = editing
+    W.NameRow.Visible = not editing
+    W.Folders.Visible = not editing
+    W.TabRow.Visible = not editing
+    W.Content.Size = UDim2.new(1, 0, 0, editing and EDIT_H or LIST_H)
+    StyleTab(W.TabList, name == "list")
+    StyleTab(W.TabXYZ, name == "xyz")
+    StyleTab(W.TabMore, name == "more")
+    -- distances are computed when the list is built, so rebuild on entry
+    if name == "list" and Data.sortMode == "near" and RebuildList then RebuildList() end
+    Bump()
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- EDITOR
+-- ════════════════════════════════════════════════════════════════
+local EditingId = nil
+
+local function EditingSlot()
+    return EditingId and FindSlot(EditingId) or nil
+end
+
+local function FolderLabel(slot)
+    if slot.folder then
+        local f = FindById(Data.folders, slot.folder)
+        if f then return f.name end
+    end
+    return "NO FOLDER"
+end
+
+local function RefreshEditorVisuals(slot)
+    local col = ColorOf(slot.color)
+    Ed.Fav.TextColor3 = slot.fav and T.Yellow or T.TxtDim
+    Ed.IconBtn.Text = slot.icon
+    Ed.IconBtn.TextColor3 = col
+    Ed.Folder.Text = FolderLabel(slot)
+    for _, sw in ipairs(Ed.Swatches) do
+        local same = (sw.color[1] == slot.color[1] and sw.color[2] == slot.color[2] and sw.color[3] == slot.color[3])
+        sw.stroke.Transparency = same and 0 or 0.8
+        sw.stroke.Thickness = same and 2.25 or 1.25
+    end
+end
+
+LoadEditor = function(slot)
+    Ed.Name.Text = slot.name
+    Ed.IconBox.Text = slot.icon
+    Ed.Hex.Text = HexOf(slot.color)
+    RefreshEditorVisuals(slot)
+end
+
+OpenEditor = function(id)
+    local slot = FindSlot(id)
+    if not slot then return end
+    EditingId = id
+    Data.selectedId = id
+    LoadEditor(slot)
+    ShowPage("edit")
+end
+
+local function CloseEditor()
+    EditingId = nil
+    Persist()
+    RefreshAll()
+    ShowPage("list")
+end
+
+-- Two-tap guard for destructive buttons.
+local function MakeConfirm(btn, idleText, action)
+    local armed = false
+    btn.MouseButton1Click:Connect(function()
+        Bump()
+        if armed then
+            armed = false
+            btn.Text = idleText
+            action()
+        else
+            armed = true
+            btn.Text = "SURE?"
+            task.delay(2, function()
+                if armed then armed = false; btn.Text = idleText end
+            end)
+        end
+    end)
+end
+
+Ed.Name.FocusLost:Connect(function()
+    local slot = EditingSlot()
+    if not slot then return end
+    local nm = CleanName(Ed.Name.Text, 24)
+    if nm ~= "" then
+        slot.name = nm
+        Persist()
+        SetStatus("Renamed to " .. nm, T.Green)
+    end
+    Ed.Name.Text = slot.name
+end)
+
+Ed.Fav.MouseButton1Click:Connect(function()
+    local slot = EditingSlot()
+    if not slot then return end
+    Bump()
+    slot.fav = not slot.fav
+    Persist()
+    RefreshEditorVisuals(slot)
+end)
+
+Ed.IconBtn.MouseButton1Click:Connect(function()
+    local slot = EditingSlot()
+    if not slot then return end
+    Bump()
+    local idx = 0
+    for i, ic in ipairs(ICON_PRESETS) do
+        if ic == slot.icon then idx = i; break end
+    end
+    slot.icon = ICON_PRESETS[idx % #ICON_PRESETS + 1]
+    Ed.IconBox.Text = slot.icon
+    Persist()
+    RefreshEditorVisuals(slot)
+end)
+
+Ed.IconBox.FocusLost:Connect(function()
+    local slot = EditingSlot()
+    if not slot then return end
+    local ic = FirstChars(Ed.IconBox.Text, 2)
+    if ic then slot.icon = ic; Persist() end
+    Ed.IconBox.Text = slot.icon
+    RefreshEditorVisuals(slot)
+end)
+
+for _, sw in ipairs(Ed.Swatches) do
+    sw.btn.MouseButton1Click:Connect(function()
+        local slot = EditingSlot()
+        if not slot then return end
+        Bump()
+        slot.color = {sw.color[1], sw.color[2], sw.color[3]}
+        Ed.Hex.Text = HexOf(slot.color)
+        Persist()
+        RefreshEditorVisuals(slot)
+    end)
+end
+
+Ed.Hex.FocusLost:Connect(function()
+    local slot = EditingSlot()
+    if not slot then return end
+    local c = ParseHex(Ed.Hex.Text)
+    if c then
+        slot.color = c
+        Persist()
+    else
+        SetStatus("Color must look like #RRGGBB", T.Red)
+    end
+    Ed.Hex.Text = HexOf(slot.color)
+    RefreshEditorVisuals(slot)
+end)
+
+Ed.Folder.MouseButton1Click:Connect(function()
+    local slot = EditingSlot()
+    if not slot then return end
+    Bump()
+    local ids = {false} -- false = no folder
+    for _, f in ipairs(Data.folders) do ids[#ids + 1] = f.id end
+    local idx = 1
+    for i, v in ipairs(ids) do
+        if v == (slot.folder or false) then idx = i end
+    end
+    local nextv = ids[idx % #ids + 1]
+    slot.folder = nextv or nil
+    Persist()
+    RefreshEditorVisuals(slot)
+end)
+
+Ed.Dup.MouseButton1Click:Connect(function()
+    local slot = EditingSlot()
+    if not slot then return end
+    Bump()
+    local copy = DuplicateSlot(slot)
+    Persist()
+    RefreshAll()
+    OpenEditor(copy.id) -- straight into the copy so it can be renamed
+    SetStatus("Duplicated as " .. copy.name .. " — rename it above", T.Cyan)
+end)
+
+MakeConfirm(Ed.Del, "DELETE", function()
+    local slot = EditingSlot()
+    if not slot then return end
+    local nm = slot.name
+    DeleteSlot(slot)
+    CloseEditor()
+    SetStatus("Deleted " .. nm .. " (next default name: " .. NextDefaultName() .. ")", T.TxtSec)
+end)
+
+Ed.Done.MouseButton1Click:Connect(function() Bump(); CloseEditor() end)
+
+-- ════════════════════════════════════════════════════════════════
+-- BUTTON WIRING
+-- ════════════════════════════════════════════════════════════════
+local function HoldText()
+    local s = HOLD_OPTIONS[Data.holdIdx] or 0
+    return (s == 0) and "SHIELD OFF" or ("SHIELD " .. string.upper(DurText(s)))
+end
+local function RefreshToggles()
+    Mo.Hold.Text = HoldText()
+    local holdOn = (HOLD_OPTIONS[Data.holdIdx] or 0) ~= 0
+    Mo.Hold.TextColor3 = holdOn and T.Yellow or T.TxtSec
+    Mo.HoldStroke.Color = holdOn and T.Yellow or T.BorderGlow
+
+    Mo.Return.Text = RETURN_LABELS[Data.returnMode] or "RETURN OFF"
+    local retOn = Data.returnMode > 0
+    Mo.Return.TextColor3 = retOn and T.Green or T.TxtSec
+    Mo.ReturnStroke.Color = retOn and T.Green or T.BorderGlow
+
+    Mo.Sort.Text = "SORT " .. (K.SortLabels[Data.sortMode] or "ORDER")
+    Mo.Sort.TextColor3 = (Data.sortMode ~= "order") and T.Accent or T.TxtSec
+
+    Mo.Markers.Text = Data.markers and "MARKERS ON" or "MARKERS OFF"
+    Mo.Markers.TextColor3 = Data.markers and T.Green or T.TxtSec
+    local au = K.Auto[Data.autoIdx] or 0
+    Mo.Auto.Text = (au == 0) and "AUTO OFF" or ("AUTO " .. au .. "s")
+    Mo.Auto.TextColor3 = (au == 0) and T.TxtSec or T.Yellow
+    Mo.Tour.Text = Tour.running and "STOP TOUR" or "TOUR"
+    Mo.Tour.TextColor3 = Tour.running and T.Red or T.Green
+    Mo.TourGap.Text = "GAP " .. K.TourGaps[Data.tourIdx] .. "s"
+    Mo.TourLoop.Text = Data.tourLoop and "LOOP ON" or "LOOP OFF"
+    Mo.TourLoop.TextColor3 = Data.tourLoop and T.Green or T.TxtSec
+
+    Mo.Fx.Text = Data.fx and "FX ON" or "FX OFF"
+    Mo.Fx.TextColor3 = Data.fx and T.Green or T.TxtSec
+
+    Mo.Theme.Text = ACCENTS[Data.accent].name
+    Mo.Theme.TextColor3 = T.Accent
+    Mo.Back.TextColor3 = T.Accent
+
+    local tm = TP_MODES[Data.tpMode] or TP_MODES[1]
+    Mo.TpMode.Text = tm.name
+    Mo.TpMode.TextColor3 = (tm.speed > 0) and T.Yellow or T.TxtSec
+end
+
+-- Glass slider: how see-through the whole GUI is.
+local function SetGlass(v)
+    Data.glass = math.clamp(v, GLASS_MIN, 1)
+    local t = (Data.glass - GLASS_MIN) / (1 - GLASS_MIN)
+    Mo.Fill.Size = UDim2.new(t, 0, 1, 0)
+    Mo.Knob.Position = UDim2.new(t, -8, 0.5, -8)
+    Mo.GlassLabel.Text = "GLASS " .. math.floor(Data.glass * 100 + 0.5) .. "%"
+    ApplyGlass()
+end
+local function GlassFromX(x)
+    local w = Mo.SliderHit.AbsoluteSize.X
+    if w <= 0 then return end
+    local t = math.clamp((x - Mo.SliderHit.AbsolutePosition.X - 4) / (w - 8), 0, 1)
+    SetGlass(GLASS_MIN + t * (1 - GLASS_MIN))
+end
+local glassActive, glassInput = false, nil
+Mo.SliderHit.InputBegan:Connect(function(inp)
+    local ut = inp.UserInputType
+    if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+    glassActive = true
+    glassInput = inp
+    DraggingNow = true -- keeps auto-minimize from firing mid-drag
+    Bump()
+    GlassFromX(inp.Position.X)
+    inp.Changed:Connect(function()
+        if inp.UserInputState == Enum.UserInputState.End then
+            glassActive = false
+            DraggingNow = false
+            Persist()
+        end
+    end)
+end)
+Track(UserInputService.InputChanged:Connect(function(inp)
+    if not glassActive then return end
+    if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == glassInput then
+        GlassFromX(inp.Position.X)
+        Bump()
+    end
+end))
+
+-- Accent theme: recolors the always-visible pieces; rows/chips pick it
+-- up when they are rebuilt.
+local function ApplyTheme()
+    SetThemeColors()
+    -- recolor every translucent piece with the new tone...
+    for _, g in ipairs(GlassItems) do
+        if g.inst.Parent then
+            g.inst.BackgroundColor3 = T[g.key]
+            if g.gradient then g.gradient.Color = Grad2(T[g.key]) end
+        end
+    end
+    W.Title.TextColor3 = T.Accent
+    W.TitleDot.BackgroundColor3 = T.Accent
+    W.PanelStroke.Color = T.Accent
+    W.MiniStroke.Color = T.Accent
+    W.HeaderLine.BackgroundColor3 = T.Accent
+    W.HeaderLineGrad.Color = ColorSequence.new(T.Accent)
+    W.Glow1.BackgroundColor3 = T.Accent
+    W.Glow2.BackgroundColor3 = T.Accent
+    for _, f in ipairs(W.Brackets) do f.BackgroundColor3 = T.Accent end
+    Mo.Fill.BackgroundColor3 = T.Accent
+    -- ...and swap the animated scene
+    Fx.RebuildAll()
+    ShowPage(Page) -- restyles tabs (and refreshes the list in NEAR mode)
+end
+
+W.Collapse.MouseButton1Click:Connect(function() Collapse() end)
+W.MiniOpen.MouseButton1Click:Connect(function() Expand() end)
+W.MiniSave.MouseButton1Click:Connect(function() Bump(); SaveHere() end)
+W.MiniGo.MouseButton1Click:Connect(function() Bump(); GoSelected() end)
+W.Save.MouseButton1Click:Connect(function() Bump(); SaveHere() end)
+W.TabList.MouseButton1Click:Connect(function()
+    if Page == "list" then RebuildList() else ShowPage("list") end -- tapping again refreshes distances
+end)
+W.TabXYZ.MouseButton1Click:Connect(function() ShowPage("xyz") end)
+W.TabMore.MouseButton1Click:Connect(function() ShowPage("more") end)
+Xy.Go.MouseButton1Click:Connect(function() Bump(); GoToTyped() end)
+Xy.SaveXYZ.MouseButton1Click:Connect(function() Bump(); SaveTypedXYZ() end)
+
+Mo.Hold.MouseButton1Click:Connect(function()
+    Bump()
+    Data.holdIdx = Data.holdIdx % #HOLD_OPTIONS + 1
+    Persist()
+    RefreshToggles()
+    local sec = HOLD_OPTIONS[Data.holdIdx]
+    if sec == 0 then
+        Shield.Stop()
+        SetStatus("Shield OFF — plain teleport", T.TxtSec)
+    else
+        Shield.Start(sec) -- starts now so you can see it working in the header
+        SetStatus("Shield " .. DurText(sec) .. " — game teleports are undone, you can still move"
+            .. (HookState.installed and " (script hook ON)" or " (position guard only)"), T.Yellow)
+    end
+end)
+
+Mo.TpMode.MouseButton1Click:Connect(function()
+    Bump()
+    Data.tpMode = Data.tpMode % #TP_MODES + 1
+    Persist()
+    RefreshToggles()
+    local m = TP_MODES[Data.tpMode]
+    SetStatus(m.speed == 0 and "Instant teleport"
+        or ("Glides at " .. m.speed .. " studs/s with collisions off — passes anti-cheats that flag one big jump"), T.Yellow)
+end)
+
+Mo.Return.MouseButton1Click:Connect(function()
+    Bump()
+    Data.returnMode = (Data.returnMode + 1) % 3
+    Persist()
+    RefreshToggles()
+    if Data.returnMode == 0 then
+        SetStatus("Respawn return OFF", T.TxtSec)
+    elseif Data.returnMode == 1 then
+        SetStatus("After you respawn: teleport to the selected slot", T.Green)
+    else
+        SetStatus("After you respawn: teleport to where you died", T.Green)
+    end
+end)
+
+Mo.Back.MouseButton1Click:Connect(function() Bump(); GoBack() end)
+Mo.Death.MouseButton1Click:Connect(function() Bump(); GoDeath() end)
+Mo.Sort.MouseButton1Click:Connect(function()
+    Bump()
+    local idx = 1
+    for i, m in ipairs(K.SortCycle) do
+        if m == Data.sortMode then idx = i end
+    end
+    Data.sortMode = K.SortCycle[idx % #K.SortCycle + 1]
+    Persist()
+    RefreshToggles()
+    RefreshAll()
+    SetStatus("Sort: " .. K.SortLabels[Data.sortMode]
+        .. (Data.sortMode == "near" and " — tap SLOTS to refresh distances" or ""), T.TxtSec)
+end)
+Mo.Fx.MouseButton1Click:Connect(function()
+    Bump()
+    Data.fx = not Data.fx
+    Persist()
+    RefreshToggles()
+    Fx.RebuildAll() -- starts or stops the animated scenes
+    if Data.fx then Flash() end
+    SetStatus(Data.fx and "Theme animations + teleport effects ON" or "Effects OFF (the glass tint stays)", T.TxtSec)
+end)
+Mo.Theme.MouseButton1Click:Connect(function()
+    Bump()
+    Data.accent = Data.accent % #ACCENTS + 1
+    ApplyTheme()
+    Persist()
+    RefreshToggles()
+    RefreshAll()
+    Flash()
+    SetStatus("Theme: " .. ACCENTS[Data.accent].name, T.Accent)
+end)
+
+-- Folder tools act on whichever folder chip is currently selected.
+Mo.New.MouseButton1Click:Connect(function()
+    Bump()
+    local nm = CreateFolder(Mo.Box.Text)
+    Mo.Box.Text = ""
+    Persist()
+    RefreshAll()
+    SetStatus("Created " .. nm, T.Green)
+end)
+Mo.Ren.MouseButton1Click:Connect(function()
+    Bump()
+    local f = CurrentFolder()
+    if not f then SetStatus("Select a folder chip first", T.Yellow); return end
+    local nm = CleanName(Mo.Box.Text, 16)
+    if nm == "" then SetStatus("Type the new folder name first", T.Yellow); return end
+    f.name = nm
+    Mo.Box.Text = ""
+    Persist()
+    RefreshAll()
+    SetStatus("Renamed folder to " .. nm, T.Green)
+end)
+MakeConfirm(Mo.Del, "DEL", function()
+    local f = CurrentFolder()
+    if not f then SetStatus("Select a folder chip first", T.Yellow); return end
+    for _, s in ipairs(Data.slots) do
+        if s.folder == f.id then s.folder = nil end -- positions are kept, just un-filed
+    end
+    local _, idx = FindById(Data.folders, f.id)
+    table.remove(Data.folders, idx)
+    Data.view = "all"
+    Persist()
+    RefreshAll()
+    SetStatus("Deleted folder " .. f.name .. " (its positions were kept)", T.TxtSec)
+end)
+
+Mo.Markers.MouseButton1Click:Connect(function()
+    Bump()
+    Data.markers = not Data.markers
+    Persist()
+    Markers.Rebuild()
+    RefreshToggles()
+    SetStatus(Data.markers and "Markers ON — beams + distances at the positions in this view" or "Markers OFF", T.TxtSec)
+end)
+Mo.Auto.MouseButton1Click:Connect(function()
+    Bump()
+    Data.autoIdx = Data.autoIdx % #K.Auto + 1
+    Persist()
+    RefreshToggles()
+    local secs = K.Auto[Data.autoIdx]
+    SetStatus(secs == 0 and "Auto checkpoint OFF"
+        or ("Auto checkpoint every " .. secs .. "s into a slot named Auto"), T.TxtSec)
+end)
+Mo.Nearest.MouseButton1Click:Connect(function() Bump(); Tour.GoNearest() end)
+Mo.Tour.MouseButton1Click:Connect(function()
+    Bump()
+    if Tour.running then
+        Tour.Stop()
+        RefreshToggles()
+        SetStatus("Tour stopped", T.TxtSec)
+    else
+        Tour.Start()
+        RefreshToggles()
+    end
+end)
+Mo.TourGap.MouseButton1Click:Connect(function()
+    Bump()
+    Data.tourIdx = Data.tourIdx % #K.TourGaps + 1
+    Persist()
+    RefreshToggles()
+end)
+Mo.TourLoop.MouseButton1Click:Connect(function()
+    Bump()
+    Data.tourLoop = not Data.tourLoop
+    Persist()
+    RefreshToggles()
+end)
+Mo.Export.MouseButton1Click:Connect(function()
+    Bump()
+    local text = Share.Export()
+    local fn = setclipboard or toclipboard
+    if type(fn) == "function" then
+        pcall(fn, text)
+        SetStatus("Copied " .. #Data.slots .. " position(s) — paste them anywhere", T.Cyan)
+    else
+        Mo.ShareBox.Text = text
+        SetStatus("No clipboard here — copy the text from the box", T.TxtSec)
+    end
+end)
+Mo.Import.MouseButton1Click:Connect(function()
+    Bump()
+    local text = Mo.ShareBox.Text
+    if text == "" then
+        local get = getclipboard or fromclipboard
+        if type(get) == "function" then
+            local ok, v = pcall(get)
+            if ok then text = v end
+        end
+    end
+    local n, err = Share.Import(text)
+    if n > 0 then
+        Mo.ShareBox.Text = ""
+        Persist()
+        RefreshAll()
+        SetStatus("Imported " .. n .. " position(s)", T.Green)
+    else
+        SetStatus(err or "Nothing to import", T.Red)
+    end
+end)
+
+W.Status.MouseButton1Click:Connect(function()
+    Bump()
+    local root = GetRoot()
+    if not root then return end
+    local p = root.Position
+    local s = string.format("%.2f, %.2f, %.2f", p.X, p.Y, p.Z)
+    local fn = setclipboard or toclipboard
+    if type(fn) == "function" then
+        pcall(fn, s)
+        SetStatus("Copied: " .. s, T.Cyan)
+    else
+        SetStatus("Clipboard not available in this executor", T.TxtSec)
+    end
+end)
+Xy.Copy.MouseButton1Click:Connect(function()
+    Bump()
+    local root = GetRoot()
+    if not root then return end
+    local p = root.Position
+    local s = string.format("%.2f, %.2f, %.2f", p.X, p.Y, p.Z)
+    local fn = setclipboard or toclipboard
+    if type(fn) == "function" then
+        pcall(fn, s)
+        SetStatus("Copied: " .. s, T.Cyan)
+    else
+        SetStatus("Clipboard not available in this executor", T.TxtSec)
+    end
+end)
+Xy.Fill.MouseButton1Click:Connect(function()
+    Bump()
+    local root = GetRoot()
+    if not root then return end
+    local p = root.Position
+    Xy.X.Text = string.format("%.1f", p.X)
+    Xy.Y.Text = string.format("%.1f", p.Y)
+    Xy.Z.Text = string.format("%.1f", p.Z)
+end)
+
+-- Paste "x, y, z" into the X box and it spreads across all three.
+local function ParseNumbers(str)
+    local nums = {}
+    for n in string.gmatch(str, "%-?%d+%.?%d*") do
+        nums[#nums + 1] = tonumber(n)
+    end
+    return nums
+end
+Xy.X.FocusLost:Connect(function()
+    local nums = ParseNumbers(Xy.X.Text)
+    if #nums >= 3 then
+        Xy.X.Text = tostring(nums[1])
+        Xy.Y.Text = tostring(nums[2])
+        Xy.Z.Text = tostring(nums[3])
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- LOOPS + INPUT
+-- ════════════════════════════════════════════════════════════════
+-- Idle status line shows live coordinates; messages hold for a few seconds.
+local posLoop = task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if os.clock() > StatusUntil then
+            local r = GetRoot()
+            local comp = r and Tour.Compass(r)
+            W.Status.Text = r and (comp and (comp .. "   (tap: copy my coords)")
+                or ("pos " .. Fmt(r.Position) .. "  (tap to copy)")) or "no character"
+            W.Status.TextColor3 = T.TxtDim
+        end
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(posLoop) end})
+
+-- ── WORLD MARKERS: a glowing beam + name + live distance at every saved
+-- position in the current view (local only, nobody else sees them).
+function Markers.Clear()
+    if Markers.folder then pcall(function() Markers.folder:Destroy() end) end
+    Markers.folder = nil
+    Markers.labels = {}
+end
+function Markers.Rebuild()
+    Markers.Clear()
+    if not Data.markers then return end
+    local folder = Instance.new("Folder")
+    folder.Name = "ApexSaveMarkers"
+    folder.Parent = workspace
+    Markers.folder = folder
+    ENV.ApexSaveMarkerFolder = folder
+    for i, slot in ipairs((VisibleSlots())) do
+        if i > 30 then break end
+        local col = ColorOf(slot.color)
+        local pos = SlotCF(slot).Position
+        local anchor = Instance.new("Part")
+        anchor.Anchored = true; anchor.CanCollide = false; anchor.CanQuery = false; anchor.CanTouch = false
+        anchor.Transparency = 1; anchor.Size = Vector3.new(0.4, 0.4, 0.4)
+        anchor.Position = pos + Vector3.new(0, 4, 0)
+        anchor.Parent = folder
+        local beam = Instance.new("Part")
+        beam.Anchored = true; beam.CanCollide = false; beam.CanQuery = false; beam.CanTouch = false
+        beam.CastShadow = false; beam.Material = Enum.Material.Neon; beam.Color = col
+        beam.Transparency = 0.5; beam.Size = Vector3.new(0.3, 16, 0.3)
+        beam.Position = pos + Vector3.new(0, 7, 0)
+        beam.Parent = folder
+        local bb = Instance.new("BillboardGui")
+        bb.Adornee = anchor; bb.AlwaysOnTop = true; bb.Size = UDim2.new(0, 130, 0, 36)
+        bb.StudsOffset = Vector3.new(0, 1, 0); bb.MaxDistance = 1500; bb.Parent = anchor
+        local lbl = Instance.new("TextLabel")
+        lbl.BackgroundTransparency = 1; lbl.Size = UDim2.new(1, 0, 1, 0)
+        lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 12; lbl.TextColor3 = col
+        lbl.TextStrokeTransparency = 0.4; lbl.Text = slot.icon .. " " .. slot.name; lbl.Parent = bb
+        Markers.labels[#Markers.labels + 1] = {lbl = lbl, pos = pos, name = slot.name, icon = slot.icon}
+    end
+end
+table.insert(ENV.ApexSavePosLoops, {Disconnect = Markers.Clear})
+local markerLoop = task.spawn(function()
+    while true do
+        task.wait(0.3)
+        local root = Data.markers and GetRoot()
+        if root then
+            for _, m in ipairs(Markers.labels) do
+                m.lbl.Text = m.icon .. " " .. m.name .. "\n" .. math.floor((m.pos - root.Position).Magnitude + 0.5) .. " studs"
+            end
+        end
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(markerLoop) end})
+
+-- ── TOUR: visit every position in the current view, in order
+function Tour.Stop()
+    Tour.running = false
+    ENV.ApexSaveTour = ENV.ApexSaveTour + 1
+end
+function Tour.Start()
+    local list = VisibleSlots()
+    if #list == 0 then SetStatus("Nothing to tour in this view", T.Yellow); return end
+    Tour.running = true
+    ENV.ApexSaveTour = ENV.ApexSaveTour + 1
+    local token = ENV.ApexSaveTour
+    task.spawn(function()
+        local i = 1
+        while Tour.running and ENV.ApexSaveTour == token do
+            local slot = list[i]
+            if not FindSlot(slot.id) then break end
+            Data.selectedId = slot.id
+            TeleportTo(SlotCF(slot), slot.name .. " (" .. i .. "/" .. #list .. ")")
+            task.wait(K.TourGaps[Data.tourIdx] or 3)
+            i = i + 1
+            if i > #list then
+                if Data.tourLoop then i = 1 else break end
+            end
+        end
+        if ENV.ApexSaveTour == token then
+            Tour.running = false
+            SetStatus("Tour finished", T.TxtSec)
+        end
+        RefreshToggles()
+        RebuildList()
+    end)
+end
+function Tour.GoNearest()
+    local root = GetRoot()
+    if not root or #Data.slots == 0 then SetStatus("No saved positions", T.Yellow); return end
+    local best, bd
+    for _, sl in ipairs(Data.slots) do
+        local d = (SlotCF(sl).Position - root.Position).Magnitude
+        if d > 3 and (not bd or d < bd) then best, bd = sl, d end -- skip the spot you're standing on
+    end
+    if not best then SetStatus("You're already at the only position", T.Yellow); return end
+    Data.selectedId = best.id
+    TeleportTo(SlotCF(best), best.name .. " (nearest)")
+    RebuildList()
+end
+-- direction (relative to your camera) and distance to the selected slot
+function Tour.Compass(root)
+    local slot = SelectedSlot()
+    if not slot then return nil end
+    local d = SlotCF(slot).Position - root.Position
+    local cam = workspace.CurrentCamera
+    local arrow = ""
+    if cam then
+        local look = cam.CFrame.LookVector
+        local fwd = look.X * d.X + look.Z * d.Z
+        local rgt = -look.Z * d.X + look.X * d.Z
+        local idx = math.floor(math.atan2(rgt, fwd) / (math.pi / 4) + 0.5) % 8
+        arrow = K.Arrows[idx + 1] .. " "
+    end
+    return arrow .. slot.name .. "  " .. math.floor(d.Magnitude + 0.5) .. " studs"
+end
+
+-- ── SHARE: export every position as text, import it back (or from a friend)
+function Share.Export()
+    local out = {}
+    for _, sl in ipairs(Data.slots) do
+        local fname
+        if sl.folder then
+            local f = FindById(Data.folders, sl.folder)
+            fname = f and f.name
+        end
+        out[#out + 1] = {name = sl.name, c = sl.c, fav = sl.fav, icon = sl.icon, color = sl.color, folder = fname}
+    end
+    return "APEXPOS1:" .. HttpService:JSONEncode({slots = out})
+end
+function Share.Import(text)
+    local t = tostring(text or "")
+    t = t:gsub("^%s+", "")
+    local body = t:match("^APEXPOS1:(.+)$") or t
+    local ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok or type(decoded) ~= "table" or type(decoded.slots) ~= "table" then
+        return 0, "That doesn't look like exported positions"
+    end
+    local added = 0
+    for _, sl in ipairs(decoded.slots) do
+        if ValidSlot(sl) then
+            local folderId
+            local fn = CleanName(sl.folder, 16)
+            if fn ~= "" then
+                for _, f in ipairs(Data.folders) do
+                    if f.name == fn then folderId = f.id end
+                end
+                if not folderId then
+                    folderId = Data.nextFolderId
+                    Data.nextFolderId = folderId + 1
+                    Data.folders[#Data.folders + 1] = {id = folderId, name = fn}
+                end
+            end
+            local id = Data.nextId
+            Data.nextId = id + 1
+            local pc = PALETTE[(id - 1) % #PALETTE + 1]
+            local nm = CleanName(sl.name, 24)
+            Data.slots[#Data.slots + 1] = {
+                id = id, name = (nm ~= "") and nm or NextDefaultName(), c = {table.unpack(sl.c, 1, 12)},
+                fav = (sl.fav == true), icon = FirstChars(sl.icon, 2) or ICON_PRESETS[1],
+                color = ValidColor(sl.color) and {sl.color[1], sl.color[2], sl.color[3]} or {pc[1], pc[2], pc[3]},
+                folder = folderId,
+            }
+            added = added + 1
+        end
+    end
+    return added, nil
+end
+
+-- ── AUTO checkpoint: one rolling slot named "Auto", refreshed while you're
+-- standing on something (so it never records a mid-air or void spot)
+local autoLoop = task.spawn(function()
+    local last = os.clock()
+    while true do
+        task.wait(2)
+        local secs = K.Auto[Data.autoIdx] or 0
+        local hum, root = GetHum(), GetRoot()
+        if secs > 0 and os.clock() - last >= secs and hum and root
+            and hum.Health > 0 and hum.FloorMaterial ~= Enum.Material.Air then
+            last = os.clock()
+            local comps = {root.CFrame:GetComponents()}
+            local slot
+            for _, sl in ipairs(Data.slots) do
+                if sl.name == "Auto" then slot = sl; break end
+            end
+            if slot then
+                slot.c = comps
+            else
+                local id = Data.nextId
+                Data.nextId = id + 1
+                Data.slots[#Data.slots + 1] = {id = id, name = "Auto", c = comps, fav = false,
+                    icon = "A", color = {160, 170, 190}, folder = nil}
+            end
+            Persist()
+            if not Expanded or os.clock() - LastInteract > 3 then RefreshAll() end
+            SetStatus("Auto checkpoint saved", T.TxtSec, 2)
+        end
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(autoLoop) end})
+
+-- SHIELD countdown in the header; ends the shield when its time is up.
+local shieldLoop = task.spawn(function()
+    while true do
+        task.wait(0.25)
+        if Shield.on then
+            local now = os.clock()
+            if Shield.untilT ~= math.huge and now >= Shield.untilT then
+                Shield.Stop()
+                W.ShieldLabel.Text = ""
+                SetStatus("Shield ended", T.TxtSec)
+            else
+                local t = "SHIELD " .. ((Shield.untilT == math.huge) and "ON" or (math.ceil(Shield.untilT - now) .. "s"))
+                if Shield.fixes > 0 then t = t .. " x" .. Shield.fixes end
+                W.ShieldLabel.Text = t
+            end
+        elseif W.ShieldLabel.Text ~= "" then
+            W.ShieldLabel.Text = ""
+        end
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(shieldLoop) end})
+
+-- Auto-minimize when idle (never while dragging or typing).
+local idleLoop = task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if Expanded and not DraggingNow and not UserInputService:GetFocusedTextBox()
+            and os.clock() - LastInteract > AUTO_COLLAPSE_AFTER then
+            Collapse()
+        end
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(idleLoop) end})
+
+-- Death point: remember the last place you were STANDING on something,
+-- not the void you fell into, so going back to it is actually useful.
+local LastSafeCF = nil
+local safeLoop = task.spawn(function()
+    while true do
+        task.wait(0.3)
+        local char = LP.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if hum and root and hum.Health > 0 and hum.FloorMaterial ~= Enum.Material.Air then
+            LastSafeCF = root.CFrame
+        end
+    end
+end)
+table.insert(ENV.ApexSavePosLoops, {Disconnect = function() task.cancel(safeLoop) end})
+
+local function WatchCharacter(char)
+    local hum = char:WaitForChild("Humanoid", 10)
+    if not hum then return end
+    hum.Died:Connect(function()
+        local cf = LastSafeCF
+        if not cf then
+            local r = char:FindFirstChild("HumanoidRootPart")
+            cf = r and r.CFrame
+        end
+        if cf then
+            Data.death = {c = {cf:GetComponents()}}
+            Persist()
+            SetStatus("Death point saved — MORE tab, DEATH to return", T.TxtSec)
+        end
+    end)
+end
+
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    local k = inp.KeyCode
+    if k == Enum.KeyCode.K then
+        SaveHere()
+    elseif k == Enum.KeyCode.L then
+        GoSelected()
+    elseif k == Enum.KeyCode.P then
+        if Expanded then Collapse() else Expand() end
+    elseif k == Enum.KeyCode.B then
+        GoBack()
+    elseif k == Enum.KeyCode.N then
+        Tour.GoNearest()
+    elseif k == Enum.KeyCode.LeftBracket then
+        CycleSelection(-1)
+    elseif k == Enum.KeyCode.RightBracket then
+        CycleSelection(1)
+    end
+end))
+
+-- After a respawn, optionally teleport straight back to the selected slot.
+Track(LP.CharacterAdded:Connect(function(char)
+    ENV.ApexSaveHold = ENV.ApexSaveHold + 1 -- cancel any hold on the old character
+    Shield.Stop() -- let the game place the new spawn first
+    Tour.Stop()
+    task.spawn(Shield.Bind, char)
+    if HOLD_OPTIONS[Data.holdIdx] == -1 then
+        task.delay(2.5, function()
+            if LP.Character == char then Shield.Start(-1) end
+        end)
+    end
+    task.spawn(WatchCharacter, char)
+    if Data.returnMode == 0 then return end
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if not root then return end
+    task.wait(0.6) -- let the game place the spawn first
+    local cf, label = ReturnTarget()
+    if cf then TeleportTo(cf, label) end
+end))
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+RefreshToggles()
+SetGlass(Data.glass)
+RefreshAll()
+ShowPage("list")
+ApplyPos()
+task.defer(ApplyPos)
+if LP.Character then
+    task.spawn(WatchCharacter, LP.Character)
+    task.spawn(Shield.Bind, LP.Character)
+end
+if HOLD_OPTIONS[Data.holdIdx] == -1 then Shield.Start(-1) end
+SetStatus(CanFiles() and "Ready — saves persist between sessions" or "Ready — saves last until you leave the game", T.TxtDim)
+
+print("[ApexSavePosition v7] Loaded. " .. #Data.slots .. " saved position(s).")
+print("  Themes tint the glass and animate: OCEAN waves, GALAXY stars, MATRIX 1010 rain, EMBER sparks, SAKURA cherry trees, FROST snow.")
+print("  PC keys: K save, L go, B back, [ and ] previous/next slot, P panel.")
+
+Loader.Finish({
+    {0.15, "Saved positions: " .. #Data.slots .. "   ·   folders: " .. #Data.folders},
+    {0.35, CanFiles() and "File saves ON — positions persist between sessions" or "File saves OFF — positions last until you leave"},
+    {0.55, "Teleport " .. HoldText() .. "   ·   " .. RETURN_LABELS[Data.returnMode]},
+    {0.78, "Theme " .. ACCENTS[Data.accent].name .. "   ·   glass " .. math.floor(Data.glass * 100 + 0.5) .. "%"},
+    {1.0, "Ready"},
+}, function()
+    Expand()
+    task.defer(ApplyPos)
+end)
