@@ -1,0 +1,675 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX CONSTELLATION  ·  v1                                     ║
+╠══════════════════════════════════════════════════════════════╣
+║   Up to 450 glowing particles that assemble into living shapes     ║
+║   and flow from one to the next:                                    ║
+║   SWORD · WINGS · GALAXY · ATOM · HELIX · HALO · HEART · SATURN       ║
+║                                                                        ║
+║   MORPH  Pick a shape and every particle streams to its new spot        ║
+║          with a staggered swirl — it never just pops.                    ║
+║   MODES  BACK (wings on your back) · AIM (a sigil in front of you,        ║
+║          where the camera looks) · ORBIT (circles you) · ABOVE (flat,       ║
+║          spinning over your head) · AURA (wraps around you).                ║
+║   SLASH  Swings the whole shape through an arc with a white flash.            ║
+║   PULSE  Bursts it outward and back.                                           ║
+║   LOOK   6 palettes (AURORA, EMBER, ICE, VOID, RAINBOW, GOLD), comet            ║
+║          trails, a soft light, and optional screen bloom.                        ║
+║   KEYS   Q / E previous / next shape · R slash · F pulse · H show/hide · Y panel   ║
+║                                                                                    ║
+║   Everything is built from its OWN client-side parts — it never touches the         ║
+║   game's parts or other players. Only you can see it.                                 ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting         = game:GetService("Lighting")
+local Workspace        = game:GetService("Workspace")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexConstGui then pcall(function() ENV.ApexConstGui:Destroy() end) end
+if ENV.ApexConstFolder then pcall(function() ENV.ApexConstFolder:Destroy() end) end
+if ENV.ApexConstBloom then pcall(function() ENV.ApexConstBloom:Destroy() end) end
+if ENV.ApexConstLoops then
+    for _, c in pairs(ENV.ApexConstLoops) do pcall(function() c:Disconnect() end) end
+end
+ENV.ApexConstLoops = {}
+local function Track(c) table.insert(ENV.ApexConstLoops, c); return c end
+
+-- ════════════════════════════════════════════════════════════════
+-- SETTINGS
+-- ════════════════════════════════════════════════════════════════
+local SHAPE_NAMES  = {"SWORD", "WINGS", "GALAXY", "ATOM", "HELIX", "HALO", "HEART", "SATURN"}
+local MODES        = {"BACK", "AIM", "ORBIT", "ABOVE", "AURA"}
+local DEFAULT_MODE = {3, 1, 4, 2, 5, 4, 2, 3} -- the mode each shape looks best in
+local PALETTES     = {"AURORA", "EMBER", "ICE", "VOID", "RAINBOW", "GOLD"}
+local COUNTS       = {150, 300, 450}
+local SIZES        = {5, 7, 9, 12, 16}        -- studs per shape unit
+local SPINS        = {{"OFF", 0}, {"SLOW", 25}, {"MED", 60}, {"FAST", 120}}
+local MAX_PARTS    = 450
+
+local S = ENV.ApexConstSettings
+if type(S) ~= "table" then
+    S = {shape = 1, mode = 3, palette = 1, countIdx = 2, sizeIdx = 2, spinIdx = 2,
+         glow = true, trails = true, shown = true}
+    ENV.ApexConstSettings = S
+end
+
+local TAU = math.pi * 2
+local V3  = Vector3.new
+
+-- deterministic pseudo-random in [0, 1)
+local function H(i, k)
+    local v = math.sin(i * 12.9898 + k * 78.233) * 43758.5453
+    return v - math.floor(v)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- SHAPES — each returns a point in shape units (roughly -1..1) for
+-- particle i of n. Drawn in the XY plane, a little depth in Z.
+-- ════════════════════════════════════════════════════════════════
+local Shapes = {}
+Shapes.lanes = {-1, 1, -0.5, 0.5, 0}
+Shapes.orbits = {
+    CFrame.Angles(0, 0, 0),
+    CFrame.Angles(math.pi / 3, 0, math.pi / 3),
+    CFrame.Angles(-math.pi / 3, 0, -math.pi / 3),
+}
+Shapes.tilt = CFrame.Angles(math.rad(22), 0, math.rad(-18))
+
+Shapes.SWORD = function(i, n)
+    local f = (i - 1) / math.max(1, n - 1)
+    if f < 0.07 then -- pommel ring
+        local a = (f / 0.07) * TAU
+        return V3(math.cos(a) * 0.08, -0.93 + math.sin(a) * 0.08, 0)
+    elseif f < 0.15 then -- wrapped grip
+        local t = (f - 0.07) / 0.08
+        return V3(math.sin(t * 18) * 0.03, -0.84 + t * 0.24, math.cos(t * 18) * 0.03)
+    elseif f < 0.33 then -- curved crossguard, two horns
+        local u = (f - 0.15) / 0.18
+        local side = (i % 2 == 0) and 1 or -1
+        return V3(side * (0.05 + 0.46 * u), -0.57 + 0.18 * u * u - 0.05 * u, (H(i, 1) - 0.5) * 0.04)
+    end
+    -- blade: two edges, two mid-lines and a spine, tapering to a point
+    local t = (f - 0.33) / 0.67
+    local y = -0.52 + t * 1.5
+    local w = 0.16 * (1 - t ^ 1.7)
+    local lane = i % 5
+    return V3(Shapes.lanes[lane + 1] * w, y, (lane == 4) and 0.03 or (H(i, 2) - 0.5) * 0.03)
+end
+
+Shapes.WINGS = function(i, n)
+    local half = math.floor(n / 2)
+    local side = (i <= half) and -1 or 1
+    local idx = (i <= half) and (i - 1) or (i - half - 1)
+    local F = 7 -- feathers per wing
+    local j = idx % F
+    local k = math.floor(idx / F)
+    local K = math.max(2, math.ceil(half / F))
+    local t = k / (K - 1)
+    local ang = math.rad(78 - (j / (F - 1)) * 110)
+    local len = 0.55 + 0.9 * math.sin(math.pi * (j + 0.6) / (F + 0.2))
+    local dx, dy = math.cos(ang), math.sin(ang)
+    local bow = 0.18 * t * t
+    local lane = (idx * 7) % 3 - 1
+    local x = 0.08 + dx * len * t - dy * bow - dy * lane * 0.03 * t
+    local y = 0.15 + dy * len * t + dx * bow + dx * lane * 0.03 * t
+    return V3(side * x, y, (H(i, 3) - 0.5) * 0.06 * t)
+end
+
+Shapes.GALAXY = function(i, n)
+    local f = (i - 1) / math.max(1, n - 1)
+    if f < 0.14 then -- bright core
+        local r = 0.22 * math.sqrt(f / 0.14)
+        local a = i * 2.39996
+        return V3(math.cos(a) * r, math.sin(a) * r, (H(i, 4) - 0.5) * 0.12)
+    end
+    local arm = i % 3
+    local u = (f - 0.14) / 0.86
+    local r = 0.2 + 1.15 * u ^ 0.85
+    local a = arm * (TAU / 3) + u * 5.2 + (H(i, 5) - 0.5) * 0.25
+    return V3(math.cos(a) * r, math.sin(a) * r, (H(i, 6) - 0.5) * 0.1 * (1 - u))
+end
+
+Shapes.ATOM = function(i, n)
+    local f = (i - 1) / math.max(1, n - 1)
+    if f < 0.1 then -- nucleus
+        local r = 0.14 * math.sqrt(f / 0.1)
+        local a, b = i * 2.39996, i * 1.618
+        return V3(math.cos(a) * math.sin(b) * r, math.sin(a) * math.sin(b) * r, math.cos(b) * r)
+    end
+    local o = i % 3
+    local m = math.floor(i / 3)
+    local t = (m / math.max(1, n * 0.3)) * TAU
+    return Shapes.orbits[o + 1] * V3(1.05 * math.cos(t), 0.38 * math.sin(t), 0)
+end
+
+Shapes.HELIX = function(i, n)
+    local half = math.floor(n / 2)
+    local s = i % 2
+    local t = math.floor((i - 1) / 2) / math.max(1, half - 1)
+    local y = -1 + 2 * t
+    local r = 0.38
+    if i % 9 == 0 then -- rung between the two strands
+        local a2 = t * 6 * math.pi
+        local p1 = V3(math.cos(a2) * r, y, math.sin(a2) * r)
+        local p2 = V3(math.cos(a2 + math.pi) * r, y, math.sin(a2 + math.pi) * r)
+        return p1:Lerp(p2, H(i, 7))
+    end
+    local a = t * 6 * math.pi + s * math.pi
+    return V3(math.cos(a) * r, y, math.sin(a) * r)
+end
+
+Shapes.HALO = function(i, n)
+    local ring = i % 3
+    local m = math.floor((i - 1) / 3)
+    local a = (m / math.max(1, n / 3)) * TAU
+    local r = 0.62 + ring * 0.28
+    return V3(math.cos(a) * r, math.sin(a) * r, math.sin(a * 6 + ring) * 0.05)
+end
+
+Shapes.HEART = function(i, n)
+    local layer = i % 3
+    local m = math.floor((i - 1) / 3)
+    local t = (m / math.max(1, n / 3)) * TAU
+    local x = 16 * math.sin(t) ^ 3
+    local y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+    local sc = ((layer == 0) and 1 or ((layer == 1) and 0.68 or 0.36)) / 17
+    return V3(x * sc, (y + 2) * sc, (layer - 1) * 0.07)
+end
+
+Shapes.SATURN = function(i, n)
+    local N = math.max(1, math.floor(n * 0.55))
+    if i <= N then -- fibonacci sphere
+        local y = 1 - 2 * ((i - 1) + 0.5) / N
+        local r = math.sqrt(math.max(0, 1 - y * y))
+        local a = (i - 1) * 2.39996
+        return V3(math.cos(a) * r * 0.55, y * 0.55, math.sin(a) * r * 0.55)
+    end
+    local m = i - N
+    local ring = m % 3
+    local k = math.floor(m / 3)
+    local a = (k / math.max(1, n * 0.15)) * TAU
+    local r = 0.85 + ring * 0.14
+    return Shapes.tilt * V3(math.cos(a) * r, 0, math.sin(a) * r)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- COLOR
+-- ════════════════════════════════════════════════════════════════
+local function PaletteColor(i, n, t, flash)
+    local f = (i - 1) / math.max(1, n - 1)
+    local name = PALETTES[S.palette]
+    local c
+    if name == "AURORA" then
+        c = Color3.fromHSV((0.46 + 0.28 * f + 0.04 * math.sin(t)) % 1, 0.65, 1)
+    elseif name == "EMBER" then
+        c = Color3.fromHSV(0.01 + 0.11 * f, 0.9, 0.85 + 0.15 * math.sin(t * 5 + i))
+    elseif name == "ICE" then
+        c = Color3.fromHSV(0.52 + 0.06 * f, 0.15 + 0.5 * (1 - f), 1)
+    elseif name == "VOID" then
+        c = Color3.fromHSV(0.74 + 0.14 * f, 0.85, 0.7 + 0.3 * math.sin(t * 2 + f * 6) ^ 2)
+    elseif name == "RAINBOW" then
+        c = Color3.fromHSV((f + t * 0.12) % 1, 0.85, 1)
+    else -- GOLD
+        c = Color3.fromHSV(0.12 + 0.03 * f, 0.55 + 0.35 * (1 - f), 1)
+    end
+    if flash and flash > 0 then c = c:Lerp(Color3.new(1, 1, 1), flash) end
+    return c
+end
+local function Accent() return PaletteColor(2, 3, 0) end
+
+-- ════════════════════════════════════════════════════════════════
+-- PARTS (all client-side, anchored, no collision)
+-- ════════════════════════════════════════════════════════════════
+local Folder = Instance.new("Folder")
+Folder.Name = "ApexConstellation"
+Folder.Parent = Workspace
+ENV.ApexConstFolder = Folder
+
+local function Ghost(p)
+    p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false
+    p.CastShadow = false
+end
+
+local Core = Instance.new("Part") -- carries the light, sits at the shape's center
+Core.Name = "Core"
+Core.Size = Vector3.new(0.2, 0.2, 0.2)
+Core.Transparency = 1
+Ghost(Core)
+Core.Parent = Folder
+local Light = Instance.new("PointLight")
+Light.Range = 22
+Light.Brightness = 1.6
+Light.Parent = Core
+
+local Parts, Trails = {}, {}
+for i = 1, MAX_PARTS do
+    local p = Instance.new("Part")
+    p.Name = "P"
+    p.Shape = Enum.PartType.Ball
+    p.Size = Vector3.new(0.4, 0.4, 0.4)
+    p.Material = Enum.Material.Neon
+    p.Color = Color3.new(1, 1, 1)
+    p.Transparency = 1
+    Ghost(p)
+    p.Parent = Folder
+    Parts[i] = p
+    if i % 20 == 0 then -- every 20th particle is a comet with a trail
+        local a0 = Instance.new("Attachment")
+        a0.Position = Vector3.new(0, 0.16, 0)
+        a0.Parent = p
+        local a1 = Instance.new("Attachment")
+        a1.Position = Vector3.new(0, -0.16, 0)
+        a1.Parent = p
+        local tr = Instance.new("Trail")
+        tr.Attachment0 = a0
+        tr.Attachment1 = a1
+        tr.Lifetime = 0.45
+        tr.LightEmission = 1
+        tr.FaceCamera = true
+        tr.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1)})
+        tr.Enabled = false
+        tr.Parent = p
+        Trails[#Trails + 1] = {trail = tr, part = p, idx = i}
+    end
+end
+
+local function SetGlow(on)
+    if ENV.ApexConstBloom then pcall(function() ENV.ApexConstBloom:Destroy() end); ENV.ApexConstBloom = nil end
+    if on then
+        local b = Instance.new("BloomEffect")
+        b.Name = "ApexConstBloom"
+        b.Intensity = 0.7
+        b.Size = 26
+        b.Threshold = 0.85
+        b.Parent = Lighting
+        ENV.ApexConstBloom = b
+    end
+end
+table.insert(ENV.ApexConstLoops, {Disconnect = function()
+    SetGlow(false)
+    pcall(function() Folder:Destroy() end)
+end})
+
+-- ════════════════════════════════════════════════════════════════
+-- FORMATION STATE + MORPHING
+-- ════════════════════════════════════════════════════════════════
+local T0 = os.clock()
+local slashT0, pulseT0, morphT0 = -10, -10, -10
+local frame = 0
+local src, dst, cur = {}, {}, {}
+local moveList, cfs = {}, {}
+local ActiveN = 0
+
+local function Rebuild(morph)
+    local n = COUNTS[S.countIdx]
+    local fn = Shapes[SHAPE_NAMES[S.shape]]
+    for i = 1, n do
+        dst[i] = fn(i, n)
+        if morph then
+            src[i] = cur[i] or dst[i]
+        else
+            src[i], cur[i] = dst[i], dst[i]
+        end
+    end
+    morphT0 = morph and os.clock() or -10
+    ActiveN = n
+    moveList = {Core}
+    cfs = {CFrame.new()}
+    for i = 1, MAX_PARTS do
+        local p = Parts[i]
+        if i <= n then
+            moveList[#moveList + 1] = p
+            cfs[#cfs + 1] = CFrame.new()
+            p.Transparency = S.shown and 0 or 1
+        else
+            p.Transparency = 1
+        end
+    end
+    for _, tr in ipairs(Trails) do
+        tr.trail.Enabled = S.shown and S.trails and tr.idx <= n
+    end
+    Light.Enabled = S.shown
+end
+
+-- where the formation sits, by mode
+local function FormationCF(t)
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+    local base = root.CFrame
+    local size = SIZES[S.sizeIdx]
+    local mode = MODES[S.mode]
+    local spin = math.rad(SPINS[S.spinIdx][2]) * t
+    local sway = CFrame.Angles(0, math.sin(t * 0.8) * 0.12, 0)
+    if mode == "BACK" then
+        return base * CFrame.new(0, 2.2 + size * 0.15, 2 + size * 0.2) * sway
+    elseif mode == "AIM" then
+        local cam = Workspace.CurrentCamera
+        local look = cam and cam.CFrame.LookVector or base.LookVector
+        local dir = Vector3.new(look.X, 0, look.Z)
+        dir = (dir.Magnitude > 0.01) and dir.Unit or Vector3.new(0, 0, -1)
+        local pos = base.Position + dir * (8 + size * 0.9) + Vector3.new(0, 3 + size * 0.2, 0)
+        return CFrame.lookAt(pos, pos + dir) * sway
+    elseif mode == "ORBIT" then
+        local out = Vector3.new(math.cos(spin), 0, math.sin(spin))
+        local pos = base.Position + out * (6 + size * 0.7) + Vector3.new(0, 3 + size * 0.2, 0)
+        return CFrame.lookAt(pos, pos + out)
+    elseif mode == "ABOVE" then
+        return CFrame.new(base.Position + Vector3.new(0, 5 + size * 0.45, 0))
+            * CFrame.Angles(0, spin, 0) * CFrame.Angles(-math.pi / 2, 0, 0)
+    end
+    -- AURA
+    return CFrame.new(base.Position + Vector3.new(0, 0.5, 0)) * CFrame.Angles(0, spin, 0)
+end
+
+local function Step()
+    if not S.shown or ActiveN == 0 then return end
+    local now = os.clock()
+    local t = now - T0
+    local F = FormationCF(t)
+    if not F then return end
+
+    -- slash: swing the whole shape through an arc, with a white flash
+    local flash = 0
+    local slash = (now - slashT0) / 0.55
+    if slash >= 0 and slash < 1 then
+        local e = slash * slash * (3 - 2 * slash)
+        F = F * CFrame.Angles(0, 0, math.rad(-110 + 220 * e))
+            * CFrame.new(0, 0, -math.sin(math.pi * slash) * SIZES[S.sizeIdx] * 0.5)
+        flash = math.sin(math.pi * slash) * 0.8
+    end
+    -- pulse: burst outward and back
+    local scale = SIZES[S.sizeIdx]
+    local pulse = (now - pulseT0) / 0.7
+    if pulse >= 0 and pulse < 1 then
+        local k = math.sin(math.pi * pulse)
+        scale = scale * (1 + 0.45 * k)
+        flash = math.max(flash, k * 0.6)
+    end
+
+    local mt = now - morphT0
+    local n = ActiveN
+    for i = 1, n do
+        local d = dst[i]
+        local a = math.clamp((mt - 0.35 * H(i, 9)) / 0.85, 0, 1)
+        local pos = d
+        if a < 1 then -- staggered, swirling morph
+            local e = a * a * (3 - 2 * a)
+            pos = src[i]:Lerp(d, e)
+                + V3(math.cos(i * 1.7), math.sin(i * 2.3), math.cos(i * 3.1)) * (math.sin(math.pi * a) * 0.35)
+        end
+        cur[i] = pos
+        cfs[i + 1] = CFrame.new(F:PointToWorldSpace(pos * scale))
+    end
+    cfs[1] = CFrame.new(F.Position)
+
+    local ok = pcall(function() Workspace:BulkMoveTo(moveList, cfs, Enum.BulkMoveMode.FireCFrameChanged) end)
+    if not ok then
+        for i = 1, n + 1 do moveList[i].CFrame = cfs[i] end
+    end
+
+    -- colors: half the particles per frame is plenty smooth
+    frame = frame + 1
+    for i = 1 + (frame % 2), n, 2 do
+        Parts[i].Color = PaletteColor(i, n, t, flash)
+    end
+    Light.Color = PaletteColor(math.floor(n / 2), n, t, flash)
+    if S.trails then
+        for _, tr in ipairs(Trails) do
+            if tr.idx <= n then tr.trail.Color = ColorSequence.new(tr.part.Color) end
+        end
+    end
+end
+Track(RunService.RenderStepped:Connect(Step))
+
+-- ════════════════════════════════════════════════════════════════
+-- GUI
+-- ════════════════════════════════════════════════════════════════
+local IsTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local BG, BTN, TXT, DIM = Color3.fromRGB(10, 12, 22), Color3.fromRGB(30, 36, 58), Color3.fromRGB(235, 240, 255), Color3.fromRGB(120, 126, 150)
+
+local function Corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 6); c.Parent = p end
+local function Stroke(p, col, th, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col; s.Thickness = th or 1.25; s.Transparency = tr or 0.4
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p
+    return s
+end
+local function Btn(parent, text, size, pos)
+    local b = Instance.new("TextButton")
+    b.Text = text; b.Size = size; b.Position = pos or UDim2.new(0, 0, 0, 0)
+    b.BackgroundColor3 = BTN; b.BackgroundTransparency = 0.25; b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold; b.TextSize = 10; b.TextColor3 = TXT
+    b.TextStrokeTransparency = 0.65; b.AutoButtonColor = false; b.ZIndex = 12
+    b.Parent = parent
+    Corner(b); Stroke(b, TXT, 1.25, 0.65)
+    return b
+end
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "ApexConstellation"
+Gui.ResetOnSpawn = false
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.IgnoreGuiInset = true
+Gui.DisplayOrder = 96
+Gui.Parent = PGui
+ENV.ApexConstGui = Gui
+
+local function ScreenSize()
+    local s = Gui.AbsoluteSize
+    if s.X < 50 or s.Y < 50 then
+        local cam = Workspace.CurrentCamera
+        if cam then s = cam.ViewportSize end
+    end
+    return s
+end
+
+local PANEL_W = math.clamp(math.floor(ScreenSize().X * 0.31), 224, 262)
+local INNER = PANEL_W - 16
+local BTN_H = IsTouch and 32 or 28
+local CELL4 = math.floor((INNER - 12) / 4)
+local CELL2 = math.floor((INNER - 4) / 2)
+local PanelPos = Vector2.new(8, 64)
+local Expanded = true
+
+local Panel = Instance.new("Frame")
+Panel.AutomaticSize = Enum.AutomaticSize.Y
+Panel.Size = UDim2.new(0, PANEL_W, 0, 0)
+Panel.BackgroundColor3 = BG; Panel.BackgroundTransparency = 0.2; Panel.BorderSizePixel = 0
+Panel.Active = true; Panel.ZIndex = 10; Panel.Parent = Gui
+Corner(Panel, 10)
+local PanelStroke = Stroke(Panel, TXT, 1.5, 0.35)
+local PL = Instance.new("UIListLayout"); PL.SortOrder = Enum.SortOrder.LayoutOrder; PL.Parent = Panel
+
+local Header = Instance.new("Frame")
+Header.BackgroundTransparency = 1; Header.Size = UDim2.new(1, 0, 0, 28)
+Header.Active = true; Header.LayoutOrder = 1; Header.ZIndex = 11; Header.Parent = Panel
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1; Title.Text = "CONSTELLATION"; Title.TextColor3 = TXT
+Title.Font = Enum.Font.GothamBold; Title.TextSize = 12; Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.TextStrokeTransparency = 0.65
+Title.Size = UDim2.new(1, -44, 1, 0); Title.Position = UDim2.new(0, 10, 0, 0); Title.ZIndex = 12; Title.Parent = Header
+local CollapseBtn = Btn(Header, "-", UDim2.new(0, 28, 0, 22), UDim2.new(1, -34, 0.5, -11))
+
+local Body = Instance.new("Frame")
+Body.BackgroundTransparency = 1; Body.AutomaticSize = Enum.AutomaticSize.Y
+Body.Size = UDim2.new(1, 0, 0, 0); Body.LayoutOrder = 2; Body.ZIndex = 11; Body.Parent = Panel
+local BL = Instance.new("UIListLayout"); BL.Padding = UDim.new(0, 4); BL.SortOrder = Enum.SortOrder.LayoutOrder
+BL.HorizontalAlignment = Enum.HorizontalAlignment.Center; BL.Parent = Body
+local BP = Instance.new("UIPadding")
+BP.PaddingTop = UDim.new(0, 4); BP.PaddingBottom = UDim.new(0, 8)
+BP.PaddingLeft = UDim.new(0, 8); BP.PaddingRight = UDim.new(0, 8); BP.Parent = Body
+
+local function MakeGrid(order, cellW, cellH)
+    local g = Instance.new("Frame")
+    g.BackgroundTransparency = 1; g.AutomaticSize = Enum.AutomaticSize.Y
+    g.Size = UDim2.new(1, 0, 0, 0); g.LayoutOrder = order; g.ZIndex = 12; g.Parent = Body
+    local gl = Instance.new("UIGridLayout")
+    gl.CellSize = UDim2.new(0, cellW, 0, cellH); gl.CellPadding = UDim2.new(0, 4, 0, 4)
+    gl.SortOrder = Enum.SortOrder.LayoutOrder; gl.Parent = g
+    return g
+end
+local ShapeGrid = MakeGrid(1, CELL4, 28)
+local OptGrid = MakeGrid(2, CELL2, BTN_H)
+
+local RefreshUI
+local ShapeBtns, OptBtns = {}, {}
+
+local function SelectShape(idx)
+    S.shape = idx
+    S.mode = DEFAULT_MODE[idx]
+    Rebuild(true)
+    RefreshUI()
+end
+for i, name in ipairs(SHAPE_NAMES) do
+    local b = Btn(ShapeGrid, name, UDim2.new(0, CELL4, 0, 28))
+    b.LayoutOrder = i
+    b.TextSize = 9
+    b.MouseButton1Click:Connect(function() SelectShape(i) end)
+    ShapeBtns[i] = b
+end
+
+local function Cycle(key, list) S[key] = S[key] % #list + 1 end
+local function AddOpt(order, id, labelFn, onClick, litFn)
+    local b = Btn(OptGrid, "", UDim2.new(0, CELL2, 0, BTN_H))
+    b.LayoutOrder = order
+    b.MouseButton1Click:Connect(function() onClick(); RefreshUI() end)
+    OptBtns[id] = {btn = b, label = labelFn, lit = litFn}
+end
+
+local function Slash() slashT0 = os.clock() end
+local function Pulse() pulseT0 = os.clock() end
+local function SetShown(v)
+    S.shown = v
+    Rebuild(false)
+end
+
+AddOpt(1, "mode", function() return "MODE " .. MODES[S.mode] end, function() Cycle("mode", MODES) end)
+AddOpt(2, "pal", function() return "COLOR " .. PALETTES[S.palette] end, function() Cycle("palette", PALETTES) end)
+AddOpt(3, "count", function() return "COUNT " .. COUNTS[S.countIdx] end, function()
+    Cycle("countIdx", COUNTS); Rebuild(true)
+end)
+AddOpt(4, "size", function() return "SIZE " .. SIZES[S.sizeIdx] end, function() Cycle("sizeIdx", SIZES) end)
+AddOpt(5, "spin", function() return "SPIN " .. SPINS[S.spinIdx][1] end, function() Cycle("spinIdx", SPINS) end)
+AddOpt(6, "glow", function() return "GLOW " .. (S.glow and "ON" or "OFF") end, function()
+    S.glow = not S.glow; SetGlow(S.glow)
+end, function() return S.glow end)
+AddOpt(7, "trails", function() return "TRAILS " .. (S.trails and "ON" or "OFF") end, function()
+    S.trails = not S.trails; Rebuild(false)
+end, function() return S.trails end)
+AddOpt(8, "shown", function() return "SHAPE " .. (S.shown and "ON" or "OFF") end, function()
+    SetShown(not S.shown)
+end, function() return S.shown end)
+AddOpt(9, "slash", function() return "SLASH (R)" end, Slash)
+AddOpt(10, "pulse", function() return "PULSE (F)" end, Pulse)
+
+RefreshUI = function()
+    local acc = Accent()
+    Title.TextColor3 = acc
+    PanelStroke.Color = acc
+    for i, b in ipairs(ShapeBtns) do
+        local on = (i == S.shape)
+        b.TextColor3 = on and Color3.new(1, 1, 1) or DIM
+        b.BackgroundColor3 = on and acc:Lerp(Color3.new(0, 0, 0), 0.55) or BTN
+    end
+    for _, o in pairs(OptBtns) do
+        o.btn.Text = o.label()
+        o.btn.TextColor3 = (not o.lit or o.lit()) and TXT or DIM
+    end
+end
+
+-- collapsed icon
+local Icon = Instance.new("TextButton")
+Icon.Size = UDim2.new(0, 40, 0, 40); Icon.BackgroundColor3 = BG; Icon.BackgroundTransparency = 0.2
+Icon.BorderSizePixel = 0; Icon.Text = "AC"; Icon.Font = Enum.Font.GothamBold; Icon.TextSize = 13
+Icon.TextColor3 = TXT; Icon.AutoButtonColor = false; Icon.Visible = false; Icon.ZIndex = 10; Icon.Parent = Gui
+Corner(Icon, 20); Stroke(Icon, TXT, 1.75, 0.2)
+
+local function ClampPos(pos, size)
+    local ss = ScreenSize()
+    return Vector2.new(
+        math.floor(math.clamp(pos.X, 4, math.max(4, ss.X - size.X - 4)) + 0.5),
+        math.floor(math.clamp(pos.Y, 4, math.max(4, ss.Y - size.Y - 4)) + 0.5))
+end
+local function ApplyPos()
+    local size = Expanded and Panel.AbsoluteSize or Vector2.new(40, 40)
+    if size.X < 10 then size = Vector2.new(PANEL_W, 260) end
+    PanelPos = ClampPos(PanelPos, size)
+    Panel.Position = UDim2.fromOffset(PanelPos.X, PanelPos.Y)
+    Icon.Position = UDim2.fromOffset(PanelPos.X, PanelPos.Y)
+end
+Track(Panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(ApplyPos))
+local function SetExpanded(v)
+    Expanded = v
+    Panel.Visible = v
+    Icon.Visible = not v
+    ApplyPos()
+end
+CollapseBtn.MouseButton1Click:Connect(function() SetExpanded(false) end)
+
+local function MakeDraggable(handle, onTap)
+    local dragging, moved, startInput, startMouse, startPos = false, false, nil, nil, nil
+    handle.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        dragging, moved, startInput = true, false, inp
+        startMouse = Vector2.new(inp.Position.X, inp.Position.Y)
+        startPos = PanelPos
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End and startInput == inp and dragging then
+                dragging = false
+                if not moved and onTap then onTap() end
+            end
+        end)
+    end)
+    Track(UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == startInput then
+            local d = Vector2.new(inp.Position.X, inp.Position.Y) - startMouse
+            if not moved and d.Magnitude > 6 then moved = true end
+            if moved then PanelPos = startPos + d; ApplyPos() end
+        end
+    end))
+end
+MakeDraggable(Header, nil)
+MakeDraggable(Icon, function() SetExpanded(true) end)
+
+-- keys
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    local k = inp.KeyCode
+    if k == Enum.KeyCode.Q then
+        SelectShape((S.shape - 2) % #SHAPE_NAMES + 1)
+    elseif k == Enum.KeyCode.E then
+        SelectShape(S.shape % #SHAPE_NAMES + 1)
+    elseif k == Enum.KeyCode.R then
+        Slash()
+    elseif k == Enum.KeyCode.F then
+        Pulse()
+    elseif k == Enum.KeyCode.H then
+        SetShown(not S.shown); RefreshUI()
+    elseif k == Enum.KeyCode.Y then
+        SetExpanded(not Expanded)
+    end
+end))
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+SetGlow(S.glow)
+Rebuild(false)
+RefreshUI()
+SetExpanded(true)
+task.defer(ApplyPos)
+
+print("[ApexConstellation v1] Loaded. " .. #SHAPE_NAMES .. " shapes, up to " .. MAX_PARTS .. " particles — client-side only.")
+print("  Q / E shape · R slash · F pulse · H show/hide · Y panel")
