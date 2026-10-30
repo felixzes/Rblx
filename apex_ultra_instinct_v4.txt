@@ -1,0 +1,1065 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX ULTRA INSTINCT  ·  v4  ·  BATTLEGROUNDS-SAFE               ║
+╠══════════════════════════════════════════════════════════════╣
+║   v3 broke dashing and held buttons. Cause: dashes and skills play     ║
+║   "action" animations, so v3 counted them as YOUR ATTACKS and then       ║
+║   NO LUNGE destroyed the dash's body mover and clamped its speed.          ║
+║   v4 never fights the game's own movement:                                   ║
+║   • HANDS OFF while you act. Attacking, dashing, using a skill, blocking,       ║
+║     or holding an action key / M1 (PC) = the script does NOT teleport, slide     ║
+║     or turn you. A dash, knockback or any game-applied mover (detected from         ║
+║     a sudden speed burst or a body mover / constraint appearing on you) also           ║
+║     keeps it out of the way for a moment. Nothing is ever destroyed.                     ║
+║   • ANTI-SNAP is OFF by default and only catches true teleports (35+ studs in one          ║
+║     step), so it can't touch a dash.                                                        ║
+║   • M1 LUNGE BLOCK (OFF by default, PC only): clamps the game pulling you toward an enemy     ║
+║     right after an M1 click, only when you're not steering and not holding Q.                  ║
+║   • LEAN (OFF by default) is now a removable offset instead of overwriting joint poses.          ║
+║   • Face-lock after a blink only runs while you're standing still.                                ║
+║                                                                                                     ║
+║   Still here: when something is about to hit you (attack animation, a hand/foot snapping at you,     ║
+║   a dash, a hitbox) you leave an AFTERIMAGE and appear BEHIND them facing their back; if a blink       ║
+║   isn't possible you get a small slide instead. HIT BACKUP counter-blinks if you do get hit.             ║
+║   PC keys: U on/off · B behind-blink on/off · Y panel.                                                     ║
+║                                                                                                              ║
+║   Honest limits: client-side only. The server decides hits, strong anti-cheat can undo teleports, and          ║
+║   on mobile the script can only see your actions through their animations (it can't see button holds).          ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Workspace        = game:GetService("Workspace")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexUI3Gui then pcall(function() ENV.ApexUI3Gui:Destroy() end) end
+if ENV.ApexUI3Loops then
+    for _, c in pairs(ENV.ApexUI3Loops) do pcall(function() c:Disconnect() end) end
+end
+ENV.ApexUI3Loops = {}
+local function Track(c) table.insert(ENV.ApexUI3Loops, c); return c end
+
+-- ════════════════════════════════════════════════════════════════
+-- SETTINGS
+-- ════════════════════════════════════════════════════════════════
+local PRESETS = {
+    behindDist = {{"CLOSE", 3}, {"MEDIUM", 4.5}, {"FAR", 7}},          -- studs behind them
+    blinkCd    = {{"FAST", 0.3}, {"NORMAL", 0.5}, {"SLOW", 1.0}},      -- seconds between blinks
+    dodge      = {{"TINY", 1.6}, {"SMALL", 2.6}, {"MEDIUM", 4}, {"WIDE", 6}},
+    range      = {{"SHORT", 11}, {"MEDIUM", 17}, {"LONG", 25}},
+    sense      = {{"CALM", 55}, {"NORMAL", 38}, {"TWITCHY", 26}},      -- limb speed (studs/s) that counts as a strike
+    attack     = {{"HOLD", 0}, {"SLIDE", 0.3}},                        -- what moves you while YOU attack
+}
+local DEFAULTS = {
+    on = true, blink = true, behindIdx = 2, cdIdx = 2, dodgeIdx = 2, rangeIdx = 2, senseIdx = 2,
+    attackIdx = 1, afterimage = true, aura = true, fov = true, lean = false,
+    antiSnap = false, lungeBlock = false, hitBackup = true, team = true, npcs = true,
+}
+local S = ENV.ApexUI4Settings
+if type(S) ~= "table" then S = {}; ENV.ApexUI4Settings = S end
+for k, v in pairs(DEFAULTS) do
+    if S[k] == nil then S[k] = v end
+end
+S.dodges, S.blinks, S.snaps = 0, 0, 0
+
+local TAU       = 0.09  -- how fast a slide impulse fades (a slide of D studs starts at D/TAU studs/s)
+local MAX_SPEED = 42
+local GRACE     = 0.25  -- seconds after your attack ends that still count as "you're attacking"
+
+local ATTACK_PRIO = {
+    [Enum.AnimationPriority.Action] = true, [Enum.AnimationPriority.Action2] = true,
+    [Enum.AnimationPriority.Action3] = true, [Enum.AnimationPriority.Action4] = true,
+}
+local FORCE_CLASSES = {
+    BodyPosition = true, BodyVelocity = true, BodyGyro = true, BodyForce = true, BodyThrust = true,
+    BodyAngularVelocity = true, RocketPropulsion = true, AlignPosition = true, AlignOrientation = true,
+    LinearVelocity = true, AngularVelocity = true, VectorForce = true, LineForce = true, Torque = true,
+}
+local LIMB_NAMES = {
+    LeftHand = true, RightHand = true, LeftFoot = true, RightFoot = true,
+    ["Left Arm"] = true, ["Right Arm"] = true, ["Left Leg"] = true, ["Right Leg"] = true,
+}
+
+local function IsAttackTrack(track)
+    return ATTACK_PRIO[track.Priority] == true and not track.Looped
+end
+local function GetHum()
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function IsEnemy(model)
+    local plr = Players:GetPlayerFromCharacter(model)
+    if plr then
+        if plr == LP then return false end
+        if S.team and plr.Team ~= nil and plr.Team == LP.Team then return false end
+        return true
+    end
+    return S.npcs
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- STATE
+-- ════════════════════════════════════════════════════════════════
+local Enemies     = {}   -- [model] = {hum, root, lastPos, vel, cool, limbCool, limbs, conns}
+local Hitboxes    = {}   -- [part] = expiry
+local impulseVel  = Vector3.zero
+local totalVel    = Vector3.zero
+local lastSide    = 1
+local attackUntil = 0     -- while now < this + GRACE, YOU count as attacking
+local alertUntil  = 0     -- aura flares while now < this
+local lastBlink   = 0
+local FaceLock    = {e = nil, untilT = 0}
+local RayParams   = RaycastParams.new()
+RayParams.FilterType = Enum.RaycastFilterType.Exclude
+local BlinkBehind -- assigned once Guard exists
+
+local gameMoveUntil = 0     -- the GAME is moving you (dash / skill / knockback): hands off
+local heldAction    = false -- an action key or M1 is being held right now (PC)
+local m1Until       = 0     -- an M1 click happened a moment ago (PC)
+
+-- "Acting" = you're attacking, dashing, using a skill, blocking or holding a button.
+-- While it's true the script never teleports, slides or turns you.
+local function AttackBlocked(now)
+    return now < attackUntil + GRACE or now < gameMoveUntil or heldAction
+end
+local function MarkAttack(len) attackUntil = math.max(attackUntil, os.clock() + len) end
+
+-- ════════════════════════════════════════════════════════════════
+-- VISUALS: afterimage, ring burst, camera punch
+-- ════════════════════════════════════════════════════════════════
+local SILVER = Color3.fromRGB(205, 225, 255)
+
+-- a silver ghost of you, left standing where you were, fading out
+local function Afterimage()
+    local char = LP.Character
+    if not char then return end
+    local ok, clone = pcall(function()
+        local prev = char.Archivable
+        char.Archivable = true
+        local c = char:Clone()
+        char.Archivable = prev
+        return c
+    end)
+    if not ok or not clone then return end
+    clone.Name = "ApexUIAfterimage"
+    for _, d in ipairs(clone:GetDescendants()) do
+        if d:IsA("BaseScript") or d:IsA("Humanoid") or d:IsA("Sound") or d:IsA("ForceField")
+            or d:IsA("Decal") or d:IsA("Texture") or d:IsA("SurfaceAppearance") or d:IsA("ParticleEmitter")
+            or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Highlight") or d:IsA("BillboardGui") then
+            pcall(function() d:Destroy() end)
+        end
+    end
+    local parts = {}
+    for _, d in ipairs(clone:GetDescendants()) do
+        if d:IsA("BasePart") then
+            d.Anchored = true
+            d.CanCollide = false; d.CanQuery = false; d.CanTouch = false; d.CastShadow = false
+            if d.Name == "HumanoidRootPart" then
+                d.Transparency = 1
+            else
+                d.Material = Enum.Material.Neon
+                d.Color = SILVER
+                d.Transparency = 0.45
+                parts[#parts + 1] = d
+            end
+        end
+    end
+    clone.Parent = Workspace
+    for _, p in ipairs(parts) do
+        TweenService:Create(p, TweenInfo.new(0.5, Enum.EasingStyle.Quad), {Transparency = 1}):Play()
+    end
+    task.delay(0.6, function() pcall(function() clone:Destroy() end) end)
+end
+
+local function Burst(pos)
+    local ring = Instance.new("Part")
+    ring.Shape = Enum.PartType.Cylinder
+    ring.Size = Vector3.new(0.2, 2, 2)
+    ring.CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.pi / 2)
+    ring.Anchored = true; ring.CanCollide = false; ring.CanQuery = false; ring.CanTouch = false
+    ring.CastShadow = false
+    ring.Material = Enum.Material.Neon
+    ring.Color = SILVER
+    ring.Transparency = 0.3
+    ring.Parent = Workspace
+    TweenService:Create(ring, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {Size = Vector3.new(0.2, 15, 15), Transparency = 1}):Play()
+    task.delay(0.5, function() pcall(function() ring:Destroy() end) end)
+end
+
+local fovBusy = false
+local function FovPunch()
+    local cam = Workspace.CurrentCamera
+    if not S.fov or not cam or fovBusy then return end
+    fovBusy = true
+    local base = cam.FieldOfView
+    TweenService:Create(cam, TweenInfo.new(0.08), {FieldOfView = base + 9}):Play()
+    task.delay(0.09, function()
+        TweenService:Create(cam, TweenInfo.new(0.28, Enum.EasingStyle.Quad), {FieldOfView = base}):Play()
+    end)
+    task.delay(0.5, function() fovBusy = false end)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- SLIDE (the fallback dodge) + THREAT HANDLING
+-- ════════════════════════════════════════════════════════════════
+-- Slide ACROSS the attack line, to whichever side you're already on,
+-- with a touch of backward drift. Chained calls add up into one flow.
+local function DodgeFrom(flat, look, scale)
+    if scale <= 0 then return end
+    local fl = Vector3.new(look.X, 0, look.Z)
+    if fl.Magnitude < 0.05 then fl = flat end
+    fl = fl.Unit
+    local right = fl:Cross(Vector3.yAxis)
+    local lateral = flat:Dot(right)
+    local side
+    if math.abs(lateral) > 0.6 then side = (lateral > 0) and 1 or -1 else side = -lastSide end
+    lastSide = side
+    local dir = right * side * 0.85 + flat.Unit * 0.3
+    dir = Vector3.new(dir.X, 0, dir.Z).Unit
+    impulseVel = impulseVel + dir * (PRESETS.dodge[S.dodgeIdx][2] * scale / TAU)
+    S.dodges = S.dodges + 1
+end
+
+-- Something is about to hit you. The order of rules IS the guarantee:
+-- 1) while you're attacking (and a moment after) nothing teleports you,
+-- 2) otherwise blink behind them, 3) otherwise slide.
+local function Threat(e, flat, look)
+    local now = os.clock()
+    alertUntil = now + 0.25
+    if AttackBlocked(now) then
+        if S.attackIdx == 2 then DodgeFrom(flat, look, PRESETS.attack[2][2]) end
+        return
+    end
+    if S.on and S.blink and BlinkBehind and BlinkBehind(e) then return end
+    DodgeFrom(flat, look, 1)
+end
+
+local function OnEnemyAnimation(e, track)
+    if not S.on or not IsAttackTrack(track) then return end
+    local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    local er = e.root
+    if not (root and er and IsEnemy(e.model)) then return end
+    local toMe = root.Position - er.Position
+    local flat = Vector3.new(toMe.X, 0, toMe.Z)
+    if flat.Magnitude < 0.1 or flat.Magnitude > PRESETS.range[S.rangeIdx][2] + 4 then return end
+    local now = os.clock()
+    if now - e.cool < 0.1 then return end
+    -- ignore swings that clearly aren't aimed at you
+    if er.CFrame.LookVector:Dot(flat.Unit) < 0.15 and flat.Magnitude > 6 then return end
+    e.cool = now
+    Threat(e, flat, er.CFrame.LookVector)
+end
+
+local function Unregister(model)
+    local e = Enemies[model]
+    if not e then return end
+    for _, c in ipairs(e.conns) do pcall(function() c:Disconnect() end) end
+    Enemies[model] = nil
+end
+
+local function Register(model)
+    if Enemies[model] or model == LP.Character then return end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local e = {model = model, hum = hum, root = nil, lastPos = nil, vel = Vector3.zero,
+        cool = 0, limbCool = 0, limbs = {}, conns = {}}
+    Enemies[model] = e
+    e.conns[#e.conns + 1] = model.AncestryChanged:Connect(function(_, parent)
+        if not parent then Unregister(model) end
+    end)
+    task.spawn(function()
+        e.root = model:WaitForChild("HumanoidRootPart", 6)
+        for _, ch in ipairs(model:GetChildren()) do
+            if LIMB_NAMES[ch.Name] and ch:IsA("BasePart") then e.limbs[#e.limbs + 1] = {part = ch, last = nil} end
+        end
+        local animator = hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 3)
+        if animator and Enemies[model] == e then
+            e.conns[#e.conns + 1] = animator.AnimationPlayed:Connect(function(track)
+                OnEnemyAnimation(e, track)
+            end)
+        end
+    end)
+end
+
+-- Hitbox / projectile candidates: new non-colliding or see-through parts
+-- near you that aren't body parts or accessories.
+local function MaybeHitbox(part)
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or part:IsDescendantOf(char) then return end
+    if (part.Position - root.Position).Magnitude > 28 then return end
+    if part.Size.Magnitude < 3 or (part.Anchored and part.Size.Magnitude > 60) then return end
+    if not (part.CanCollide == false or part.Transparency >= 0.5) then return end
+    local parent = part.Parent
+    if parent and parent:FindFirstChildOfClass("Humanoid") then return end
+    if part:FindFirstAncestorOfClass("Accessory") then return end
+    Hitboxes[part] = os.clock() + 2.5
+end
+
+-- Push out of any hitbox volume (plus a margin) the shortest way.
+local function HitboxField(root, now)
+    local field = Vector3.zero
+    local myPos = root.Position
+    for part, expiry in pairs(Hitboxes) do
+        if not part.Parent or now > expiry then
+            Hitboxes[part] = nil
+        else
+            local rel = part.CFrame:PointToObjectSpace(myPos)
+            local half = part.Size * 0.5
+            local ox = half.X + 2.2 - math.abs(rel.X)
+            local oz = half.Z + 2.2 - math.abs(rel.Z)
+            local oy = half.Y + 2.2 - math.abs(rel.Y)
+            if ox > 0 and oy > 0 and oz > 0 then
+                local localPush
+                if ox <= oz then
+                    localPush = Vector3.new((rel.X >= 0 and 1 or -1) * ox, 0, 0)
+                else
+                    localPush = Vector3.new(0, 0, (rel.Z >= 0 and 1 or -1) * oz)
+                end
+                local w = part.CFrame:VectorToWorldSpace(localPush)
+                w = Vector3.new(w.X, 0, w.Z)
+                if w.Magnitude > 0.05 then field = field + w.Unit * math.min(w.Magnitude * 16, 30) end
+            end
+        end
+    end
+    return field
+end
+
+-- Never slide into a wall: shorten the move.
+local function SafeMove(root, move)
+    local mag = move.Magnitude
+    if mag < 0.0005 then return Vector3.zero end
+    local hit = Workspace:Raycast(root.Position, move.Unit * (mag + 1.3), RayParams)
+    if hit then move = move.Unit * math.min(mag, math.max(0, hit.Distance - 1.3)) end
+    return move
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- GUARD: passive by default — only watches for the game's own movement, never fights it
+-- ════════════════════════════════════════════════════════════════
+local Guard = {lastPos = nil, lastCF = nil, lastT = 0, framePos = nil, frameT = 0, clamping = false}
+
+local function Revert(cf, keepVelocity)
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local vel = root.AssemblyLinearVelocity
+    local ok = pcall(function() char:PivotTo(cf) end)
+    if not ok then root.CFrame = cf end
+    root.AssemblyLinearVelocity = keepVelocity and vel or Vector3.zero
+    Guard.lastPos, Guard.lastCF, Guard.lastT = cf.Position, cf, os.clock()
+end
+
+local function NearestEnemyPos(from)
+    local best, bd
+    for model, e in pairs(Enemies) do
+        if e.root and e.root.Parent and e.hum.Health > 0 and IsEnemy(model) then
+            local d = (e.root.Position - from).Magnitude
+            if d < 30 and (not bd or d < bd) then best, bd = e.root.Position, d end
+        end
+    end
+    return best
+end
+
+local function GuardTick(isHeartbeat)
+    if not S.on then return end
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not (root and hum) or hum.Health <= 0 then return end
+    local now = os.clock()
+    local pos = root.Position
+    local vel = root.AssemblyLinearVelocity
+
+    -- the game itself is moving you fast (dash, skill, knockback): stay out of its way
+    if isHeartbeat then
+        local hs = Vector3.new(vel.X, 0, vel.Z).Magnitude
+        if hs > math.max(hum.WalkSpeed * 2.2, 48) then gameMoveUntil = now + 0.35 end
+    end
+
+    -- 1) ANTI-SNAP (off by default): true teleports only — a huge jump in one step
+    if S.antiSnap and Guard.lastPos then
+        local dt = math.clamp(now - Guard.lastT, 0, 0.25)
+        if (pos - Guard.lastPos).Magnitude > 35 + vel.Magnitude * dt * 2.5 then
+            Revert(Guard.lastCF, true)
+            S.snaps = S.snaps + 1
+            pos = Guard.lastPos
+        end
+    end
+
+    -- 2) M1 LUNGE BLOCK (off by default): right after an M1 click, if the game pulls you toward
+    -- an enemy while you are NOT steering and NOT holding Q, only walking speed gets through
+    local clamped = false
+    if isHeartbeat and S.lungeBlock and Guard.framePos and now < m1Until
+        and hum.MoveDirection.Magnitude < 0.1 and not UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+        local fdt = math.clamp(now - Guard.frameT, 1 / 240, 0.1)
+        local delta = pos - Guard.framePos
+        local flat = Vector3.new(delta.X, 0, delta.Z)
+        local allowed = (hum.WalkSpeed * 1.15 + 6 + totalVel.Magnitude) * fdt + 0.05
+        local target = NearestEnemyPos(pos)
+        if target and flat.Magnitude > allowed and flat.Magnitude < 9 then
+            local toTarget = Vector3.new(target.X - pos.X, 0, target.Z - pos.Z)
+            if toTarget.Magnitude > 0.1 and flat.Unit:Dot(toTarget.Unit) > 0.5 then
+                local dir = flat.Unit
+                local fixed = Vector3.new(Guard.framePos.X + dir.X * allowed, pos.Y, Guard.framePos.Z + dir.Z * allowed)
+                Revert(CFrame.new(fixed) * root.CFrame.Rotation, true)
+                pos = fixed
+                clamped = true
+                if not Guard.clamping then S.snaps = S.snaps + 1 end
+            end
+        end
+    end
+    Guard.clamping = clamped
+
+    if isHeartbeat then Guard.framePos, Guard.frameT = pos, now end
+    Guard.lastPos, Guard.lastCF, Guard.lastT = pos, root.CFrame, now
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- THE BLINK: appear behind the attacker, facing their back
+-- ════════════════════════════════════════════════════════════════
+BlinkBehind = function(e)
+    local now = os.clock()
+    if now - lastBlink < PRESETS.blinkCd[S.cdIdx][2] then return false end
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local er = e.root
+    if not (root and hum and er and er.Parent and e.hum.Health > 0) or hum.Health <= 0 then return false end
+
+    local look = er.CFrame.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatLook.Magnitude < 0.05 then return false end
+    flatLook = flatLook.Unit
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {char, e.model}
+    local overlap = OverlapParams.new()
+    overlap.FilterType = Enum.RaycastFilterType.Exclude
+    overlap.FilterDescendantsInstances = {char, e.model}
+
+    local origin = er.Position
+    local want = PRESETS.behindDist[S.behindIdx][2]
+    local wall = Workspace:Raycast(origin, -flatLook * (want + 1.5), params)
+    local dist = wall and (wall.Distance - 1.5) or want
+    local standY = (hum.RigType == Enum.HumanoidRigType.R6) and (root.Size.Y / 2 + 2)
+        or (hum.HipHeight + root.Size.Y / 2)
+
+    -- walk the distance in until the spot has a floor and nothing solid in it
+    local target
+    while dist >= 1.8 and not target do
+        local spot = origin - flatLook * dist
+        local floor = Workspace:Raycast(spot + Vector3.new(0, 6, 0), Vector3.new(0, -70, 0), params)
+        if floor then
+            local cand = Vector3.new(spot.X, floor.Position.Y + standY, spot.Z)
+            local blocked = false
+            for _, part in ipairs(Workspace:GetPartBoundsInRadius(cand, 1.6, overlap)) do
+                if part.CanCollide then blocked = true; break end
+            end
+            if not blocked then target = cand end
+        end
+        dist = dist - 1
+    end
+    if not target or (target - root.Position).Magnitude > 50 then return false end
+
+    local cf = CFrame.lookAt(target, Vector3.new(origin.X, target.Y, origin.Z)) -- facing their back
+    if S.afterimage then Afterimage() end
+    local ok = pcall(function() char:PivotTo(cf) end)
+    if not ok then root.CFrame = cf end
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    impulseVel, totalVel = Vector3.zero, Vector3.zero
+    lastBlink = now
+    -- our own move: authorize it so ANTI-SNAP / NO LUNGE don't undo it
+    Guard.lastPos, Guard.lastCF, Guard.lastT = cf.Position, cf, now
+    Guard.framePos, Guard.frameT = cf.Position, now
+    FaceLock.e, FaceLock.untilT = e, now + 0.3
+    S.blinks = S.blinks + 1
+    Burst(Vector3.new(target.X, target.Y - standY + 0.15, target.Z))
+    FovPunch()
+    return true
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- MAIN STEP (before physics)
+-- ════════════════════════════════════════════════════════════════
+local function Step(dt)
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not S.on or not (root and hum) or hum.Health <= 0 then
+        impulseVel, totalVel = Vector3.zero, Vector3.zero
+        return
+    end
+    dt = math.clamp(dt, 1 / 240, 0.1)
+    local now = os.clock()
+    local blocked = AttackBlocked(now)
+    local myPos = root.Position
+    local range = PRESETS.range[S.rangeIdx][2]
+    local senseSpeed = PRESETS.sense[S.senseIdx][2]
+    local field = Vector3.zero
+
+    for model, e in pairs(Enemies) do
+        local er = e.root
+        if er and er.Parent and e.hum.Health > 0 and IsEnemy(model) then
+            local p = er.Position
+            if e.lastPos then e.vel = e.vel:Lerp((p - e.lastPos) / dt, 0.5) end
+            e.lastPos = p
+            local toMe = myPos - p
+            local flat = Vector3.new(toMe.X, 0, toMe.Z)
+            local dist = flat.Magnitude
+            if dist > 0.1 and dist < range then
+                local u = flat / dist
+                local look = er.CFrame.LookVector
+                -- a fast approach (dash / lunge) is a threat before any animation shows it
+                if e.vel:Dot(u) > 30 and dist < range * 0.8 and now - e.cool > 0.35 and look:Dot(u) > 0.3 then
+                    e.cool = now
+                    Threat(e, flat, look)
+                end
+                -- a hand or foot snapping toward you is a strike, whatever the animation is called
+                if dist < 9 then
+                    for _, l in ipairs(e.limbs) do
+                        local lp = l.part.Position
+                        if l.last then
+                            local rel = (lp - l.last) / dt - e.vel
+                            local sp = rel.Magnitude
+                            local toward = myPos - lp
+                            if sp > senseSpeed and now - e.limbCool > 0.3 and toward.Magnitude < 7
+                                and rel:Dot(toward.Unit) > sp * 0.5 then
+                                e.limbCool = now
+                                Threat(e, flat, look)
+                            end
+                        end
+                        l.last = lp
+                    end
+                else
+                    for _, l in ipairs(e.limbs) do l.last = nil end
+                end
+            else
+                for _, l in ipairs(e.limbs) do l.last = nil end
+            end
+        end
+    end
+
+    -- while you attack, the slide is off (HOLD) or tiny (SLIDE)
+    local scale = 1
+    if blocked then
+        scale = PRESETS.attack[S.attackIdx][2]
+        if scale <= 0 then impulseVel = Vector3.zero end
+    end
+    field = (field + HitboxField(root, now)) * scale
+
+    totalVel = impulseVel + field
+    impulseVel = impulseVel * math.exp(-dt / TAU)
+    if totalVel.Magnitude > MAX_SPEED then totalVel = totalVel.Unit * MAX_SPEED end
+
+    local move = SafeMove(root, Vector3.new(totalVel.X, 0, totalVel.Z) * dt)
+    if move.Magnitude > 0.0005 then
+        root.CFrame = root.CFrame + move
+        Guard.lastPos, Guard.lastT = root.Position, now -- our own slide is authorized
+    end
+
+    -- after a blink: keep you turned to their back for a moment (never while you attack)
+    if FaceLock.e and now < FaceLock.untilT and not blocked and hum.MoveDirection.Magnitude < 0.1 then
+        local er = FaceLock.e.root
+        if er and er.Parent then
+            local p = root.Position
+            local at = Vector3.new(er.Position.X, p.Y, er.Position.Z)
+            if (at - p).Magnitude > 0.5 then
+                local cf = CFrame.lookAt(p, at)
+                root.CFrame = cf
+                Guard.lastPos, Guard.lastCF, Guard.lastT = cf.Position, cf, now
+            end
+        end
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- LEAN + AURA (visual, local)
+-- ════════════════════════════════════════════════════════════════
+-- Lean is a REMOVABLE offset on top of whatever C0 the game has, never an absolute pose,
+-- so it can't overwrite the game's own joint work. Off by default.
+local Lean = {joints = {}, roll = 0, pitch = 0, applied = false}
+local IDENT = CFrame.new()
+function Lean.Restore()
+    for _, j in pairs(Lean.joints) do
+        pcall(function() j.m.C0 = j.m.C0 * j.off:Inverse() end)
+        j.off = IDENT
+    end
+    Lean.joints = {}
+    Lean.applied = false
+end
+function Lean.Bind(char)
+    Lean.Restore()
+    local waist = char:FindFirstChild("Waist", true)
+    local neck = char:FindFirstChild("Neck", true)
+    -- R15 only: its joints have plain axes, so a roll/pitch looks right
+    if waist and waist:IsA("Motor6D") and neck and neck:IsA("Motor6D") then
+        Lean.joints.waist = {m = waist, off = IDENT}
+        Lean.joints.neck = {m = neck, off = IDENT}
+    end
+end
+table.insert(ENV.ApexUI3Loops, {Disconnect = Lean.Restore})
+
+local Aura = {h = nil}
+function Aura.Remove()
+    if Aura.h then pcall(function() Aura.h:Destroy() end); Aura.h = nil end
+end
+function Aura.Bind(char)
+    Aura.Remove()
+    local h = Instance.new("Highlight")
+    h.FillColor = SILVER
+    h.OutlineColor = Color3.fromRGB(255, 255, 255)
+    h.FillTransparency = 0.85
+    h.OutlineTransparency = 0.35
+    h.DepthMode = Enum.HighlightDepthMode.Occluded
+    h.Adornee = char
+    h.Parent = char
+    Aura.h = h
+end
+table.insert(ENV.ApexUI3Loops, {Disconnect = Aura.Remove})
+
+local function VisualStep(dt)
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local active = S.on and root ~= nil
+    local a = 1 - math.exp(-dt * 14)
+    local tRoll, tPitch = 0, 0
+    if active and S.lean then
+        local lv = root.CFrame:VectorToObjectSpace(totalVel)
+        tRoll = math.clamp(-lv.X * 0.012, -0.45, 0.45)
+        tPitch = math.clamp(lv.Z * 0.008, -0.3, 0.3)
+    end
+    Lean.roll = Lean.roll + (tRoll - Lean.roll) * a
+    Lean.pitch = Lean.pitch + (tPitch - Lean.pitch) * a
+    local j = Lean.joints
+    if j.waist and j.waist.m.Parent and j.neck and j.neck.m.Parent then
+        local moving = S.lean or math.abs(Lean.roll) > 0.002 or math.abs(Lean.pitch) > 0.002
+        if moving then
+            local wOff = CFrame.Angles(Lean.pitch, 0, Lean.roll)
+            local nOff = CFrame.Angles(0, 0, -Lean.roll * 0.7)
+            j.waist.m.C0 = j.waist.m.C0 * j.waist.off:Inverse() * wOff
+            j.neck.m.C0 = j.neck.m.C0 * j.neck.off:Inverse() * nOff
+            j.waist.off, j.neck.off = wOff, nOff
+            Lean.applied = true
+        elseif Lean.applied then
+            -- back at rest: take our offset off exactly once, then leave the joints alone
+            j.waist.m.C0 = j.waist.m.C0 * j.waist.off:Inverse()
+            j.neck.m.C0 = j.neck.m.C0 * j.neck.off:Inverse()
+            j.waist.off, j.neck.off = IDENT, IDENT
+            Lean.applied = false
+        end
+    end
+    if Aura.h then
+        Aura.h.Enabled = active and S.aura
+        local flare = (os.clock() < alertUntil) and 0.25 or 0
+        Aura.h.FillTransparency = 0.82 + 0.08 * math.sin(os.clock() * 3) - flare
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- YOUR OWN ATTACKS (so nothing ever teleports you while you swing)
+-- ════════════════════════════════════════════════════════════════
+local pollT = 0
+local function PollMyAttack(now)
+    if now - pollT < 0.066 then return end
+    pollT = now
+    local hum = GetHum()
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if not animator then return end
+    for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
+        if IsAttackTrack(tr) then
+            local len = (tr.Length > 0) and tr.Length or 0.5
+            MarkAttack(math.min(math.max(0.15, len - tr.TimePosition), 0.7) + 0.1)
+        end
+    end
+end
+
+local ACTION_KEYS = {}
+for _, k in ipairs({Enum.KeyCode.F, Enum.KeyCode.Q, Enum.KeyCode.E, Enum.KeyCode.R, Enum.KeyCode.T,
+    Enum.KeyCode.G, Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V,
+    Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three, Enum.KeyCode.Four}) do
+    ACTION_KEYS[k] = true
+end
+local heldPollT = 0
+local function PollHeld(now)
+    if now - heldPollT < 0.05 then return end
+    heldPollT = now
+    if UserInputService:GetFocusedTextBox() then heldAction = false; return end
+    local held = false
+    if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+        held = true
+        m1Until = now + 0.25
+    else
+        for _, inp in ipairs(UserInputService:GetKeysPressed()) do
+            if ACTION_KEYS[inp.KeyCode] then held = true; break end
+        end
+    end
+    heldAction = held
+end
+
+local CharConns = {}
+local function HookTool(tool)
+    CharConns[#CharConns + 1] = tool.Activated:Connect(function() MarkAttack(0.5) end)
+end
+
+local function BindChar(char)
+    for _, c in ipairs(CharConns) do pcall(function() c:Disconnect() end) end
+    CharConns = {}
+    RayParams.FilterDescendantsInstances = {char}
+    impulseVel, totalVel = Vector3.zero, Vector3.zero
+    FaceLock.e = nil
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    local hum = char:WaitForChild("Humanoid", 10)
+    if not (root and hum) then return end
+    Lean.Bind(char)
+    Aura.Bind(char)
+    Guard.lastPos, Guard.lastCF, Guard.lastT = root.Position, root.CFrame, os.clock()
+    Guard.framePos, Guard.frameT = root.Position, os.clock()
+
+    CharConns[#CharConns + 1] = root:GetPropertyChangedSignal("CFrame"):Connect(function() GuardTick(false) end)
+    -- a body mover / constraint appearing on you means the GAME is moving you (a dash, a skill,
+    -- knockback): stay out of the way for a moment — never destroy or fight it
+    CharConns[#CharConns + 1] = char.DescendantAdded:Connect(function(d)
+        if FORCE_CLASSES[d.ClassName] then gameMoveUntil = os.clock() + 0.6 end
+    end)
+    local animator = hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 3)
+    if animator then
+        CharConns[#CharConns + 1] = animator.AnimationPlayed:Connect(function(track)
+            if IsAttackTrack(track) then
+                local len = (track.Length > 0) and track.Length or 0.5
+                MarkAttack(math.clamp(len, 0.3, 0.7) + 0.15)
+            end
+        end)
+    end
+    -- tools: a click on one counts as you attacking (this is how mobile swings show up)
+    for _, ch in ipairs(char:GetChildren()) do
+        if ch:IsA("Tool") then HookTool(ch) end
+    end
+    CharConns[#CharConns + 1] = char.ChildAdded:Connect(function(ch)
+        if ch:IsA("Tool") then HookTool(ch) end
+    end)
+
+    -- BACKUP: if you do get hit (and weren't swinging), counter-blink behind the nearest close enemy
+    local lastHealth = hum.Health
+    CharConns[#CharConns + 1] = hum.HealthChanged:Connect(function(h)
+        local dropped = h < lastHealth
+        lastHealth = h
+        if not (dropped and S.on and S.blink and S.hitBackup) or AttackBlocked(os.clock()) then return end
+        local r = char:FindFirstChild("HumanoidRootPart")
+        if not r then return end
+        local best, bd
+        for model, e in pairs(Enemies) do
+            if e.root and e.root.Parent and e.hum.Health > 0 and IsEnemy(model) then
+                local d = (e.root.Position - r.Position).Magnitude
+                if d < 14 and (not bd or d < bd) then best, bd = e, d end
+            end
+        end
+        if best then alertUntil = os.clock() + 0.25; BlinkBehind(best) end
+    end)
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- GUI — compact, draggable, three small pages, collapses to an icon
+-- ════════════════════════════════════════════════════════════════
+local IsTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local BG, BTN, DIM = Color3.fromRGB(10, 12, 20), Color3.fromRGB(30, 36, 56), Color3.fromRGB(110, 116, 140)
+
+local function Corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 6); c.Parent = p end
+local function Stroke(p, col, th, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col; s.Thickness = th or 1.25; s.Transparency = tr or 0.4
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p
+    return s
+end
+local function Btn(parent, text, size, pos)
+    local b = Instance.new("TextButton")
+    b.Text = text; b.Size = size; b.Position = pos or UDim2.new(0, 0, 0, 0)
+    b.BackgroundColor3 = BTN; b.BackgroundTransparency = 0.25; b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold; b.TextSize = 10; b.TextColor3 = SILVER
+    b.TextStrokeTransparency = 0.65; b.AutoButtonColor = false; b.ZIndex = 12
+    b.Parent = parent
+    Corner(b); Stroke(b, SILVER, 1.25, 0.6)
+    return b
+end
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "ApexUltraInstinct3"
+Gui.ResetOnSpawn = false
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.IgnoreGuiInset = true
+Gui.DisplayOrder = 97
+Gui.Parent = PGui
+ENV.ApexUI3Gui = Gui
+
+local function ScreenSize()
+    local s = Gui.AbsoluteSize
+    if s.X < 50 or s.Y < 50 then
+        local cam = Workspace.CurrentCamera
+        if cam then s = cam.ViewportSize end
+    end
+    return s
+end
+
+local PANEL_W = math.clamp(math.floor(ScreenSize().X * 0.30), 214, 252)
+local INNER = PANEL_W - 16
+local CELL2 = math.floor((INNER - 4) / 2)
+local BTN_H = IsTouch and 34 or 30
+local PanelPos = Vector2.new(8, 64)
+local Expanded = true
+
+local Panel = Instance.new("Frame")
+Panel.AutomaticSize = Enum.AutomaticSize.Y
+Panel.Size = UDim2.new(0, PANEL_W, 0, 0)
+Panel.BackgroundColor3 = BG; Panel.BackgroundTransparency = 0.2; Panel.BorderSizePixel = 0
+Panel.Active = true; Panel.ZIndex = 10; Panel.Parent = Gui
+Corner(Panel, 10)
+local PanelStroke = Stroke(Panel, SILVER, 1.5, 0.35)
+local PL = Instance.new("UIListLayout"); PL.SortOrder = Enum.SortOrder.LayoutOrder; PL.Parent = Panel
+
+local Header = Instance.new("Frame")
+Header.BackgroundTransparency = 1; Header.Size = UDim2.new(1, 0, 0, 28)
+Header.Active = true; Header.LayoutOrder = 1; Header.ZIndex = 11; Header.Parent = Panel
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1; Title.Text = "ULTRA INSTINCT"; Title.TextColor3 = SILVER
+Title.Font = Enum.Font.GothamBold; Title.TextSize = 12; Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.TextStrokeTransparency = 0.65
+Title.Size = UDim2.new(1, -44, 1, 0); Title.Position = UDim2.new(0, 10, 0, 0); Title.ZIndex = 12; Title.Parent = Header
+local CollapseBtn = Btn(Header, "-", UDim2.new(0, 28, 0, 22), UDim2.new(1, -34, 0.5, -11))
+
+local Body = Instance.new("Frame")
+Body.BackgroundTransparency = 1; Body.AutomaticSize = Enum.AutomaticSize.Y
+Body.Size = UDim2.new(1, 0, 0, 0); Body.LayoutOrder = 2; Body.ZIndex = 11; Body.Parent = Panel
+local BL = Instance.new("UIListLayout"); BL.Padding = UDim.new(0, 4); BL.SortOrder = Enum.SortOrder.LayoutOrder
+BL.HorizontalAlignment = Enum.HorizontalAlignment.Center; BL.Parent = Body
+local BP = Instance.new("UIPadding")
+BP.PaddingTop = UDim.new(0, 4); BP.PaddingBottom = UDim.new(0, 8)
+BP.PaddingLeft = UDim.new(0, 8); BP.PaddingRight = UDim.new(0, 8); BP.Parent = Body
+
+local function PlainRow(order, height)
+    local f = Instance.new("Frame")
+    f.BackgroundTransparency = 1; f.Size = UDim2.new(1, 0, 0, height)
+    f.LayoutOrder = order; f.ZIndex = 12; f.Parent = Body
+    return f
+end
+
+-- top: the two switches that matter most
+local TopRow = PlainRow(1, BTN_H + 4)
+local MasterBtn = Btn(TopRow, "", UDim2.new(0, CELL2, 1, 0))
+local BlinkBtn = Btn(TopRow, "", UDim2.new(0, CELL2, 1, 0), UDim2.new(0, CELL2 + 4, 0, 0))
+MasterBtn.TextSize = 12; BlinkBtn.TextSize = 12
+
+-- tabs + pages
+local TabRow = PlainRow(2, 26)
+local TAB_W = math.floor((INNER - 8) / 3)
+local TabNames = {"DODGE", "LOOK", "GUARD"}
+local TabBtns = {}
+for i, name in ipairs(TabNames) do
+    TabBtns[i] = Btn(TabRow, name, UDim2.new(0, TAB_W, 1, 0), UDim2.new(0, (i - 1) * (TAB_W + 4), 0, 0))
+end
+local Content = PlainRow(3, BTN_H * 3 + 8)
+local Pages = {}
+for i = 1, 3 do
+    local pg = Instance.new("Frame")
+    pg.BackgroundTransparency = 1; pg.Size = UDim2.new(1, 0, 1, 0); pg.ZIndex = 12
+    pg.Visible = (i == 1); pg.Parent = Content
+    local gl = Instance.new("UIGridLayout")
+    gl.CellSize = UDim2.new(0, CELL2, 0, BTN_H); gl.CellPadding = UDim2.new(0, 4, 0, 4)
+    gl.SortOrder = Enum.SortOrder.LayoutOrder; gl.Parent = pg
+    Pages[i] = pg
+end
+
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.BackgroundTransparency = 1; StatusLbl.Text = ""; StatusLbl.TextColor3 = DIM
+StatusLbl.Font = Enum.Font.Gotham; StatusLbl.TextSize = 10; StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatusLbl.TextYAlignment = Enum.TextYAlignment.Top; StatusLbl.TextWrapped = true
+StatusLbl.Size = UDim2.new(1, 0, 0, 28); StatusLbl.LayoutOrder = 4; StatusLbl.ZIndex = 12; StatusLbl.Parent = Body
+
+local RefreshUI
+local Opts = {}
+local function Cycle(key, list) S[key] = S[key] % #list + 1 end
+local function Flip(key) S[key] = not S[key] end
+local function OnOff(v) return v and "ON" or "OFF" end
+local function AddOpt(page, order, id, labelFn, onClick, litFn)
+    local b = Btn(Pages[page], "", UDim2.new(0, CELL2, 0, BTN_H))
+    b.LayoutOrder = order
+    b.MouseButton1Click:Connect(function() onClick(); RefreshUI() end)
+    Opts[id] = {btn = b, label = labelFn, lit = litFn}
+end
+
+-- page 1: how it dodges
+AddOpt(1, 1, "behind", function() return "BEHIND " .. PRESETS.behindDist[S.behindIdx][1] end, function() Cycle("behindIdx", PRESETS.behindDist) end)
+AddOpt(1, 2, "cd", function() return "BLINK CD " .. PRESETS.blinkCd[S.cdIdx][1] end, function() Cycle("cdIdx", PRESETS.blinkCd) end)
+AddOpt(1, 3, "dodge", function() return "SLIDE " .. PRESETS.dodge[S.dodgeIdx][1] end, function() Cycle("dodgeIdx", PRESETS.dodge) end)
+AddOpt(1, 4, "range", function() return "RANGE " .. PRESETS.range[S.rangeIdx][1] end, function() Cycle("rangeIdx", PRESETS.range) end)
+AddOpt(1, 5, "sense", function() return "SENSE " .. PRESETS.sense[S.senseIdx][1] end, function() Cycle("senseIdx", PRESETS.sense) end)
+AddOpt(1, 6, "attack", function() return "I ATTACK: " .. PRESETS.attack[S.attackIdx][1] end, function() Cycle("attackIdx", PRESETS.attack) end)
+-- page 2: how it looks
+AddOpt(2, 1, "afterimage", function() return "AFTERIMAGE " .. OnOff(S.afterimage) end, function() Flip("afterimage") end, function() return S.afterimage end)
+AddOpt(2, 2, "aura", function() return "AURA " .. OnOff(S.aura) end, function() Flip("aura") end, function() return S.aura end)
+AddOpt(2, 3, "fov", function() return "CAM PUNCH " .. OnOff(S.fov) end, function() Flip("fov") end, function() return S.fov end)
+AddOpt(2, 4, "lean", function() return "LEAN " .. OnOff(S.lean) end, function() Flip("lean") end, function() return S.lean end)
+-- page 3: protection + who counts
+AddOpt(3, 1, "antiSnap", function() return "ANTI-SNAP " .. OnOff(S.antiSnap) end, function() Flip("antiSnap") end, function() return S.antiSnap end)
+AddOpt(3, 2, "lungeBlock", function() return "M1 LUNGE " .. OnOff(S.lungeBlock) end, function() Flip("lungeBlock") end, function() return S.lungeBlock end)
+AddOpt(3, 3, "backup", function() return "HIT BACKUP " .. OnOff(S.hitBackup) end, function() Flip("hitBackup") end, function() return S.hitBackup end)
+AddOpt(3, 4, "team", function() return "TEAM SAFE " .. OnOff(S.team) end, function() Flip("team") end, function() return S.team end)
+AddOpt(3, 5, "npcs", function() return "NPCS " .. OnOff(S.npcs) end, function() Flip("npcs") end, function() return S.npcs end)
+
+local CurrentPage = 1
+local function ShowPage(i)
+    CurrentPage = i
+    for k, pg in ipairs(Pages) do pg.Visible = (k == i) end
+    for k, tb in ipairs(TabBtns) do
+        tb.TextColor3 = (k == i) and Color3.new(1, 1, 1) or DIM
+        tb.BackgroundColor3 = (k == i) and Color3.fromRGB(60, 92, 160) or BTN
+    end
+end
+for i, tb in ipairs(TabBtns) do tb.MouseButton1Click:Connect(function() ShowPage(i) end) end
+
+RefreshUI = function()
+    MasterBtn.Text = "UI: " .. OnOff(S.on)
+    MasterBtn.TextColor3 = S.on and Color3.new(1, 1, 1) or DIM
+    MasterBtn.BackgroundColor3 = S.on and Color3.fromRGB(60, 92, 160) or BTN
+    BlinkBtn.Text = "BEHIND: " .. OnOff(S.blink)
+    BlinkBtn.TextColor3 = S.blink and Color3.new(1, 1, 1) or DIM
+    BlinkBtn.BackgroundColor3 = S.blink and Color3.fromRGB(110, 70, 170) or BTN
+    PanelStroke.Color = S.on and SILVER or DIM
+    for _, o in pairs(Opts) do
+        o.btn.Text = o.label()
+        o.btn.TextColor3 = (not o.lit or o.lit()) and SILVER or DIM
+    end
+end
+MasterBtn.MouseButton1Click:Connect(function() S.on = not S.on; RefreshUI() end)
+BlinkBtn.MouseButton1Click:Connect(function() S.blink = not S.blink; RefreshUI() end)
+
+-- collapsed icon
+local Icon = Instance.new("TextButton")
+Icon.Size = UDim2.new(0, 40, 0, 40); Icon.BackgroundColor3 = BG; Icon.BackgroundTransparency = 0.2
+Icon.BorderSizePixel = 0; Icon.Text = "UI"; Icon.Font = Enum.Font.GothamBold; Icon.TextSize = 13
+Icon.TextColor3 = SILVER; Icon.AutoButtonColor = false; Icon.Visible = false; Icon.ZIndex = 10; Icon.Parent = Gui
+Corner(Icon, 20); Stroke(Icon, SILVER, 1.75, 0.2)
+
+local function ClampPos(pos, size)
+    local ss = ScreenSize()
+    return Vector2.new(
+        math.floor(math.clamp(pos.X, 4, math.max(4, ss.X - size.X - 4)) + 0.5),
+        math.floor(math.clamp(pos.Y, 4, math.max(4, ss.Y - size.Y - 4)) + 0.5))
+end
+local function ApplyPos()
+    local size = Expanded and Panel.AbsoluteSize or Vector2.new(40, 40)
+    if size.X < 10 then size = Vector2.new(PANEL_W, 250) end
+    PanelPos = ClampPos(PanelPos, size)
+    Panel.Position = UDim2.fromOffset(PanelPos.X, PanelPos.Y)
+    Icon.Position = UDim2.fromOffset(PanelPos.X, PanelPos.Y)
+end
+Track(Panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(ApplyPos))
+local function SetExpanded(v)
+    Expanded = v
+    Panel.Visible = v
+    Icon.Visible = not v
+    ApplyPos()
+end
+CollapseBtn.MouseButton1Click:Connect(function() SetExpanded(false) end)
+
+local function MakeDraggable(handle, onTap)
+    local dragging, moved, startInput, startMouse, startPos = false, false, nil, nil, nil
+    handle.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        dragging, moved, startInput = true, false, inp
+        startMouse = Vector2.new(inp.Position.X, inp.Position.Y)
+        startPos = PanelPos
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End and startInput == inp and dragging then
+                dragging = false
+                if not moved and onTap then onTap() end
+            end
+        end)
+    end)
+    Track(UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == startInput then
+            local d = Vector2.new(inp.Position.X, inp.Position.Y) - startMouse
+            if not moved and d.Magnitude > 6 then moved = true end
+            if moved then PanelPos = startPos + d; ApplyPos() end
+        end
+    end))
+end
+MakeDraggable(Header, nil)
+MakeDraggable(Icon, function() SetExpanded(true) end)
+
+-- ════════════════════════════════════════════════════════════════
+-- WIRING
+-- ════════════════════════════════════════════════════════════════
+Track(RunService.Stepped:Connect(function(_, dt) Step(dt) end))
+Track(RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+    PollMyAttack(now)
+    PollHeld(now)
+    GuardTick(true)
+end))
+Track(RunService.RenderStepped:Connect(function(dt)
+    GuardTick(false)
+    VisualStep(math.min(dt, 0.1))
+end))
+
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+        MarkAttack(0.5); m1Until = os.clock() + 0.3 -- you're swinging
+    elseif inp.KeyCode == Enum.KeyCode.U then
+        S.on = not S.on; RefreshUI()
+    elseif inp.KeyCode == Enum.KeyCode.B then
+        S.blink = not S.blink; RefreshUI()
+    elseif inp.KeyCode == Enum.KeyCode.Y then
+        SetExpanded(not Expanded)
+    end
+end))
+
+Track(Workspace.DescendantAdded:Connect(function(inst)
+    if inst:IsA("Humanoid") then
+        local m = inst.Parent
+        if m and m:IsA("Model") then task.defer(Register, m) end
+    elseif inst:IsA("BasePart") and S.on then
+        MaybeHitbox(inst)
+    end
+end))
+Track(LP.CharacterAdded:Connect(function(char) task.spawn(BindChar, char) end))
+
+local statLoop = task.spawn(function()
+    while true do
+        task.wait(0.3)
+        local watching = 0
+        for _ in pairs(Enemies) do watching = watching + 1 end
+        local state = AttackBlocked(os.clock()) and "you're acting: hands off" or "ready"
+        StatusLbl.Text = ("blinks %d  ·  slides %d  ·  snaps blocked %d\n%s  ·  watching %d")
+            :format(S.blinks, S.dodges, S.snaps, state, watching)
+    end
+end)
+table.insert(ENV.ApexUI3Loops, {Disconnect = function() task.cancel(statLoop) end})
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+for _, d in ipairs(Workspace:GetDescendants()) do
+    if d:IsA("Humanoid") and d.Parent and d.Parent:IsA("Model") then Register(d.Parent) end
+end
+if LP.Character then task.spawn(BindChar, LP.Character) end
+ShowPage(1)
+RefreshUI()
+SetExpanded(true)
+task.defer(ApplyPos)
+
+print("[ApexUltraInstinct v4] Loaded. Battlegrounds-safe: dashes, skills and held buttons are never touched.")
+print("  When something is about to hit you: afterimage + blink behind them. U = on/off, B = behind-blink on/off, Y = panel.")
