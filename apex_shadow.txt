@@ -1,0 +1,577 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║   APEX SHADOW  ·  v2   (your Shadow Follow + Hitbox + Void Floor)    ║
+╠══════════════════════════════════════════════════════════════╣
+║   WHY YOU COULDN'T HIT MOVING PLAYERS                                   ║
+║   The old follow put you behind where the target is SEEN, then zeroed     ║
+║   your velocity every frame. What you see of another player is old —       ║
+║   your ping + their ping + interpolation — so by the time your position       ║
+║   reached the server they were several studs ahead of where you stood, and      ║
+║   your zeroed velocity made your own position stutter. Fixes:                     ║
+║   • PREDICT: aims where they WILL be (their velocity x a lead from your ping),      ║
+║     and stands behind their MOVEMENT direction, not just where they face.             ║
+║   • Your velocity is matched to theirs, so the server sees you moving with them.        ║
+║   • Updates both before and after physics every frame.                                    ║
+║   • Default distance 3 studs (5 was often outside melee reach); shortens itself at walls.   ║
+║   • Target modes: NEAREST / LOW HP / LOCK, plus NEXT TARGET.                                 ║
+║                                                                                                ║
+║   HITBOX EXTEND still works the same (ALL parts or ROOT only), but the enlarged parts are        ║
+║   set non-colliding so giant boxes can't shove you around. It only changes what YOUR client        ║
+║   sees: games that decide hits on the server ignore it.                                              ║
+║   VOID FLOOR: same idea as before, with an on/off switch and an adjustable trigger height.             ║
+║                                                                                                          ║
+║   GUI: compact glass panel, drag by the title, [-] shrinks it to an icon. Hold + / - to repeat.           ║
+║   PC keys: J follow · K hitbox · Y panel.                                                                   ║
+║                                                                                                              ║
+║   Honest limits: prediction is an estimate, and the server still decides every hit. Teleporting to           ║
+║   a player every frame can be flagged by anti-cheat.                                                          ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace        = game:GetService("Workspace")
+local Teams            = game:GetService("Teams")
+
+local LP   = Players.LocalPlayer
+local PGui = LP:WaitForChild("PlayerGui")
+
+-- HOT-RELOAD GUARD
+if not getgenv then getgenv = function() return _G end end
+local ENV = getgenv()
+if ENV.ApexShadowGui then pcall(function() ENV.ApexShadowGui:Destroy() end) end
+if ENV.ApexShadowLoops then
+    for _, c in pairs(ENV.ApexShadowLoops) do pcall(function() c:Disconnect() end) end
+end
+ENV.ApexShadowLoops = {}
+local function Track(c) table.insert(ENV.ApexShadowLoops, c); return c end
+
+-- ════════════════════════════════════════════════════════════════
+-- SETTINGS + HELPERS
+-- ════════════════════════════════════════════════════════════════
+local MODES = {"NEAREST", "LOW HP", "LOCK"}
+local PREDS = {{"OFF", 0}, {"LOW", 0.5}, {"AUTO", 1}, {"HIGH", 1.5}}
+
+local S = ENV.ApexShadowSettings
+if type(S) ~= "table" then
+    S = {dist = 3, mode = 1, pred = 3, teamSafe = true, hitSize = 20, hitAll = true, voidOn = true, voidY = -100}
+    ENV.ApexShadowSettings = S
+end
+
+local function GetRoot(p)
+    local c = p and p.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function GetHum(p)
+    local c = p and p.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function Targetable(p)
+    if p == LP then return false end
+    local hum, root = GetHum(p), GetRoot(p)
+    if not (hum and root) or hum.Health <= 0 then return false end
+    -- team check only means something when the game really has 2+ teams
+    if S.teamSafe and p.Team ~= nil and p.Team == LP.Team and #Teams:GetTeams() > 1 then return false end
+    return true
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- SHADOW FOLLOW
+-- ════════════════════════════════════════════════════════════════
+local Follow = {on = false, target = nil, lastPos = nil, lastT = nil, vel = Vector3.zero, scanT = 0, leadMs = 0}
+local RayParams = RaycastParams.new()
+RayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+-- every targetable player, nearest first
+local function SortedTargets()
+    local my = GetRoot(LP)
+    local list = {}
+    if not my then return list end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if Targetable(p) then
+            list[#list + 1] = {p = p, d = (GetRoot(p).Position - my.Position).Magnitude}
+        end
+    end
+    table.sort(list, function(a, b) return a.d < b.d end)
+    local out = {}
+    for i, e in ipairs(list) do out[i] = e.p end
+    return out
+end
+
+local function PickTarget()
+    local list = SortedTargets()
+    if MODES[S.mode] == "LOW HP" then
+        local best, bh
+        for _, p in ipairs(list) do
+            local h = GetHum(p).Health
+            if not bh or h < bh then best, bh = p, h end
+        end
+        return best
+    end
+    return list[1]
+end
+
+local function ResetMotion()
+    Follow.lastPos, Follow.lastT, Follow.vel = nil, nil, Vector3.zero
+end
+local function ToggleFollow()
+    Follow.on = not Follow.on
+    ResetMotion()
+    Follow.target = Follow.on and PickTarget() or nil
+end
+local function NextTarget()
+    local list = SortedTargets()
+    if #list == 0 then return end
+    local idx = 0
+    for i, p in ipairs(list) do
+        if p == Follow.target then idx = i end
+    end
+    Follow.target = list[idx % #list + 1]
+    ResetMotion()
+end
+
+-- how far ahead to aim: what you see of a player is old (your ping, theirs, interpolation)
+local function Lead()
+    local mult = PREDS[S.pred][2]
+    if mult <= 0 then return 0 end
+    local ok, ping = pcall(function() return LP:GetNetworkPing() end)
+    if not ok or type(ping) ~= "number" then ping = 0.08 end
+    return math.clamp(ping * 1.5 + 0.1, 0.08, 0.45) * mult
+end
+
+local function FollowStep()
+    if not Follow.on then return end
+    local my = GetRoot(LP)
+    if not my then return end
+    local t = Follow.target
+    local tr = t and Targetable(t) and GetRoot(t)
+    if not tr then
+        Follow.target = PickTarget()
+        ResetMotion()
+        return
+    end
+    local now = os.clock()
+
+    -- re-pick now and then (NEAREST / LOW HP), with hysteresis so it doesn't flip-flop
+    if MODES[S.mode] ~= "LOCK" and now - Follow.scanT > 1 then
+        Follow.scanT = now
+        local cand = PickTarget()
+        if cand and cand ~= t then
+            local cr = GetRoot(cand)
+            local better
+            if MODES[S.mode] == "LOW HP" then
+                better = GetHum(cand).Health < GetHum(t).Health - 5
+            else
+                better = (cr.Position - my.Position).Magnitude + 6 < (tr.Position - my.Position).Magnitude
+            end
+            if better then Follow.target = cand; ResetMotion(); return end
+        end
+    end
+
+    -- their velocity, estimated from position changes (once per frame, however many times we're called)
+    local pos = tr.Position
+    if Follow.lastT == nil then
+        Follow.lastPos, Follow.lastT = pos, now
+    elseif now - Follow.lastT > 0.006 then
+        Follow.vel = Follow.vel:Lerp((pos - Follow.lastPos) / (now - Follow.lastT), 0.5)
+        Follow.lastPos, Follow.lastT = pos, now
+    end
+    local flatV = Vector3.new(Follow.vel.X, 0, Follow.vel.Z)
+    local look = Vector3.new(tr.CFrame.LookVector.X, 0, tr.CFrame.LookVector.Z)
+    if look.Magnitude < 0.05 then look = Vector3.new(0, 0, -1) end
+    -- behind their MOVEMENT direction when they're moving, behind where they face when they're not
+    local dir = (flatV.Magnitude > 3) and flatV.Unit or look.Unit
+    local lead = Lead()
+    Follow.leadMs = lead * 1000
+    local aim = pos + flatV * lead -- where they will be when our position reaches the server
+
+    local dist = S.dist
+    RayParams.FilterDescendantsInstances = {LP.Character, t.Character}
+    local hit = Workspace:Raycast(aim, -dir * (dist + 1), RayParams)
+    if hit then dist = math.max(1.5, hit.Distance - 1) end -- wall behind them: stand closer
+    local spot = aim - dir * dist
+    local y = pos.Y
+    my.CFrame = CFrame.lookAt(Vector3.new(spot.X, y, spot.Z), Vector3.new(aim.X, y, aim.Z))
+    -- move WITH them, so the server sees you travelling at their speed instead of stuttering
+    my.AssemblyLinearVelocity = Vector3.new(Follow.vel.X, 0, Follow.vel.Z)
+    my.AssemblyAngularVelocity = Vector3.zero
+end
+Track(RunService.Stepped:Connect(FollowStep))   -- before physics
+Track(RunService.Heartbeat:Connect(FollowStep)) -- after physics
+
+-- ════════════════════════════════════════════════════════════════
+-- HITBOX EXTEND (local view only)
+-- ════════════════════════════════════════════════════════════════
+local Hit = {on = false, orig = setmetatable({}, {__mode = "k"})}
+
+local function HitApplyPlayer(p)
+    local c = p.Character
+    if not c then return end
+    local sz = Vector3.new(S.hitSize, S.hitSize, S.hitSize)
+    for _, part in ipairs(c:GetDescendants()) do
+        if part:IsA("BasePart") and (S.hitAll or part.Name == "HumanoidRootPart") then
+            if not Hit.orig[part] then Hit.orig[part] = {size = part.Size, collide = part.CanCollide} end
+            if part.Size ~= sz then
+                -- non-colliding, so the big boxes can't shove you around
+                pcall(function() part.Size = sz; part.CanCollide = false end)
+            end
+        end
+    end
+end
+local function HitRestore()
+    for part, info in pairs(Hit.orig) do
+        if part.Parent then pcall(function() part.Size = info.size; part.CanCollide = info.collide end) end
+        Hit.orig[part] = nil
+    end
+end
+local function ToggleHitbox()
+    Hit.on = not Hit.on
+    if not Hit.on then HitRestore() end
+end
+
+local hitLoop = task.spawn(function()
+    while true do
+        task.wait(0.25)
+        if Hit.on then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP then HitApplyPlayer(p) end
+            end
+        end
+    end
+end)
+table.insert(ENV.ApexShadowLoops, {Disconnect = function() task.cancel(hitLoop) end})
+
+-- ════════════════════════════════════════════════════════════════
+-- VOID FLOOR
+-- ════════════════════════════════════════════════════════════════
+local Void = {part = nil}
+local function VoidStep()
+    local root = GetRoot(LP)
+    if not root then return end
+    local fy = S.voidY + 20
+    if S.voidOn and root.Position.Y < S.voidY and not (Void.part and Void.part.Parent) then
+        local p = Instance.new("Part")
+        p.Name = "VoidFloor"
+        p.Anchored = true
+        p.CanCollide = true
+        p.Size = Vector3.new(200, 2, 200)
+        p.Position = Vector3.new(root.Position.X, fy, root.Position.Z)
+        p.BrickColor = BrickColor.new("Dark stone grey")
+        p.Material = Enum.Material.SmoothPlastic
+        p.Transparency = 0.3
+        p.Parent = Workspace
+        Void.part = p
+        root.CFrame = CFrame.new(root.Position.X, fy + 3, root.Position.Z)
+        root.AssemblyLinearVelocity = Vector3.zero
+        task.delay(8, function()
+            if Void.part == p then p:Destroy(); Void.part = nil end
+        end)
+    end
+    if Void.part and Void.part.Parent then
+        Void.part.Position = Vector3.new(root.Position.X, fy, root.Position.Z)
+    end
+end
+Track(RunService.Heartbeat:Connect(VoidStep))
+
+table.insert(ENV.ApexShadowLoops, {Disconnect = function()
+    HitRestore()
+    if Void.part then pcall(function() Void.part:Destroy() end) end
+end})
+
+-- ════════════════════════════════════════════════════════════════
+-- GUI
+-- ════════════════════════════════════════════════════════════════
+local IsTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local BG, BTN, TXT, DIM = Color3.fromRGB(10, 12, 22), Color3.fromRGB(30, 36, 58), Color3.fromRGB(235, 240, 255), Color3.fromRGB(115, 122, 150)
+local BLUE, GREEN, RED, TEAL = Color3.fromRGB(95, 150, 255), Color3.fromRGB(80, 220, 120), Color3.fromRGB(235, 90, 95), Color3.fromRGB(90, 210, 170)
+
+local function Corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 6); c.Parent = p end
+local function Stroke(p, col, th, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col; s.Thickness = th or 1.25; s.Transparency = tr or 0.4
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p
+    return s
+end
+local function Btn(parent, text, size, pos)
+    local b = Instance.new("TextButton")
+    b.Text = text; b.Size = size; b.Position = pos or UDim2.new(0, 0, 0, 0)
+    b.BackgroundColor3 = BTN; b.BackgroundTransparency = 0.25; b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold; b.TextSize = 11; b.TextColor3 = TXT
+    b.TextStrokeTransparency = 0.65; b.AutoButtonColor = false; b.ZIndex = 12
+    b.Parent = parent
+    Corner(b); Stroke(b, TXT, 1.25, 0.65)
+    return b
+end
+local function Label(parent, text, size, pos, col, sz, left)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1; l.Text = text; l.TextColor3 = col or TXT
+    l.Font = Enum.Font.GothamBold; l.TextSize = sz or 11
+    l.TextXAlignment = left and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
+    l.TextStrokeTransparency = 0.65; l.Size = size; l.Position = pos or UDim2.new(0, 0, 0, 0)
+    l.ZIndex = 12; l.Parent = parent
+    return l
+end
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "ApexShadow"
+Gui.ResetOnSpawn = false
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.IgnoreGuiInset = true
+Gui.DisplayOrder = 96
+Gui.Parent = PGui
+ENV.ApexShadowGui = Gui
+
+local function ScreenSize()
+    local s = Gui.AbsoluteSize
+    if s.X < 50 or s.Y < 50 then
+        local cam = Workspace.CurrentCamera
+        if cam then s = cam.ViewportSize end
+    end
+    return s
+end
+
+local PANEL_W = math.clamp(math.floor(ScreenSize().X * 0.32), 224, 268)
+local INNER = PANEL_W - 16
+local HALF = math.floor((INNER - 4) / 2)
+local PanelPos = Vector2.new(8, 64)
+local Expanded = true
+
+local Panel = Instance.new("Frame")
+Panel.AutomaticSize = Enum.AutomaticSize.Y
+Panel.Size = UDim2.new(0, PANEL_W, 0, 0)
+Panel.BackgroundColor3 = BG; Panel.BackgroundTransparency = 0.2; Panel.BorderSizePixel = 0
+Panel.Active = true; Panel.ZIndex = 10; Panel.Parent = Gui
+Corner(Panel, 10)
+local PanelStroke = Stroke(Panel, BLUE, 1.5, 0.35)
+local PL = Instance.new("UIListLayout"); PL.SortOrder = Enum.SortOrder.LayoutOrder; PL.Parent = Panel
+
+local Header = Instance.new("Frame")
+Header.BackgroundTransparency = 1; Header.Size = UDim2.new(1, 0, 0, 28)
+Header.Active = true; Header.LayoutOrder = 1; Header.ZIndex = 11; Header.Parent = Panel
+local Title = Label(Header, "APEX SHADOW", UDim2.new(1, -44, 1, 0), UDim2.new(0, 10, 0, 0), BLUE, 12, true)
+local CollapseBtn = Btn(Header, "-", UDim2.new(0, 28, 0, 22), UDim2.new(1, -34, 0.5, -11))
+
+local Body = Instance.new("Frame")
+Body.BackgroundTransparency = 1; Body.AutomaticSize = Enum.AutomaticSize.Y
+Body.Size = UDim2.new(1, 0, 0, 0); Body.LayoutOrder = 2; Body.ZIndex = 11; Body.Parent = Panel
+local BL = Instance.new("UIListLayout"); BL.Padding = UDim.new(0, 4); BL.SortOrder = Enum.SortOrder.LayoutOrder; BL.Parent = Body
+local BP = Instance.new("UIPadding")
+BP.PaddingTop = UDim.new(0, 4); BP.PaddingBottom = UDim.new(0, 8)
+BP.PaddingLeft = UDim.new(0, 8); BP.PaddingRight = UDim.new(0, 8); BP.Parent = Body
+
+local order = 0
+local function Row(height)
+    order = order + 1
+    local f = Instance.new("Frame")
+    f.BackgroundTransparency = 1; f.Size = UDim2.new(1, 0, 0, height)
+    f.LayoutOrder = order; f.ZIndex = 12; f.Parent = Body
+    return f
+end
+local function Section(title, col)
+    local r = Row(20)
+    Label(r, title, UDim2.new(1, 0, 0, 18), nil, col, 11, true)
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(1, 0, 0, 1); line.Position = UDim2.new(0, 0, 1, -1)
+    line.BackgroundColor3 = col; line.BackgroundTransparency = 0.55; line.BorderSizePixel = 0
+    line.ZIndex = 12; line.Parent = r
+end
+
+local Refresh
+local Refreshers = {}
+local function AddButton(parent, size, pos, labelFn, litFn, onClick, accent)
+    local b = Btn(parent, "", size, pos)
+    b.MouseButton1Click:Connect(function() onClick(); Refresh() end)
+    Refreshers[#Refreshers + 1] = function()
+        b.Text = labelFn()
+        local lit = (not litFn) or litFn()
+        b.TextColor3 = lit and TXT or DIM
+        b.BackgroundColor3 = (lit and accent) and accent:Lerp(BG, 0.55) or BTN
+    end
+end
+
+-- press and hold to keep stepping
+local function HoldRepeat(btn, fn)
+    btn.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        local alive = true
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End then alive = false end
+        end)
+        fn()
+        task.spawn(function()
+            task.wait(0.4)
+            while alive do fn(); task.wait(0.07) end
+        end)
+    end)
+end
+local function Stepper(labelFn, onDec, onInc)
+    local r = Row(28)
+    local dec = Btn(r, "-", UDim2.new(0, 34, 1, 0), UDim2.new(0, 0, 0, 0))
+    local inc = Btn(r, "+", UDim2.new(0, 34, 1, 0), UDim2.new(1, -34, 0, 0))
+    dec.TextSize = 15; inc.TextSize = 15
+    local disp = Label(r, "", UDim2.new(1, -76, 1, 0), UDim2.new(0, 38, 0, 0), TXT, 11)
+    HoldRepeat(dec, function() onDec(); Refresh() end)
+    HoldRepeat(inc, function() onInc(); Refresh() end)
+    Refreshers[#Refreshers + 1] = function() disp.Text = labelFn() end
+end
+local function OnOff(v) return v and "ON" or "OFF" end
+
+-- ── SHADOW FOLLOW
+Section("SHADOW FOLLOW", GREEN)
+local r = Row(34)
+AddButton(r, UDim2.new(1, 0, 1, 0), nil,
+    function() return Follow.on and "FOLLOW: ON" or "FOLLOW: OFF" end,
+    function() return Follow.on end, ToggleFollow, GREEN)
+local StatusRow = Row(16)
+local StatusLbl = Label(StatusRow, "idle", UDim2.new(1, 0, 1, 0), nil, DIM, 10, true)
+r = Row(28)
+AddButton(r, UDim2.new(0, HALF, 1, 0), UDim2.new(0, 0, 0, 0),
+    function() return "TARGET: " .. MODES[S.mode] end, nil, function() S.mode = S.mode % #MODES + 1 end)
+AddButton(r, UDim2.new(0, HALF, 1, 0), UDim2.new(0, HALF + 4, 0, 0),
+    function() return "NEXT TARGET" end, nil, NextTarget)
+Stepper(function() return "BEHIND  " .. string.format("%.1f", S.dist) .. " st" end,
+    function() S.dist = math.max(1.5, S.dist - 0.5) end,
+    function() S.dist = math.min(40, S.dist + 0.5) end)
+r = Row(28)
+AddButton(r, UDim2.new(0, HALF, 1, 0), UDim2.new(0, 0, 0, 0),
+    function() return "PREDICT: " .. PREDS[S.pred][1] end, function() return S.pred > 1 end,
+    function() S.pred = S.pred % #PREDS + 1 end, GREEN)
+AddButton(r, UDim2.new(0, HALF, 1, 0), UDim2.new(0, HALF + 4, 0, 0),
+    function() return "TEAM SAFE: " .. OnOff(S.teamSafe) end, function() return S.teamSafe end,
+    function() S.teamSafe = not S.teamSafe end)
+
+-- ── HITBOX
+Section("HITBOX EXTEND", RED)
+r = Row(34)
+AddButton(r, UDim2.new(1, 0, 1, 0), nil,
+    function() return Hit.on and "HITBOX: ON" or "HITBOX: OFF" end,
+    function() return Hit.on end, ToggleHitbox, RED)
+Stepper(function() return "SIZE  " .. S.hitSize .. " st" end,
+    function() S.hitSize = math.max(5, S.hitSize - 5) end,
+    function() S.hitSize = math.min(200, S.hitSize + 5) end)
+r = Row(28)
+AddButton(r, UDim2.new(1, 0, 1, 0), nil,
+    function() return S.hitAll and "PARTS: ALL BODY PARTS" or "PARTS: ROOT ONLY" end, nil,
+    function()
+        S.hitAll = not S.hitAll
+        HitRestore() -- the loop re-applies with the new setting
+    end)
+
+-- ── VOID FLOOR
+Section("VOID FLOOR", TEAL)
+r = Row(28)
+AddButton(r, UDim2.new(1, 0, 1, 0), nil,
+    function() return "VOID FLOOR: " .. OnOff(S.voidOn) end,
+    function() return S.voidOn end, function() S.voidOn = not S.voidOn end, TEAL)
+Stepper(function() return "TRIGGER Y  " .. S.voidY end,
+    function() S.voidY = math.max(-2000, S.voidY - 50) end,
+    function() S.voidY = math.min(0, S.voidY + 50) end)
+local VoidRow = Row(16)
+local VoidLbl = Label(VoidRow, "floor: watching", UDim2.new(1, 0, 1, 0), nil, DIM, 10, true)
+
+Refresh = function()
+    for _, f in ipairs(Refreshers) do f() end
+    PanelStroke.Color = Follow.on and GREEN or (Hit.on and RED or BLUE)
+    Title.TextColor3 = PanelStroke.Color
+end
+
+-- live status lines
+local statLoop = task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if Follow.on and Follow.target then
+            local my, tr = GetRoot(LP), GetRoot(Follow.target)
+            local d = (my and tr) and (my.Position - tr.Position).Magnitude or 0
+            StatusLbl.Text = ("-> %s  ·  %.1f st  ·  lead %d ms"):format(Follow.target.Name, d, Follow.leadMs)
+            StatusLbl.TextColor3 = GREEN
+        elseif Follow.on then
+            StatusLbl.Text = "no players to follow"
+            StatusLbl.TextColor3 = Color3.fromRGB(220, 150, 80)
+        else
+            StatusLbl.Text = "idle"
+            StatusLbl.TextColor3 = DIM
+        end
+        VoidLbl.Text = (Void.part and Void.part.Parent) and "floor: ACTIVE" or "floor: watching"
+        VoidLbl.TextColor3 = (Void.part and Void.part.Parent) and TEAL or DIM
+    end
+end)
+table.insert(ENV.ApexShadowLoops, {Disconnect = function() task.cancel(statLoop) end})
+
+-- collapsed icon
+local Icon = Instance.new("TextButton")
+Icon.Size = UDim2.new(0, 40, 0, 40); Icon.BackgroundColor3 = BG; Icon.BackgroundTransparency = 0.2
+Icon.BorderSizePixel = 0; Icon.Text = "SH"; Icon.Font = Enum.Font.GothamBold; Icon.TextSize = 13
+Icon.TextColor3 = TXT; Icon.AutoButtonColor = false; Icon.Visible = false; Icon.ZIndex = 10; Icon.Parent = Gui
+Corner(Icon, 20); Stroke(Icon, BLUE, 1.75, 0.2)
+
+local function ClampPos(pos, size)
+    local ss = ScreenSize()
+    return Vector2.new(
+        math.floor(math.clamp(pos.X, 4, math.max(4, ss.X - size.X - 4)) + 0.5),
+        math.floor(math.clamp(pos.Y, 4, math.max(4, ss.Y - size.Y - 4)) + 0.5))
+end
+local function ApplyPos()
+    local size = Expanded and Panel.AbsoluteSize or Vector2.new(40, 40)
+    if size.X < 10 then size = Vector2.new(PANEL_W, 380) end
+    PanelPos = ClampPos(PanelPos, size)
+    Panel.Position = UDim2.fromOffset(PanelPos.X, PanelPos.Y)
+    Icon.Position = UDim2.fromOffset(PanelPos.X, PanelPos.Y)
+end
+Track(Panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(ApplyPos))
+local function SetExpanded(v)
+    Expanded = v
+    Panel.Visible = v
+    Icon.Visible = not v
+    ApplyPos()
+end
+CollapseBtn.MouseButton1Click:Connect(function() SetExpanded(false) end)
+
+local function MakeDraggable(handle, onTap)
+    local dragging, moved, startInput, startMouse, startPos = false, false, nil, nil, nil
+    handle.InputBegan:Connect(function(inp)
+        local ut = inp.UserInputType
+        if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+        dragging, moved, startInput = true, false, inp
+        startMouse = Vector2.new(inp.Position.X, inp.Position.Y)
+        startPos = PanelPos
+        inp.Changed:Connect(function()
+            if inp.UserInputState == Enum.UserInputState.End and startInput == inp and dragging then
+                dragging = false
+                if not moved and onTap then onTap() end
+            end
+        end)
+    end)
+    Track(UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement or inp == startInput then
+            local d = Vector2.new(inp.Position.X, inp.Position.Y) - startMouse
+            if not moved and d.Magnitude > 6 then moved = true end
+            if moved then PanelPos = startPos + d; ApplyPos() end
+        end
+    end))
+end
+MakeDraggable(Header, nil)
+MakeDraggable(Icon, function() SetExpanded(true) end)
+
+Track(UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    local k = inp.KeyCode
+    if k == Enum.KeyCode.J then
+        ToggleFollow(); Refresh()
+    elseif k == Enum.KeyCode.K then
+        ToggleHitbox(); Refresh()
+    elseif k == Enum.KeyCode.Y then
+        SetExpanded(not Expanded)
+    end
+end))
+
+-- ════════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════════
+Refresh()
+SetExpanded(true)
+task.defer(ApplyPos)
+
+print("[ApexShadow v2] Loaded. Follow now predicts movement and matches velocity. J follow · K hitbox · Y panel.")
